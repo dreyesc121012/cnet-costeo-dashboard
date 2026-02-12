@@ -89,10 +89,7 @@ def load_real_master(path: str) -> pd.DataFrame:
     df.columns = headers
     df = df.reset_index(drop=True)
 
-    # Limpieza nombres
-    df.columns = [str(c).strip() for c in df.columns]
-
-    # 🔥 FIX DEFINITIVO PARA ERROR ARROW
+    # 🔥 SOLUCIÓN DEL ERROR ARROW (muy importante)
     for col in df.columns:
         if df[col].dtype == "object":
             df[col] = df[col].astype(str)
