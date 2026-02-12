@@ -3,6 +3,12 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
+from io import BytesIO
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
+from datetime import datetime
+
 EXCEL_PATH = "Master January 2026.xlsx"
 SHEET_REAL = "Real Master"
 SHEET_FIXED = "Gasto Fijo"
@@ -54,7 +60,73 @@ def load_real_master(path: str):
     df.columns = [str(c).strip() for c in df.columns]
 
     return df
+def build_pdf_report(
+    income, cost, gross, fixed_total, net, mgmt_fee_total, royalty_total, new_total,
+    p_cost, p_gross, p_fixed, p_net, p_mgmt, p_roy, p_new,
+    fig_waterfall=None, fig_gauge=None
+):
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
 
+    y = height - 50
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(40, y, "CNET Costeo & Neto - Executive Summary")
+    y -= 18
+    c.setFont("Helvetica", 9)
+    c.drawString(40, y, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    y -= 25
+
+    # Tabla KPI
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(40, y, "KPIs")
+    y -= 14
+
+    rows = [
+        ("Ingresos", income, 1.0),
+        ("Costos", cost, p_cost),
+        ("Gross", gross, p_gross),
+        ("Gastos fijos", fixed_total, p_fixed),
+        ("Neto", net, p_net),
+        ("Management Fee", mgmt_fee_total, p_mgmt),
+        ("Royalty 5%", royalty_total, p_roy),
+        ("Nuevo Total", new_total, p_new),
+    ]
+
+    c.setFont("Helvetica", 10)
+    for label, val, pct in rows:
+        c.drawString(40, y, label)
+        c.drawRightString(360, y, f"${val:,.2f}")
+        c.drawRightString(520, y, f"{pct:.1%}")
+        y -= 14
+
+    y -= 10
+
+    # Imágenes (si kaleido está instalado)
+    def add_plotly_image(fig, title, y_top):
+        if fig is None:
+            return y_top
+        try:
+            img_bytes = fig.to_image(format="png")  # requiere kaleido
+            img = ImageReader(BytesIO(img_bytes))
+            c.setFont("Helvetica-Bold", 11)
+            c.drawString(40, y_top, title)
+            y_top -= 10
+            c.drawImage(img, 40, y_top - 220, width=520, height=220, preserveAspectRatio=True, mask='auto')
+            return y_top - 235
+        except Exception:
+            # Si falla, simplemente no mete la imagen
+            c.setFont("Helvetica", 9)
+            c.drawString(40, y_top, f"{title} (no se pudo exportar la imagen)")
+            return y_top - 15
+
+    y = add_plotly_image(fig_gauge, "Gauge - Margen Final", y)
+    y = add_plotly_image(fig_waterfall, "Cascada - Ingresos → Costos → Fijos → Fees → Total", y)
+
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf.getvalue()
 @st.cache_data(ttl=60)
 def load_fixed_expenses_total(path: str) -> float:
     fx = pd.read_excel(path, sheet_name=SHEET_FIXED, header=None)
@@ -236,7 +308,35 @@ k5.metric("Neto (Gross - Fijos)", f"${net:,.2f}", f"{p_net*100:,.2f}%")
 k6.metric("Total Management Fee", f"${mgmt_fee_total:,.2f}", f"{p_mgmt*100:,.2f}%")
 k7.metric("Royalty CNET Group Inc 5%", f"${royalty_total:,.2f}", f"{p_roy*100:,.2f}%")
 k8.metric("Nuevo Total", f"${new_total:,.2f}", f"{p_new*100:,.2f}%")
+st.divider()
+st.subheader("📄 Export Executive Report")
 
+pdf_bytes = build_pdf_report(
+    income=income, 
+    cost=cost, 
+    gross=gross, 
+    fixed_total=fixed_total, 
+    net=net,
+    mgmt_fee_total=mgmt_fee_total, 
+    royalty_total=royalty_total, 
+    new_total=new_total,
+    p_cost=p_cost, 
+    p_gross=p_gross, 
+    p_fixed=p_fixed, 
+    p_net=p_net, 
+    p_mgmt=p_mgmt, 
+    p_roy=p_roy, 
+    p_new=p_new,
+    fig_waterfall=fig,        # ⚠️ usa aquí el nombre real de tu figura
+    fig_gauge=fig_gauge       # ⚠️ usa aquí tu gauge
+)
+
+st.download_button(
+    "⬇️ Descargar PDF Ejecutivo",
+    data=pdf_bytes,
+    file_name="CNET_Executive_Report.pdf",
+    mime="application/pdf"
+)
 # Waterfall
 fig = go.Figure(go.Waterfall(
     orientation="v",
