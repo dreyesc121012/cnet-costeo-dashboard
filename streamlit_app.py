@@ -172,5 +172,6 @@ summary["% sobre Ingresos"] = summary["% sobre Ingresos"].map(lambda x: f"{x*100
 st.subheader("Resumen")
 st.dataframe(summary, use_container_width=True)
 
+
 with st.expander("Detalle Real Master"):
     st.dataframe(df, use_container_width=True)
