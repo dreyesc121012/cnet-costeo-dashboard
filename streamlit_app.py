@@ -78,26 +78,25 @@ def find_col(df, name):
     return None
 
 
-@st.cache_data(ttl=60)
+   @st.cache_data(ttl=60)
 def load_real_master(path: str) -> pd.DataFrame:
     raw = pd.read_excel(path, sheet_name=SHEET_REAL, header=None)
 
-    # Headers reales en fila 7 (index 6)
     header_idx = 6
     headers = make_unique_columns(raw.iloc[header_idx].tolist())
 
-    df = raw.iloc[header_idx + 1 :].copy()
+    df = raw.iloc[header_idx + 1:].copy()
     df.columns = headers
     df = df.reset_index(drop=True)
 
-    # Limpieza final
+    # Limpieza nombres
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Evitar errores de Arrow (pyarrow)
-for c in df.columns:
-    if df[c].dtype == "object":
-        df[c] = df[c].astype(str)
-        
+    # 🔥 FIX DEFINITIVO PARA ERROR ARROW
+    for col in df.columns:
+        if df[col].dtype == "object":
+            df[col] = df[col].astype(str)
+
     return df
 
 
