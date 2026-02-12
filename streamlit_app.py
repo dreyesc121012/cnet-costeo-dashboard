@@ -92,6 +92,12 @@ def load_real_master(path: str) -> pd.DataFrame:
 
     # Limpieza final
     df.columns = [str(c).strip() for c in df.columns]
+
+    # Evitar errores de Arrow (pyarrow)
+for c in df.columns:
+    if df[c].dtype == "object":
+        df[c] = df[c].astype(str)
+        
     return df
 
 
@@ -417,4 +423,11 @@ st.subheader("Resumen")
 st.dataframe(summary, use_container_width=True)
 
 with st.expander("Detalle Real Master"):
-    st.dataframe(df, use_container_width=True)
+    df_show = df.copy()
+
+    # Fix para Arrow: forzar columnas problemáticas a texto
+    for col in ["Building ID", "BuildingID", "Building Id"]:
+        if col in df_show.columns:
+            df_show[col] = df_show[col].astype(str)
+
+    st.dataframe(df_show, use_container_width=True)
