@@ -422,11 +422,4 @@ st.subheader("Resumen")
 st.dataframe(summary, use_container_width=True)
 
 with st.expander("Detalle Real Master"):
-    df_show = df.copy()
-
-    # Fix para Arrow: forzar columnas problemáticas a texto
-    for col in ["Building ID", "BuildingID", "Building Id"]:
-        if col in df_show.columns:
-            df_show[col] = df_show[col].astype(str)
-
-    st.dataframe(df_show, use_container_width=True)
+    st.dataframe(df.astype(str), use_container_width=True)
