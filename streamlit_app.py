@@ -9,7 +9,20 @@ SHEET_FIXED = "Gasto Fijo"
 
 st.set_page_config(page_title="CNET Costeo Dashboard", layout="wide")
 st.title("📊 CNET Costeo & Neto Dashboard")
+colA, colB = st.columns([1, 3])
 
+with colA:
+    if st.button("🔄 Refresh datos"):
+        st.cache_data.clear()
+        st.rerun()
+
+with colB:
+    auto = st.toggle("Auto refresh (cada 60s)", value=False)
+    if auto:
+        import time
+        time.sleep(60)
+        st.cache_data.clear()
+        st.rerun()
 def make_unique_columns(cols):
     seen = {}
     out = []
@@ -59,6 +72,39 @@ if not os.path.exists(EXCEL_PATH):
     st.stop()
 
 df = load_real_master(EXCEL_PATH)
+df = add_filters(df)
+def add_filters(df):
+    st.sidebar.header("Filtros Ejecutivos")
+
+    if "Company" in df.columns:
+        sel_company = st.sidebar.multiselect(
+            "Company", sorted(df["Company"].dropna().unique())
+        )
+        if sel_company:
+            df = df[df["Company"].isin(sel_company)]
+
+    if "Province" in df.columns:
+        sel_province = st.sidebar.multiselect(
+            "Province", sorted(df["Province"].dropna().unique())
+        )
+        if sel_province:
+            df = df[df["Province"].isin(sel_province)]
+
+    if "Client" in df.columns:
+        sel_client = st.sidebar.multiselect(
+            "Client", sorted(df["Client"].dropna().unique())
+        )
+        if sel_client:
+            df = df[df["Client"].isin(sel_client)]
+
+    if "Project" in df.columns:
+        sel_project = st.sidebar.multiselect(
+            "Project", sorted(df["Project"].dropna().unique())
+        )
+        if sel_project:
+            df = df[df["Project"].isin(sel_project)]
+
+    return df
 fixed_total = load_fixed_expenses_total(EXCEL_PATH)
 
 # Columnas (en tu archivo existen así; ojo que una tiene espacio al final)
@@ -114,6 +160,60 @@ royalty_total = float(df[c_roy].fillna(0).sum())
 
 net = gross - fixed_total
 new_total = net + mgmt_fee_total + royalty_total
+st.subheader("📌 Margen Ejecutivo (KPIs + Semáforo)")
+
+# Targets
+target = st.slider("Margen objetivo (%)", 0, 60, 25) / 100
+zona_amarilla = 0.05  # +/- 5% alrededor del target
+
+gross_margin = gross / income if income else 0
+net_margin   = net / income if income else 0
+final_margin = new_total / income if income else 0  # después de fees
+
+def semaforo(m, tgt):
+    if m >= tgt + zona_amarilla:
+        return "🟢"
+    elif m >= tgt - zona_amarilla:
+        return "🟡"
+    else:
+        return "🔴"
+
+c1, c2, c3 = st.columns(3)
+c1.metric("Gross Margin", f"{gross_margin:.1%}", f"{semaforo(gross_margin, target)} vs {target:.0%}")
+c2.metric("Net Margin",   f"{net_margin:.1%}",   f"{semaforo(net_margin, target)} vs {target:.0%}")
+c3.metric("Final Margin (after fees)", f"{final_margin:.1%}", f"{semaforo(final_margin, target)} vs {target:.0%}")
+
+# ---- Gauge simple (tipo velocímetro) ----
+st.caption("Gauge: Margen final (después de fees)")
+
+gauge_max = 0.60  # 60% techo visual
+g = max(0, min(final_margin, gauge_max))
+
+import plotly.graph_objects as go
+fig_gauge = go.Figure(go.Indicator(
+    mode="gauge+number",
+    value=float(g*100),
+    number={"suffix": "%"},
+    gauge={
+        "axis": {"range": [0, gauge_max*100]},
+        "threshold": {"line": {"width": 4}, "value": float(target*100)},
+        "steps": [
+            {"range": [0, max(0,(target - zona_amarilla)*100)]},
+            {"range": [max(0,(target - zona_amarilla)*100), (target + zona_amarilla)*100]},
+            {"range": [(target + zona_amarilla)*100, gauge_max*100]},
+        ],
+    }
+))
+st.plotly_chart(fig_gauge, use_container_width=True)
+st.subheader("Indicador de Margen Ejecutivo")
+
+target = st.slider("Margen objetivo (%)", 0, 60, 25) / 100
+margin = gross / income if income != 0 else 0
+
+if margin >= target:
+    st.success(f"✅ Margen OK: {margin:.1%} (Objetivo {target:.0%})")
+else:
+    st.error(f"⚠️ Margen bajo: {margin:.1%} (Objetivo {target:.0%})")
 
 # Percentajes sobre ingresos
 p_cost = safe_pct(cost, income)
