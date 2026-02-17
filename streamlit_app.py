@@ -6,17 +6,16 @@ import pandas as pd
 import streamlit as st
 import requests
 import msal
-import plotly.graph_objects as go
 
-# -------------------------
+# ============================================================
 # CONFIG (Secrets)
-# -------------------------
+# ============================================================
 CLIENT_ID = st.secrets["CLIENT_ID"]
 TENANT_ID = st.secrets["TENANT_ID"]
 CLIENT_SECRET = st.secrets["CLIENT_SECRET"]
 
 ONEDRIVE_SHARED_URL = st.secrets["ONEDRIVE_SHARED_URL"]
-REDIRECT_URI = st.secrets["REDIRECT_URI"].rstrip("/") + "/"  # forzar slash final
+REDIRECT_URI = st.secrets.get("REDIRECT_URI", "").strip()
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 SCOPES = ["User.Read", "Files.Read.All"]  # Delegated
@@ -28,117 +27,77 @@ HEADER_IDX = 6
 
 st.set_page_config(page_title="CNET Costeo Dashboard", layout="wide")
 
-# -------------------------
-# MSAL CACHE (session_state)
-# -------------------------
-def load_cache():
-    cache = msal.SerializableTokenCache()
-    if "token_cache" in st.session_state:
-        cache.deserialize(st.session_state["token_cache"])
-    return cache
+# ============================================================
+# HELPERS
+# ============================================================
 
-def save_cache(cache):
-    if cache.has_state_changed:
-        st.session_state["token_cache"] = cache.serialize()
+def _get_query_params() -> dict:
+    """
+    Devuelve query params como dict[str, str] (valores simples).
+    Compatible con varias versiones de Streamlit.
+    """
+    # Streamlit nuevo: st.query_params (Mapping)
+    try:
+        qp = st.query_params  # type: ignore
+        out = {}
+        for k in qp.keys():
+            v = qp.get(k)
+            if isinstance(v, list):
+                out[k] = v[0] if v else ""
+            else:
+                out[k] = str(v) if v is not None else ""
+        return out
+    except Exception:
+        pass
 
-def build_msal_app(cache):
-    return msal.ConfidentialClientApplication(
-        CLIENT_ID,
-        authority=AUTHORITY,
-        client_credential=CLIENT_SECRET,
-        token_cache=cache,
-    )
+    # Streamlit viejo: experimental_get_query_params (dict[str, list[str]])
+    try:
+        qp = st.experimental_get_query_params()
+        return {k: (v[0] if isinstance(v, list) and v else str(v)) for k, v in qp.items()}
+    except Exception:
+        return {}
 
-def get_token_silent():
-    cache = load_cache()
-    app = build_msal_app(cache)
 
-    accounts = app.get_accounts()
-    if accounts:
-        result = app.acquire_token_silent(SCOPES, account=accounts[0])
-        save_cache(cache)
-        if result and "access_token" in result:
-            return result
-    return None
+def _clear_query_params():
+    """Limpia la URL (quita ?code=...&state=...)."""
+    try:
+        st.query_params.clear()  # type: ignore
+    except Exception:
+        try:
+            st.experimental_set_query_params()
+        except Exception:
+            pass
 
-def get_login_url():
-    cache = load_cache()
-    app = build_msal_app(cache)
 
-    auth_url = app.get_authorization_request_url(
-        scopes=SCOPES,
-        redirect_uri=REDIRECT_URI,
-        prompt="select_account",
-    )
-    save_cache(cache)
-    return auth_url
-
-def handle_redirect_and_get_token():
-    qp = st.query_params
-    if "code" not in qp:
-        return None
-
-    code = qp["code"]
-
-    cache = load_cache()
-    app = build_msal_app(cache)
-
-    result = app.acquire_token_by_authorization_code(
-        code,
-        scopes=SCOPES,
-        redirect_uri=REDIRECT_URI,
-    )
-    save_cache(cache)
-
-    # limpiar la URL
-    st.query_params.clear()
-
-    if "access_token" in result:
-        return result
-    else:
-        st.error(f"Login falló: {result.get('error_description', result)}")
-        return None
-
-def ensure_login():
-    # 1) si viene del redirect con ?code=
-    token_result = handle_redirect_and_get_token()
-    if token_result:
-        return token_result
-
-    # 2) intentar token silent (para no loguear cada vez)
-    token_result = get_token_silent()
-    if token_result:
-        return token_result
-
-    # 3) si no hay token: botón login
-    st.warning("No has iniciado sesión en OneDrive")
-    st.markdown("### 🔐 Inicia sesión")
-    st.link_button("Iniciar sesión OneDrive", get_login_url())
-    st.stop()
-
-# -------------------------
-# GRAPH HELPERS
-# -------------------------
 def make_share_id(shared_url: str) -> str:
     """
-    Convierte shared URL a shareId para Graph:
+    Convierte shared URL a shareId para Microsoft Graph:
     shares/{shareId}/driveItem
     """
     b = base64.b64encode(shared_url.encode("utf-8")).decode("utf-8")
     b = b.rstrip("=").replace("/", "_").replace("+", "-")
     return "u!" + b
 
-def graph_get(url, access_token):
+
+def graph_get(url: str, access_token: str) -> requests.Response:
     return requests.get(url, headers={"Authorization": f"Bearer {access_token}"})
 
+
 def download_excel_bytes_from_shared_link(access_token: str, shared_url: str) -> bytes:
+    """
+    Descarga el archivo Excel desde un Shared Link (SharePoint/OneDrive).
+    """
     share_id = make_share_id(shared_url)
 
-    # 1) Resolver el shared link a driveItem
+    # 1) Resolver shared link -> driveItem
     meta_url = f"https://graph.microsoft.com/v1.0/shares/{share_id}/driveItem"
     meta = graph_get(meta_url, access_token)
+
     if meta.status_code != 200:
-        raise RuntimeError(f"Error resolviendo shared link: {meta.status_code} {meta.text}")
+        raise RuntimeError(
+            f"Error resolviendo shared link: {meta.status_code}\n{meta.text}\n"
+            f"TIP: Genera un link NUEVO (Share -> Copy link) y reemplaza ONEDRIVE_SHARED_URL."
+        )
 
     meta_json = meta.json()
     item_id = meta_json["id"]
@@ -147,24 +106,24 @@ def download_excel_bytes_from_shared_link(access_token: str, shared_url: str) ->
     # 2) Descargar contenido
     content_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
     file_r = graph_get(content_url, access_token)
+
     if file_r.status_code != 200:
-        raise RuntimeError(f"Error descargando archivo: {file_r.status_code} {file_r.text}")
+        raise RuntimeError(f"Error descargando archivo: {file_r.status_code}\n{file_r.text}")
 
     return file_r.content
 
-# -------------------------
-# EXCEL LOADERS
-# -------------------------
+
 def read_excel_from_bytes(excel_bytes: bytes) -> pd.DataFrame:
     raw = pd.read_excel(BytesIO(excel_bytes), sheet_name=SHEET_REAL, header=None)
+
     headers = raw.iloc[HEADER_IDX].tolist()
     headers = [("Unnamed" if pd.isna(c) else str(c).strip()) for c in headers]
 
+    # Uniquificar headers repetidos
     seen = {}
     out = []
     for c in headers:
-        if c == "":
-            c = "Unnamed"
+        c = c if c else "Unnamed"
         if c in seen:
             seen[c] += 1
             out.append(f"{c}_{seen[c]}")
@@ -178,40 +137,15 @@ def read_excel_from_bytes(excel_bytes: bytes) -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
+
 def load_fixed_total(excel_bytes: bytes) -> float:
     fx = pd.read_excel(BytesIO(excel_bytes), sheet_name=SHEET_FIXED, header=None)
+    # Ajusta esta columna si tus montos no están en la 3ra columna (índice 2)
     amounts = pd.to_numeric(fx.iloc[:, 2], errors="coerce")
     return float(amounts.fillna(0).sum())
 
-# -------------------------
-# UI
-# -------------------------
-st.title("📊 CNET Costeo & Neto Dashboard")
 
-token_result = ensure_login()
-st.success("✅ Conectado a OneDrive (token activo)")
-
-if st.button("🔄 Refresh datos"):
-    st.cache_data.clear()
-    st.rerun()
-
-# -------------------------
-# Descargar Excel y cargar datos
-# -------------------------
-try:
-    excel_bytes = download_excel_bytes_from_shared_link(token_result["access_token"], ONEDRIVE_SHARED_URL)
-except Exception as e:
-    st.error("No pude descargar el archivo desde OneDrive/SharePoint.")
-    st.code(str(e))
-    st.stop()
-
-df = read_excel_from_bytes(excel_bytes)
-fixed_total = load_fixed_total(excel_bytes)
-
-# -------------------------
-# TU LOGICA (dashboard)
-# -------------------------
-def find_col(df, name):
+def find_col(df: pd.DataFrame, name: str):
     if name in df.columns:
         return name
     n = name.strip().lower()
@@ -223,8 +157,153 @@ def find_col(df, name):
             return c
     return None
 
-def safe_pct(x, base):
+
+def safe_pct(x: float, base: float) -> float:
     return (x / base) if base not in (0, None) else 0.0
+
+
+# ============================================================
+# MSAL APP + CACHE (en memoria por sesión)
+# ============================================================
+
+@st.cache_resource
+def get_msal_app():
+    """
+    Crea MSAL ConfidentialClientApplication.
+    Nota: El token cache aquí lo mantenemos en st.session_state para evitar
+    problemas de escritura en Streamlit Cloud y reducir 'state mismatch'.
+    """
+    return msal.ConfidentialClientApplication(
+        CLIENT_ID,
+        authority=AUTHORITY,
+        client_credential=CLIENT_SECRET,
+    )
+
+
+def get_token_silent():
+    """
+    Intenta recuperar token desde session_state (cache simple por usuario/sesión).
+    """
+    if "token_result" in st.session_state:
+        tr = st.session_state.token_result
+        if isinstance(tr, dict) and tr.get("access_token"):
+            return tr
+    return None
+
+
+# ============================================================
+# UI
+# ============================================================
+
+st.title("📊 CNET Costeo & Neto Dashboard")
+
+# Validación rápida del REDIRECT_URI
+if not REDIRECT_URI:
+    st.error("Falta REDIRECT_URI en Secrets. Ej: https://cnet-dashboard.streamlit.app (sin slash final).")
+    st.stop()
+
+# 1) Token silencioso (desde session_state)
+token_result = get_token_silent()
+
+# 2) Si no hay token, iniciar login (Authorization Code Flow)
+if not token_result:
+    st.warning("No has iniciado sesión en OneDrive/SharePoint")
+
+    app = get_msal_app()
+
+    # Botón para reiniciar flow (evita usar auth_url viejo y reduce state mismatch)
+    colA, colB = st.columns([1, 1])
+    with colA:
+        if st.button("🔐 Generar link de login (nuevo)"):
+            st.session_state.pop("flow", None)
+            st.session_state.pop("auth_url", None)
+            _clear_query_params()
+            st.rerun()
+
+    # Crear flow si no existe
+    if "flow" not in st.session_state:
+        st.session_state.flow = app.initiate_auth_code_flow(
+            scopes=SCOPES,
+            redirect_uri=REDIRECT_URI,
+        )
+        st.session_state.auth_url = st.session_state.flow["auth_uri"]
+
+    st.markdown("### 🔐 Inicia sesión")
+    st.link_button("Iniciar sesión OneDrive", st.session_state.auth_url)
+
+    qp = _get_query_params()
+
+    # Capturar code cuando Microsoft redirige a tu app
+    if qp.get("code") and qp.get("state"):
+        try:
+            # MSAL espera un dict de strings (no listas)
+            result = app.acquire_token_by_auth_code_flow(
+                st.session_state.flow,
+                qp,
+                scopes=SCOPES,
+            )
+            if "access_token" in result:
+                st.session_state.token_result = result
+                _clear_query_params()
+                st.rerun()
+            else:
+                st.error("No se pudo obtener access_token.")
+                st.code(result)
+                st.stop()
+        except Exception as e:
+            st.error(f"Error completando login: {e}")
+            st.info("Tip: presiona 'Generar link de login (nuevo)' y vuelve a iniciar sesión.")
+            st.stop()
+
+    st.stop()
+
+# Si hay token pero no access_token
+if "access_token" not in token_result:
+    st.error("No se pudo obtener token válido.")
+    st.code(token_result)
+    st.stop()
+
+st.success("✅ Conectado a OneDrive/SharePoint (token activo)")
+
+# Refresh
+if st.button("🔄 Refresh datos"):
+    st.session_state.pop("excel_bytes", None)
+    st.rerun()
+
+# Logout
+if st.button("🔒 Cerrar sesión"):
+    st.session_state.pop("token_result", None)
+    st.session_state.pop("flow", None)
+    st.session_state.pop("auth_url", None)
+    st.session_state.pop("excel_bytes", None)
+    _clear_query_params()
+    st.rerun()
+
+# ============================================================
+# Descargar Excel y cargar datos
+# ============================================================
+
+try:
+    if "excel_bytes" not in st.session_state:
+        st.info("📥 Descargando Excel desde SharePoint/OneDrive…")
+        st.session_state.excel_bytes = download_excel_bytes_from_shared_link(
+            token_result["access_token"],
+            ONEDRIVE_SHARED_URL
+        )
+
+    excel_bytes = st.session_state.excel_bytes
+
+except Exception as e:
+    st.error("No pude descargar el archivo desde OneDrive/SharePoint.")
+    st.code(str(e))
+    st.stop()
+
+df = read_excel_from_bytes(excel_bytes)
+fixed_total = load_fixed_total(excel_bytes)
+
+# ============================================================
+# TU LÓGICA (KPIs)
+# ============================================================
 
 COL_INCOME = "Total to Bill"
 COL_COST   = "Total Cost Month"
@@ -270,7 +349,7 @@ p_mgmt  = safe_pct(mgmt_fee_total, income)
 p_roy   = safe_pct(royalty_total, income)
 p_new   = safe_pct(new_total, income)
 
-st.subheader("📊 KPIs (Ejecutivo)")
+st.subheader("📌 KPIs (Ejecutivo)")
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Ingresos (Total to Bill)", f"${income:,.2f}")
 k2.metric("Costos (Total Cost Month)", f"${cost:,.2f}", f"{p_cost*100:,.2f}%")
@@ -291,4 +370,5 @@ summary = pd.DataFrame([
 
 summary["Monto"] = summary["Monto"].map(lambda x: f"${x:,.2f}")
 summary["% sobre Ingresos"] = summary["% sobre Ingresos"].map(lambda x: f"{x*100:,.2f}%")
+
 st.dataframe(summary, use_container_width=True)
