@@ -1,27 +1,91 @@
-import os
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timezone
+import time
 
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-# PDF test
+import requests
+import msal
+
+# PDF
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 
+
 # =========================
 # CONFIG
 # =========================
-EXCEL_PATH = "Master January 2026.xlsx"
 SHEET_REAL = "Real Master"
 SHEET_FIXED = "Gasto Fijo"
+HEADER_IDX = 6  # headers reales están en fila 7 (index 6)
 
-# En tu archivo, los headers reales están en la fila 7 (index 6)
-HEADER_IDX = 6
+GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+
+# Permisos delegados (ya los tienes en Entra)
+SCOPES = ["Files.Read.All", "User.Read"]
 
 st.set_page_config(page_title="CNET Costeo Dashboard", layout="wide")
+
+
+# =========================
+# AUTH (Delegated - Device Code)
+# =========================
+def _authority() -> str:
+    tenant_id = st.secrets["TENANT_ID"]
+    return f"https://login.microsoftonline.com/{tenant_id}"
+
+
+def _public_app() -> msal.PublicClientApplication:
+    return msal.PublicClientApplication(
+        client_id=st.secrets["CLIENT_ID"],
+        authority=_authority(),
+    )
+
+
+def is_token_valid() -> bool:
+    tok = st.session_state.get("graph_access_token")
+    exp = st.session_state.get("graph_token_expires_at", 0)
+    # margen de 60s para evitar token “casi expirado”
+    return bool(tok) and time.time() < (exp - 60)
+
+
+def login_device_flow():
+    app = _public_app()
+    flow = app.initiate_device_flow(scopes=SCOPES)
+
+    if "user_code" not in flow:
+        st.error("No se pudo iniciar el Device Flow. Revisa que 'Permitir flujos de clientes públicos' esté habilitado.")
+        st.stop()
+
+    st.info(flow["message"])
+    result = app.acquire_token_by_device_flow(flow)
+
+    if "access_token" not in result:
+        st.error("Login falló. Detalle:")
+        st.json(result)
+        st.stop()
+
+    st.session_state["graph_access_token"] = result["access_token"]
+    # expires_in viene en segundos
+    st.session_state["graph_token_expires_at"] = time.time() + int(result.get("expires_in", 3599))
+
+
+def logout():
+    st.session_state.pop("graph_access_token", None)
+    st.session_state.pop("graph_token_expires_at", None)
+    # también limpia cache para forzar relectura
+    st.cache_data.clear()
+    st.rerun()
+
+
+def get_access_token() -> str:
+    if not is_token_valid():
+        login_device_flow()
+    return st.session_state["graph_access_token"]
+
 
 # =========================
 # HELPERS
@@ -41,8 +105,10 @@ def make_unique_columns(cols):
             out.append(c)
     return out
 
+
 def safe_pct(x, base):
     return (x / base) if base not in (0, None) else 0.0
+
 
 def find_col(df, name):
     """Encuentra columna por match exacto / ignorando espacios / contains."""
@@ -57,25 +123,45 @@ def find_col(df, name):
             return c
     return None
 
+
 def sanitize_for_arrow(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Evita el error:
-    pyarrow.lib.ArrowTypeError: Expected bytes, got a 'int' object
-    convirtiendo columnas problemáticas a string.
+    Evita errores de pyarrow/streamlit al mostrar columnas object con mezcla int/str.
     """
     df2 = df.copy()
-    # Caso típico en tu excel: "BuildinG ID" mezcla ints/strings
     for col in df2.columns:
         if df2[col].dtype == "object":
             df2[col] = df2[col].astype(str)
     return df2
 
+
+# =========================
+# ONEDRIVE DOWNLOAD
+# =========================
+@st.cache_data(ttl=60)
+def download_excel_bytes_from_onedrive() -> bytes:
+    token = get_access_token()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    file_path = st.secrets["ONEDRIVE_FILE_PATH"]  # ej: CNET/Master January 2026.xlsx
+    url = f"{GRAPH_BASE}/me/drive/root:/{file_path}:/content"
+
+    r = requests.get(url, headers=headers, timeout=60)
+    if r.status_code != 200:
+        st.error("No pude descargar el Excel desde OneDrive.")
+        st.write("Revisa que la ruta sea correcta y que tu usuario tenga permisos sobre el archivo.")
+        st.write(f"Ruta usada: {file_path}")
+        st.code(r.text)
+        st.stop()
+    return r.content
+
+
 # =========================
 # LOADERS (cache)
 # =========================
 @st.cache_data(ttl=60)
-def load_real_master(path: str) -> pd.DataFrame:
-    raw = pd.read_excel(path, sheet_name=SHEET_REAL, header=None)
+def load_real_master_from_bytes(xlsx_bytes: bytes) -> pd.DataFrame:
+    raw = pd.read_excel(BytesIO(xlsx_bytes), sheet_name=SHEET_REAL, header=None)
     headers = make_unique_columns(raw.iloc[HEADER_IDX].tolist())
 
     df = raw.iloc[HEADER_IDX + 1 :].copy()
@@ -84,12 +170,14 @@ def load_real_master(path: str) -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
+
 @st.cache_data(ttl=60)
-def load_fixed_expenses_total(path: str) -> float:
-    fx = pd.read_excel(path, sheet_name=SHEET_FIXED, header=None)
-    # Montos están en la columna 3 (index 2)
+def load_fixed_expenses_total_from_bytes(xlsx_bytes: bytes) -> float:
+    fx = pd.read_excel(BytesIO(xlsx_bytes), sheet_name=SHEET_FIXED, header=None)
+    # Montos en columna 3 (index 2)
     amounts = pd.to_numeric(fx.iloc[:, 2], errors="coerce")
     return float(amounts.fillna(0).sum())
+
 
 # =========================
 # FILTERS
@@ -97,31 +185,28 @@ def load_fixed_expenses_total(path: str) -> float:
 def add_filters(df: pd.DataFrame) -> pd.DataFrame:
     st.sidebar.header("Filtros Ejecutivos")
 
-    # Company
     if "Company" in df.columns:
         sel = st.sidebar.multiselect("Company", sorted(df["Company"].dropna().unique()))
         if sel:
             df = df[df["Company"].isin(sel)]
 
-    # Province
     if "Province" in df.columns:
         sel = st.sidebar.multiselect("Province", sorted(df["Province"].dropna().unique()))
         if sel:
             df = df[df["Province"].isin(sel)]
 
-    # Client
     if "Client" in df.columns:
         sel = st.sidebar.multiselect("Client", sorted(df["Client"].dropna().unique()))
         if sel:
             df = df[df["Client"].isin(sel)]
 
-    # Project (en tu archivo no existe "Project", existe "Project Name")
     if "Project Name" in df.columns:
         sel = st.sidebar.multiselect("Project (Project Name)", sorted(df["Project Name"].dropna().unique()))
         if sel:
             df = df[df["Project Name"].isin(sel)]
 
     return df
+
 
 # =========================
 # PDF REPORT
@@ -147,7 +232,6 @@ def build_pdf_report(
     c.drawString(40, y, f"Target Margin: {target:.0%}")
     y -= 20
 
-    # KPI table
     c.setFont("Helvetica-Bold", 11)
     c.drawString(40, y, "KPIs")
     y -= 14
@@ -191,12 +275,12 @@ def build_pdf_report(
         if fig is None:
             return y_top
         try:
-            img_bytes = fig.to_image(format="png")  # requiere kaleido (opcional)
+            img_bytes = fig.to_image(format="png")  # requiere kaleido
             img = ImageReader(BytesIO(img_bytes))
             c.setFont("Helvetica-Bold", 11)
             c.drawString(40, y_top, title)
             y_top -= 10
-            c.drawImage(img, 40, y_top - 220, width=520, height=220, preserveAspectRatio=True, mask='auto')
+            c.drawImage(img, 40, y_top - 220, width=520, height=220, preserveAspectRatio=True, mask="auto")
             return y_top - 235
         except Exception:
             c.setFont("Helvetica", 9)
@@ -211,31 +295,47 @@ def build_pdf_report(
     buf.seek(0)
     return buf.getvalue()
 
+
 # =========================
 # UI HEADER
 # =========================
 st.title("📊 CNET Costeo & Neto Dashboard")
 
-colA, colB = st.columns([1, 3])
-with colA:
+top_left, top_right = st.columns([2, 3])
+with top_left:
+    if is_token_valid():
+        st.success("✅ Conectado a OneDrive (token activo)")
+        if st.button("🔒 Cerrar sesión OneDrive"):
+            logout()
+    else:
+        st.warning("⚠️ No has iniciado sesión en OneDrive")
+        if st.button("🔑 Iniciar sesión OneDrive"):
+            login_device_flow()
+            st.rerun()
+
+with top_right:
     if st.button("🔄 Refresh datos"):
         st.cache_data.clear()
         st.rerun()
 
-# =========================
-# MAIN LOAD
-# =========================
-if not os.path.exists(EXCEL_PATH):
-    st.error(f"No encuentro el archivo: {EXCEL_PATH} en la carpeta del proyecto.")
+st.divider()
+
+# Si no hay token válido, no seguimos (evita errores)
+if not is_token_valid():
+    st.info("Haz clic en **Iniciar sesión OneDrive** para cargar el Excel.")
     st.stop()
 
-df = load_real_master(EXCEL_PATH)
+# =========================
+# MAIN LOAD (from OneDrive)
+# =========================
+xlsx_bytes = download_excel_bytes_from_onedrive()
+
+df = load_real_master_from_bytes(xlsx_bytes)
 df = add_filters(df)
+fixed_total = load_fixed_expenses_total_from_bytes(xlsx_bytes)
 
-fixed_total = load_fixed_expenses_total(EXCEL_PATH)
-
-# Columnas clave (según tu Excel)
-COL_INCOME = "Total to Bill"                 # <- INGRESOS (L7)
+# Columnas clave
+COL_INCOME = "Total to Bill"
 COL_COST   = "Total Cost Month"
 COL_MGMT   = "Total Management Fee"
 COL_ROY    = "Royalty CNET Group Inc 5%"
@@ -287,7 +387,7 @@ p_new   = safe_pct(new_total, income)
 st.subheader("📌 Margen Ejecutivo (KPIs + Semáforo)")
 
 target = st.slider("Margen objetivo (%)", 0, 60, 25) / 100
-zona_amarilla = 0.05  # +/- 5%
+zona_amarilla = 0.05
 
 gross_margin = gross / income if income else 0
 net_margin   = net / income if income else 0
@@ -305,7 +405,6 @@ c1.metric("Gross Margin", f"{gross_margin:.1%}", f"{semaforo(gross_margin, targe
 c2.metric("Net Margin", f"{net_margin:.1%}", f"{semaforo(net_margin, target)} vs {target:.0%}")
 c3.metric("Final Margin (after fees)", f"{final_margin:.1%}", f"{semaforo(final_margin, target)} vs {target:.0%}")
 
-# Gauge
 st.caption("Gauge: Margen final (después de fees)")
 gauge_max = 60
 fig_gauge = go.Figure(go.Indicator(
@@ -354,11 +453,10 @@ fig.update_layout(title="Cascada: Ingresos → Costos → Fijos → +Fees → Nu
 st.plotly_chart(fig, use_container_width=True)
 
 # =========================
-# OTTAWA vs QUEBEC (si Province existe)
+# OTTAWA vs QUEBEC
 # =========================
 if "Province" in df.columns:
     st.subheader("🏙️ Comparación Ottawa vs Quebec")
-    # Ajusta si en tu archivo usan ON/QC o Ottawa/Quebec, esto lo detecta como texto.
     prov = df["Province"].astype(str)
 
     df_on = df[prov.str.contains("ON", case=False, na=False) | prov.str.contains("Ottawa", case=False, na=False)]
@@ -370,7 +468,6 @@ if "Province" in df.columns:
         grs = inc - cst
         mgm = float(pd.to_numeric(d[c_mgmt], errors="coerce").fillna(0).sum())
         roy = float(pd.to_numeric(d[c_roy], errors="coerce").fillna(0).sum())
-        # fixed_total es global, si luego quieres por provincia lo hacemos (con otra hoja o regla).
         nt = grs - fixed_total
         tot = nt + mgm + roy
         return inc, grs, tot
@@ -399,7 +496,8 @@ st.subheader("📄 Export Executive Report (PDF)")
 pdf_bytes = build_pdf_report(
     income=income, cost=cost, gross=gross, fixed_total=fixed_total, net=net,
     mgmt_fee_total=mgmt_fee_total, royalty_total=royalty_total, new_total=new_total,
-    p_cost=p_cost, p_gross=p_gross, p_fixed=p_fixed, p_net=p_net, p_mgmt=p_mgmt, p_roy=p_roy, p_new=p_new,
+    p_cost=p_cost, p_gross=p_gross, p_fixed=p_fixed, p_net=p_net,
+    p_mgmt=p_mgmt, p_roy=p_roy, p_new=p_new,
     target=target, gross_margin=gross_margin, net_margin=net_margin, final_margin=final_margin,
     fig_waterfall=fig,
     fig_gauge=fig_gauge,
