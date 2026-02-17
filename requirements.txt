@@ -5,3 +5,4 @@ msal
 requests
 reportlab
 kaleido
+plotly
