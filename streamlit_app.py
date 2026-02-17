@@ -1,4 +1,3 @@
-import os
 import base64
 from io import BytesIO
 
@@ -11,13 +10,16 @@ import msal
 # CONFIG (Secrets)
 # ============================================================
 CLIENT_ID = st.secrets["CLIENT_ID"]
-TENANT_ID = st.secrets["TENANT_ID"]
 CLIENT_SECRET = st.secrets["CLIENT_SECRET"]
 
 ONEDRIVE_SHARED_URL = st.secrets["ONEDRIVE_SHARED_URL"]
-REDIRECT_URI = st.secrets.get("REDIRECT_URI", "").strip()
 
-AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
+# IMPORTANTE: siempre sin slash final
+REDIRECT_URI = st.secrets.get("REDIRECT_URI", "").strip().rstrip("/")
+
+# ✅ CLAVE: usar /common (NO uses TENANT_ID aquí)
+AUTHORITY = "https://login.microsoftonline.com/common"
+
 SCOPES = ["User.Read", "Files.Read.All"]  # Delegated
 
 # Tu Excel
@@ -36,9 +38,8 @@ def _get_query_params() -> dict:
     Devuelve query params como dict[str, str] (valores simples).
     Compatible con varias versiones de Streamlit.
     """
-    # Streamlit nuevo: st.query_params (Mapping)
     try:
-        qp = st.query_params  # type: ignore
+        qp = st.query_params  # Streamlit nuevo
         out = {}
         for k in qp.keys():
             v = qp.get(k)
@@ -50,9 +51,8 @@ def _get_query_params() -> dict:
     except Exception:
         pass
 
-    # Streamlit viejo: experimental_get_query_params (dict[str, list[str]])
     try:
-        qp = st.experimental_get_query_params()
+        qp = st.experimental_get_query_params()  # Streamlit viejo
         return {k: (v[0] if isinstance(v, list) and v else str(v)) for k, v in qp.items()}
     except Exception:
         return {}
@@ -61,10 +61,10 @@ def _get_query_params() -> dict:
 def _clear_query_params():
     """Limpia la URL (quita ?code=...&state=...)."""
     try:
-        st.query_params.clear()  # type: ignore
+        st.query_params.clear()  # Streamlit nuevo
     except Exception:
         try:
-            st.experimental_set_query_params()
+            st.experimental_set_query_params()  # Streamlit viejo
         except Exception:
             pass
 
@@ -80,7 +80,11 @@ def make_share_id(shared_url: str) -> str:
 
 
 def graph_get(url: str, access_token: str) -> requests.Response:
-    return requests.get(url, headers={"Authorization": f"Bearer {access_token}"})
+    return requests.get(
+        url,
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=60
+    )
 
 
 def download_excel_bytes_from_shared_link(access_token: str, shared_url: str) -> bytes:
@@ -95,7 +99,7 @@ def download_excel_bytes_from_shared_link(access_token: str, shared_url: str) ->
 
     if meta.status_code != 200:
         raise RuntimeError(
-            f"Error resolviendo shared link: {meta.status_code}\n{meta.text}\n"
+            f"Error resolviendo shared link: {meta.status_code}\n{meta.text}\n\n"
             f"TIP: Genera un link NUEVO (Share -> Copy link) y reemplaza ONEDRIVE_SHARED_URL."
         )
 
@@ -140,8 +144,7 @@ def read_excel_from_bytes(excel_bytes: bytes) -> pd.DataFrame:
 
 def load_fixed_total(excel_bytes: bytes) -> float:
     fx = pd.read_excel(BytesIO(excel_bytes), sheet_name=SHEET_FIXED, header=None)
-    # Ajusta esta columna si tus montos no están en la 3ra columna (índice 2)
-    amounts = pd.to_numeric(fx.iloc[:, 2], errors="coerce")
+    amounts = pd.to_numeric(fx.iloc[:, 2], errors="coerce")  # columna 3
     return float(amounts.fillna(0).sum())
 
 
@@ -163,16 +166,11 @@ def safe_pct(x: float, base: float) -> float:
 
 
 # ============================================================
-# MSAL APP + CACHE (en memoria por sesión)
+# MSAL APP (cache en session_state)
 # ============================================================
 
 @st.cache_resource
 def get_msal_app():
-    """
-    Crea MSAL ConfidentialClientApplication.
-    Nota: El token cache aquí lo mantenemos en st.session_state para evitar
-    problemas de escritura en Streamlit Cloud y reducir 'state mismatch'.
-    """
     return msal.ConfidentialClientApplication(
         CLIENT_ID,
         authority=AUTHORITY,
@@ -181,9 +179,6 @@ def get_msal_app():
 
 
 def get_token_silent():
-    """
-    Intenta recuperar token desde session_state (cache simple por usuario/sesión).
-    """
     if "token_result" in st.session_state:
         tr = st.session_state.token_result
         if isinstance(tr, dict) and tr.get("access_token"):
@@ -197,21 +192,20 @@ def get_token_silent():
 
 st.title("📊 CNET Costeo & Neto Dashboard")
 
-# Validación rápida del REDIRECT_URI
 if not REDIRECT_URI:
     st.error("Falta REDIRECT_URI en Secrets. Ej: https://cnet-dashboard.streamlit.app (sin slash final).")
     st.stop()
 
-# 1) Token silencioso (desde session_state)
 token_result = get_token_silent()
 
-# 2) Si no hay token, iniciar login (Authorization Code Flow)
+# ============================================================
+# LOGIN
+# ============================================================
 if not token_result:
     st.warning("No has iniciado sesión en OneDrive/SharePoint")
 
     app = get_msal_app()
 
-    # Botón para reiniciar flow (evita usar auth_url viejo y reduce state mismatch)
     colA, colB = st.columns([1, 1])
     with colA:
         if st.button("🔐 Generar link de login (nuevo)"):
@@ -236,12 +230,12 @@ if not token_result:
     # Capturar code cuando Microsoft redirige a tu app
     if qp.get("code") and qp.get("state"):
         try:
-            # MSAL espera un dict de strings (no listas)
             result = app.acquire_token_by_auth_code_flow(
                 st.session_state.flow,
                 qp,
                 scopes=SCOPES,
             )
+
             if "access_token" in result:
                 st.session_state.token_result = result
                 _clear_query_params()
@@ -250,6 +244,7 @@ if not token_result:
                 st.error("No se pudo obtener access_token.")
                 st.code(result)
                 st.stop()
+
         except Exception as e:
             st.error(f"Error completando login: {e}")
             st.info("Tip: presiona 'Generar link de login (nuevo)' y vuelve a iniciar sesión.")
@@ -257,7 +252,6 @@ if not token_result:
 
     st.stop()
 
-# Si hay token pero no access_token
 if "access_token" not in token_result:
     st.error("No se pudo obtener token válido.")
     st.code(token_result)
