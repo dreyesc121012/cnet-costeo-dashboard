@@ -1,8 +1,6 @@
 import os
-import json
 import base64
 from io import BytesIO
-from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -18,7 +16,7 @@ TENANT_ID = st.secrets["TENANT_ID"]
 CLIENT_SECRET = st.secrets["CLIENT_SECRET"]
 
 ONEDRIVE_SHARED_URL = st.secrets["ONEDRIVE_SHARED_URL"]
-REDIRECT_URI = st.secrets.get("REDIRECT_URI")  # ej: https://cnet-dashboard.streamlit.app
+REDIRECT_URI = st.secrets["REDIRECT_URI"].rstrip("/") + "/"  # forzar slash final
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 SCOPES = ["User.Read", "Files.Read.All"]  # Delegated
@@ -31,40 +29,96 @@ HEADER_IDX = 6
 st.set_page_config(page_title="CNET Costeo Dashboard", layout="wide")
 
 # -------------------------
-# TOKEN CACHE (persistente)
+# MSAL CACHE (session_state)
 # -------------------------
-CACHE_FILE = ".msal_cache.bin"
-
 def load_cache():
     cache = msal.SerializableTokenCache()
-    if os.path.exists(CACHE_FILE):
-        cache.deserialize(open(CACHE_FILE, "r").read())
+    if "token_cache" in st.session_state:
+        cache.deserialize(st.session_state["token_cache"])
     return cache
 
 def save_cache(cache):
     if cache.has_state_changed:
-        open(CACHE_FILE, "w").write(cache.serialize())
+        st.session_state["token_cache"] = cache.serialize()
 
-@st.cache_resource
-def get_msal_app():
-    cache = load_cache()
-    app = msal.ConfidentialClientApplication(
+def build_msal_app(cache):
+    return msal.ConfidentialClientApplication(
         CLIENT_ID,
         authority=AUTHORITY,
         client_credential=CLIENT_SECRET,
         token_cache=cache,
     )
-    return app, cache
 
 def get_token_silent():
-    app, cache = get_msal_app()
+    cache = load_cache()
+    app = build_msal_app(cache)
+
     accounts = app.get_accounts()
     if accounts:
         result = app.acquire_token_silent(SCOPES, account=accounts[0])
         save_cache(cache)
-        return result
+        if result and "access_token" in result:
+            return result
     return None
 
+def get_login_url():
+    cache = load_cache()
+    app = build_msal_app(cache)
+
+    auth_url = app.get_authorization_request_url(
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI,
+        prompt="select_account",
+    )
+    save_cache(cache)
+    return auth_url
+
+def handle_redirect_and_get_token():
+    qp = st.query_params
+    if "code" not in qp:
+        return None
+
+    code = qp["code"]
+
+    cache = load_cache()
+    app = build_msal_app(cache)
+
+    result = app.acquire_token_by_authorization_code(
+        code,
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI,
+    )
+    save_cache(cache)
+
+    # limpiar la URL
+    st.query_params.clear()
+
+    if "access_token" in result:
+        return result
+    else:
+        st.error(f"Login falló: {result.get('error_description', result)}")
+        return None
+
+def ensure_login():
+    # 1) si viene del redirect con ?code=
+    token_result = handle_redirect_and_get_token()
+    if token_result:
+        return token_result
+
+    # 2) intentar token silent (para no loguear cada vez)
+    token_result = get_token_silent()
+    if token_result:
+        return token_result
+
+    # 3) si no hay token: botón login
+    st.warning("No has iniciado sesión en OneDrive")
+    st.markdown("### 🔐 Inicia sesión")
+    st.link_button("Iniciar sesión OneDrive", get_login_url())
+    st.stop()
+
+# -------------------------
+# GRAPH HELPERS
+# -------------------------
 def make_share_id(shared_url: str) -> str:
     """
     Convierte shared URL a shareId para Graph:
@@ -75,8 +129,7 @@ def make_share_id(shared_url: str) -> str:
     return "u!" + b
 
 def graph_get(url, access_token):
-    r = requests.get(url, headers={"Authorization": f"Bearer {access_token}"})
-    return r
+    return requests.get(url, headers={"Authorization": f"Bearer {access_token}"})
 
 def download_excel_bytes_from_shared_link(access_token: str, shared_url: str) -> bytes:
     share_id = make_share_id(shared_url)
@@ -99,12 +152,14 @@ def download_excel_bytes_from_shared_link(access_token: str, shared_url: str) ->
 
     return file_r.content
 
+# -------------------------
+# EXCEL LOADERS
+# -------------------------
 def read_excel_from_bytes(excel_bytes: bytes) -> pd.DataFrame:
     raw = pd.read_excel(BytesIO(excel_bytes), sheet_name=SHEET_REAL, header=None)
     headers = raw.iloc[HEADER_IDX].tolist()
     headers = [("Unnamed" if pd.isna(c) else str(c).strip()) for c in headers]
 
-    # unique
     seen = {}
     out = []
     for c in headers:
@@ -133,50 +188,8 @@ def load_fixed_total(excel_bytes: bytes) -> float:
 # -------------------------
 st.title("📊 CNET Costeo & Neto Dashboard")
 
-# 1) Intentar token silencioso
-token_result = get_token_silent()
-
-# 2) Si no hay token, iniciar login (auth code flow)
-if not token_result:
-    st.warning("No has iniciado sesión en OneDrive")
-
-    app, cache = get_msal_app()
-
-    # iniciar flow una sola vez
-    if "flow" not in st.session_state:
-        st.session_state.flow = app.initiate_auth_code_flow(
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI
-        )
-
-    auth_url = st.session_state.flow["auth_uri"]
-
-    st.markdown(f"### 🔐 Inicia sesión")
-    st.link_button("Iniciar sesión OneDrive", auth_url)
-
-    # Capturar code cuando Microsoft redirige a tu app
-    qp = st.query_params
-    if "code" in qp:
-        try:
-            result = app.acquire_token_by_auth_code_flow(
-                st.session_state.flow,
-                dict(qp),
-                scopes=SCOPES,
-            )
-            save_cache(cache)
-            st.query_params.clear()
-            st.rerun()
-        except Exception as e:
-            st.error(f"Error completando login: {e}")
-
-    st.stop()
-
-# Si hay token
-if "access_token" not in token_result:
-    st.error(f"No se pudo obtener token: {token_result}")
-    st.stop()
-
-st.success("Conectado a OneDrive (token activo)")
+token_result = ensure_login()
+st.success("✅ Conectado a OneDrive (token activo)")
 
 if st.button("🔄 Refresh datos"):
     st.cache_data.clear()
@@ -196,7 +209,7 @@ df = read_excel_from_bytes(excel_bytes)
 fixed_total = load_fixed_total(excel_bytes)
 
 # -------------------------
-# TU LOGICA (tu dashboard actual)
+# TU LOGICA (dashboard)
 # -------------------------
 def find_col(df, name):
     if name in df.columns:
