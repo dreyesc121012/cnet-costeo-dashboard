@@ -20,11 +20,6 @@ REDIRECT_URI = st.secrets.get("REDIRECT_URI", "").strip().rstrip("/")
 TENANT_ID = st.secrets["TENANT_ID"]
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 
-st.write("TENANT:", TENANT_ID)
-st.write("AUTHORITY:", AUTHORITY)
-st.write("REDIRECT_URI:", REDIRECT_URI)
-st.write("CLIENT_ID:", st.secrets["CLIENT_ID"])
-
 SCOPES = ["User.Read", "Files.Read.All"]  # Delegated
 
 # Excel config
@@ -61,7 +56,7 @@ def _get_query_params() -> dict:
 
 
 def _clear_query_params():
-    """Limpia la URL (quita ?code=...&state=...)."""
+    """Limpia la URL (quita ?code=...)."""
     try:
         st.query_params.clear()  # Streamlit nuevo
     except Exception:
@@ -161,7 +156,7 @@ def safe_pct(x: float, base: float) -> float:
 
 
 # ============================================================
-# MSAL APP (SIN cache para evitar quedarse con tenant viejo)
+# MSAL APP
 # ============================================================
 def get_msal_app():
     return msal.ConfidentialClientApplication(
@@ -169,13 +164,6 @@ def get_msal_app():
         authority=AUTHORITY,
         client_credential=CLIENT_SECRET,
     )
-
-
-def get_token_silent():
-    tr = st.session_state.get("token_result")
-    if isinstance(tr, dict) and tr.get("access_token"):
-        return tr
-    return None
 
 
 # ============================================================
@@ -187,61 +175,57 @@ if not REDIRECT_URI:
     st.error("Falta REDIRECT_URI en Secrets. Ej: https://cnet-dashboard.streamlit.app (sin slash final).")
     st.stop()
 
-token_result = get_token_silent()
+# Debug opcional
+with st.expander("🔎 Debug (opcional)", expanded=False):
+    st.write("TENANT:", TENANT_ID)
+    st.write("AUTHORITY:", AUTHORITY)
+    st.write("REDIRECT_URI:", REDIRECT_URI)
+    st.write("CLIENT_ID:", CLIENT_ID)
+
+app = get_msal_app()
+qp = _get_query_params()
 
 # ============================================================
-# LOGIN
+# LOGIN (SIN FLOW, SIN STATE)
 # ============================================================
-if not token_result:
-    st.warning("No has iniciado sesión en OneDrive/SharePoint")
+if "token_result" not in st.session_state:
 
-    app = get_msal_app()
-
-    # Debug útil (puedes dejarlo)
-    st.caption(f"AUTHORITY en runtime: {AUTHORITY}")
-
-    if st.button("🔐 Generar link de login (nuevo)"):
-        st.session_state.pop("flow", None)
-        st.session_state.pop("auth_url", None)
-        _clear_query_params()
-        st.rerun()
-
-    if "flow" not in st.session_state:
-        st.session_state.flow = app.initiate_auth_code_flow(
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI,
-        )
-        st.session_state.auth_url = st.session_state.flow["auth_uri"]
-
-    st.markdown("### 🔐 Inicia sesión")
-    st.link_button("Iniciar sesión OneDrive", st.session_state.auth_url)
-
-    # ✅ Ahora debe verse tu TENANT_ID (NO /common/)
-    st.caption(f"Auth URL (debe decir /{TENANT_ID}/): {st.session_state.auth_url}")
-
-    qp = _get_query_params()
-
-    if qp.get("code") and qp.get("state"):
+    # Si venimos del redirect con ?code=
+    if qp.get("code"):
         try:
-            result = app.acquire_token_by_auth_code_flow(
-                st.session_state.flow,
-                qp,
+            result = app.acquire_token_by_authorization_code(
+                code=qp["code"],
                 scopes=SCOPES,
+                redirect_uri=REDIRECT_URI,
             )
-            if "access_token" in result:
-                st.session_state.token_result = result
-                _clear_query_params()
-                st.rerun()
-            else:
-                st.error("No se pudo obtener access_token.")
-                st.code(result)
-                st.stop()
         except Exception as e:
             st.error(f"Error completando login: {e}")
-            st.info("Tip: presiona 'Generar link de login (nuevo)' y vuelve a iniciar sesión.")
             st.stop()
 
+        if "access_token" in result:
+            st.session_state.token_result = result
+            _clear_query_params()
+            st.rerun()
+        else:
+            st.error("No se pudo obtener access_token.")
+            st.code(result)
+            st.stop()
+
+    # Si NO hay code -> mostrar link de login
+    st.warning("No has iniciado sesión en OneDrive/SharePoint")
+
+    auth_url = app.get_authorization_request_url(
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI,
+    )
+
+    st.markdown("### 🔐 Inicia sesión")
+    st.link_button("Iniciar sesión OneDrive", auth_url)
+    st.caption(f"Auth URL (debe decir /{TENANT_ID}/): {auth_url}")
+
     st.stop()
+
+token_result = st.session_state.token_result
 
 if "access_token" not in token_result:
     st.error("No se pudo obtener token válido.")
@@ -257,7 +241,7 @@ if st.button("🔄 Refresh datos"):
 
 # Logout
 if st.button("🔒 Cerrar sesión"):
-    for k in ["token_result", "flow", "auth_url", "excel_bytes"]:
+    for k in ["token_result", "excel_bytes"]:
         st.session_state.pop(k, None)
     _clear_query_params()
     st.rerun()
