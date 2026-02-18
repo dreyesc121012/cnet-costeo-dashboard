@@ -11,33 +11,29 @@ import msal
 # ============================================================
 CLIENT_ID = st.secrets["CLIENT_ID"]
 CLIENT_SECRET = st.secrets["CLIENT_SECRET"]
-
 ONEDRIVE_SHARED_URL = st.secrets["ONEDRIVE_SHARED_URL"]
 
-# IMPORTANTE: siempre sin slash final
+# IMPORTANTE: sin slash final
 REDIRECT_URI = st.secrets.get("REDIRECT_URI", "").strip().rstrip("/")
 
-# ✅ CLAVE: usar /common (NO uses TENANT_ID aquí)
+# ✅ MULTI-TENANT / PERSONAL: usar /common
 AUTHORITY = "https://login.microsoftonline.com/common"
 
 SCOPES = ["User.Read", "Files.Read.All"]  # Delegated
 
-# Tu Excel
+# Excel config
 SHEET_REAL = "Real Master"
 SHEET_FIXED = "Gasto Fijo"
 HEADER_IDX = 6
 
 st.set_page_config(page_title="CNET Costeo Dashboard", layout="wide")
 
+
 # ============================================================
 # HELPERS
 # ============================================================
-
 def _get_query_params() -> dict:
-    """
-    Devuelve query params como dict[str, str] (valores simples).
-    Compatible con varias versiones de Streamlit.
-    """
+    """Devuelve query params como dict[str,str], compatible con varias versiones de Streamlit."""
     try:
         qp = st.query_params  # Streamlit nuevo
         out = {}
@@ -70,10 +66,7 @@ def _clear_query_params():
 
 
 def make_share_id(shared_url: str) -> str:
-    """
-    Convierte shared URL a shareId para Microsoft Graph:
-    shares/{shareId}/driveItem
-    """
+    """Convierte shared URL a shareId para Microsoft Graph: shares/{shareId}/driveItem"""
     b = base64.b64encode(shared_url.encode("utf-8")).decode("utf-8")
     b = b.rstrip("=").replace("/", "_").replace("+", "-")
     return "u!" + b
@@ -88,12 +81,9 @@ def graph_get(url: str, access_token: str) -> requests.Response:
 
 
 def download_excel_bytes_from_shared_link(access_token: str, shared_url: str) -> bytes:
-    """
-    Descarga el archivo Excel desde un Shared Link (SharePoint/OneDrive).
-    """
+    """Descarga el archivo Excel desde un Shared Link (SharePoint/OneDrive)."""
     share_id = make_share_id(shared_url)
 
-    # 1) Resolver shared link -> driveItem
     meta_url = f"https://graph.microsoft.com/v1.0/shares/{share_id}/driveItem"
     meta = graph_get(meta_url, access_token)
 
@@ -107,7 +97,6 @@ def download_excel_bytes_from_shared_link(access_token: str, shared_url: str) ->
     item_id = meta_json["id"]
     drive_id = meta_json["parentReference"]["driveId"]
 
-    # 2) Descargar contenido
     content_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
     file_r = graph_get(content_url, access_token)
 
@@ -166,10 +155,8 @@ def safe_pct(x: float, base: float) -> float:
 
 
 # ============================================================
-# MSAL APP (cache en session_state)
+# MSAL APP (SIN cache para evitar quedarse con tenant viejo)
 # ============================================================
-
-@st.cache_resource
 def get_msal_app():
     return msal.ConfidentialClientApplication(
         CLIENT_ID,
@@ -179,17 +166,15 @@ def get_msal_app():
 
 
 def get_token_silent():
-    if "token_result" in st.session_state:
-        tr = st.session_state.token_result
-        if isinstance(tr, dict) and tr.get("access_token"):
-            return tr
+    tr = st.session_state.get("token_result")
+    if isinstance(tr, dict) and tr.get("access_token"):
+        return tr
     return None
 
 
 # ============================================================
 # UI
 # ============================================================
-
 st.title("📊 CNET Costeo & Neto Dashboard")
 
 if not REDIRECT_URI:
@@ -206,15 +191,15 @@ if not token_result:
 
     app = get_msal_app()
 
-    colA, colB = st.columns([1, 1])
-    with colA:
-        if st.button("🔐 Generar link de login (nuevo)"):
-            st.session_state.pop("flow", None)
-            st.session_state.pop("auth_url", None)
-            _clear_query_params()
-            st.rerun()
+    # Debug útil (puedes dejarlo)
+    st.caption(f"AUTHORITY en runtime: {AUTHORITY}")
 
-    # Crear flow si no existe
+    if st.button("🔐 Generar link de login (nuevo)"):
+        st.session_state.pop("flow", None)
+        st.session_state.pop("auth_url", None)
+        _clear_query_params()
+        st.rerun()
+
     if "flow" not in st.session_state:
         st.session_state.flow = app.initiate_auth_code_flow(
             scopes=SCOPES,
@@ -225,9 +210,11 @@ if not token_result:
     st.markdown("### 🔐 Inicia sesión")
     st.link_button("Iniciar sesión OneDrive", st.session_state.auth_url)
 
+    # ✅ Esto es lo que debes VER: .../common/oauth2/v2.0/authorize
+    st.caption(f"Auth URL (debe decir /common/): {st.session_state.auth_url}")
+
     qp = _get_query_params()
 
-    # Capturar code cuando Microsoft redirige a tu app
     if qp.get("code") and qp.get("state"):
         try:
             result = app.acquire_token_by_auth_code_flow(
@@ -235,7 +222,6 @@ if not token_result:
                 qp,
                 scopes=SCOPES,
             )
-
             if "access_token" in result:
                 st.session_state.token_result = result
                 _clear_query_params()
@@ -244,7 +230,6 @@ if not token_result:
                 st.error("No se pudo obtener access_token.")
                 st.code(result)
                 st.stop()
-
         except Exception as e:
             st.error(f"Error completando login: {e}")
             st.info("Tip: presiona 'Generar link de login (nuevo)' y vuelve a iniciar sesión.")
@@ -266,17 +251,14 @@ if st.button("🔄 Refresh datos"):
 
 # Logout
 if st.button("🔒 Cerrar sesión"):
-    st.session_state.pop("token_result", None)
-    st.session_state.pop("flow", None)
-    st.session_state.pop("auth_url", None)
-    st.session_state.pop("excel_bytes", None)
+    for k in ["token_result", "flow", "auth_url", "excel_bytes"]:
+        st.session_state.pop(k, None)
     _clear_query_params()
     st.rerun()
 
 # ============================================================
 # Descargar Excel y cargar datos
 # ============================================================
-
 try:
     if "excel_bytes" not in st.session_state:
         st.info("📥 Descargando Excel desde SharePoint/OneDrive…")
@@ -284,9 +266,7 @@ try:
             token_result["access_token"],
             ONEDRIVE_SHARED_URL
         )
-
     excel_bytes = st.session_state.excel_bytes
-
 except Exception as e:
     st.error("No pude descargar el archivo desde OneDrive/SharePoint.")
     st.code(str(e))
@@ -298,7 +278,6 @@ fixed_total = load_fixed_total(excel_bytes)
 # ============================================================
 # TU LÓGICA (KPIs)
 # ============================================================
-
 COL_INCOME = "Total to Bill"
 COL_COST   = "Total Cost Month"
 COL_MGMT   = "Total Management Fee"
