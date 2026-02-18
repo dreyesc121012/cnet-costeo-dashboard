@@ -32,10 +32,11 @@ SHEET_REAL = "Real Master"
 SHEET_FIXED = "Gasto Fijo"
 HEADER_IDX = 6
 
-# Columna exacta de mes
-MONTH_COL = "Month"   # texto: "January", "February", etc.
+# Exact column names
+MONTH_COL = "Month"   # text: "January", "February", etc.
+YEAR_COL  = "Year"    # numeric or text year like 2026
 
-st.set_page_config(page_title="CNET Costeo Dashboard", layout="wide")
+st.set_page_config(page_title="CNET Costing Dashboard", layout="wide")
 
 # ============================================================
 # HELPERS (Streamlit URL params)
@@ -91,8 +92,8 @@ def download_excel_bytes_from_shared_link(access_token: str, shared_url: str) ->
     meta = graph_get(meta_url, access_token)
     if meta.status_code != 200:
         raise RuntimeError(
-            f"Error resolviendo shared link: {meta.status_code}\n{meta.text}\n\n"
-            f"TIP: Genera un link NUEVO (Share -> Copy link) y reemplaza ONEDRIVE_SHARED_URL."
+            f"Error resolving shared link: {meta.status_code}\n{meta.text}\n\n"
+            f"TIP: Create a NEW link (Share -> Copy link) and replace ONEDRIVE_SHARED_URL."
         )
 
     meta_json = meta.json()
@@ -102,7 +103,7 @@ def download_excel_bytes_from_shared_link(access_token: str, shared_url: str) ->
     content_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
     file_r = graph_get(content_url, access_token)
     if file_r.status_code != 200:
-        raise RuntimeError(f"Error descargando archivo: {file_r.status_code}\n{file_r.text}")
+        raise RuntimeError(f"Error downloading file: {file_r.status_code}\n{file_r.text}")
 
     return file_r.content
 
@@ -175,71 +176,81 @@ def pick_building_col(df: pd.DataFrame):
     return None
 
 # ============================================================
-# MONTH TEXT -> YYYY-MM (needs Year)
+# MONTH + YEAR -> TEXT LABELS (NO TIME AXIS)
 # ============================================================
-_MONTH_MAP = {
-    "jan": "January", "january": "January",
-    "feb": "February", "february": "February",
-    "mar": "March", "march": "March",
-    "apr": "April", "april": "April",
-    "may": "May",
-    "jun": "June", "june": "June",
-    "jul": "July", "july": "July",
-    "aug": "August", "august": "August",
-    "sep": "September", "sept": "September", "september": "September",
-    "oct": "October", "october": "October",
-    "nov": "November", "november": "November",
-    "dec": "December", "december": "December",
+_MONTH_NUM = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
 }
 
-def month_text_to_month_label(s: pd.Series, year: int) -> pd.Series:
+def build_month_fields(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Convierte Month texto ('January') + year -> 'YYYY-MM'.
-    Soporta 'Jan', 'January', 'January 2026', etc.
+    Adds:
+      _YearInt   -> int year
+      _MonthNum  -> 1..12
+      _MonthKey  -> YYYY-MM (for sorting)
+      _MonthText -> 'January 2026' (for display)
     """
-    ss = s.astype(str).str.strip()
+    out = df.copy()
 
-    # Si trae algo como "January 2026" o "Jan-2026", intentamos parse directo primero
-    dt_direct = pd.to_datetime(ss, errors="coerce", infer_datetime_format=True)
-    out = dt_direct.dt.to_period("M").astype(str)
+    out["_YearInt"] = pd.to_numeric(out[YEAR_COL], errors="coerce").astype("Int64")
 
-    # Donde no pudo parsear, normalizamos por nombre de mes + year
-    mask_bad = dt_direct.isna() & ss.notna()
-    if mask_bad.any():
-        raw = ss[mask_bad].str.lower()
+    m = out[MONTH_COL].astype(str).str.strip().str.lower()
+    m = m.str.replace(r"[^a-z]", "", regex=True)  # keep letters only
+    out["_MonthNum"] = m.map(_MONTH_NUM).astype("Int64")
 
-        # queda solo palabra principal (January, Jan)
-        raw = raw.str.replace(r"[^a-z]", " ", regex=True).str.split().str[0].fillna("")
+    bad = out["_YearInt"].isna() | out["_MonthNum"].isna()
+    out["_MonthKey"] = pd.NA
+    out["_MonthText"] = pd.NA
 
-        norm = raw.map(_MONTH_MAP)
-        # armamos fecha "January 1, 2026"
-        assembled = norm.fillna("") + " 1 " + str(year)
-        dt2 = pd.to_datetime(assembled, errors="coerce")
-        out.loc[mask_bad] = dt2.dt.to_period("M").astype(str)
-
-    out = out.replace("NaT", pd.NA)
+    ok = ~bad
+    out.loc[ok, "_MonthKey"] = (
+        out.loc[ok, "_YearInt"].astype(int).astype(str)
+        + "-"
+        + out.loc[ok, "_MonthNum"].astype(int).astype(str).str.zfill(2)
+    )
+    out.loc[ok, "_MonthText"] = (
+        out.loc[ok, MONTH_COL].astype(str).str.strip()
+        + " "
+        + out.loc[ok, "_YearInt"].astype(int).astype(str)
+    )
     return out
 
 # ============================================================
-# FILTERS (Month fijo + Year selector)
+# FILTERS (Year + Month + Company + Province + Client + Project + Building)
 # ============================================================
-def add_filters(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    st.sidebar.header("Filtros Ejecutivos")
+def add_filters(df: pd.DataFrame) -> pd.DataFrame:
+    st.sidebar.header("Executive Filters")
 
-    # Year selector (porque Month viene sin año)
-    default_year = datetime.now().year
-    year = st.sidebar.number_input("Año (Year) para Month", min_value=2000, max_value=2100, value=default_year, step=1)
+    if MONTH_COL in df.columns and YEAR_COL in df.columns:
+        df = build_month_fields(df)
 
-    # Month filter (Month texto + Year)
-    if MONTH_COL in df.columns:
-        month_labels = month_text_to_month_label(df[MONTH_COL], year=int(year))
-        valid_months = sorted([m for m in month_labels.dropna().unique().tolist() if m])
-        if valid_months:
-            sel_m = st.sidebar.multiselect("Mes (YYYY-MM)", valid_months, default=[])
-            if sel_m:
-                df = df[month_labels.isin(sel_m)]
+        years = sorted([int(y) for y in df["_YearInt"].dropna().unique().tolist()])
+        sel_years = st.sidebar.multiselect("Year", years, default=[])
+        if sel_years:
+            df = df[df["_YearInt"].isin(sel_years)]
+
+        month_table = (
+            df[["_MonthKey", "_MonthText"]]
+            .dropna()
+            .drop_duplicates()
+            .sort_values("_MonthKey")
+        )
+        sel_months = st.sidebar.multiselect("Month", month_table["_MonthText"].tolist(), default=[])
+        if sel_months:
+            df = df[df["_MonthText"].isin(sel_months)]
     else:
-        st.sidebar.warning("No encontré la columna Month para filtrar por mes.")
+        st.sidebar.warning("Month/Year columns were not found in the Excel file.")
 
     # Company
     c_company = find_col(df, "Company")
@@ -277,7 +288,7 @@ def add_filters(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
         if sel:
             df = df[df[c_bld].astype(str).isin(sel)]
 
-    return df, int(year)
+    return df
 
 # ============================================================
 # PDF REPORT
@@ -295,7 +306,7 @@ def build_pdf_report(
 
     y = height - 50
     c.setFont("Helvetica-Bold", 16)
-    c.drawString(40, y, "CNET Costeo & Neto - Executive Summary")
+    c.drawString(40, y, "CNET Costing & Net - Executive Summary")
     y -= 16
     c.setFont("Helvetica", 9)
     c.drawString(40, y, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -304,14 +315,14 @@ def build_pdf_report(
     y -= 20
 
     rows = [
-        ("Ingresos (Total to Bill)", income, 1.0),
-        ("Costos (Total Cost Month)", cost, p_cost),
-        ("Gross (Ingreso - Costo)", gross, p_gross),
-        ("Gastos fijos (Gasto Fijo)", fixed_total, p_fixed),
-        ("Neto (Gross - Fijos)", net, p_net),
+        ("Revenue (Total to Bill)", income, 1.0),
+        ("Costs (Total Cost Month)", cost, p_cost),
+        ("Gross (Revenue - Cost)", gross, p_gross),
+        ("Fixed Expenses (Gasto Fijo)", fixed_total, p_fixed),
+        ("Net (Gross - Fixed)", net, p_net),
         ("Management Fee", mgmt_fee_total, p_mgmt),
         ("Royalty 5%", royalty_total, p_roy),
-        ("Nuevo Total", new_total, p_new),
+        ("New Total", new_total, p_new),
     ]
 
     c.setFont("Helvetica-Bold", 11)
@@ -319,9 +330,9 @@ def build_pdf_report(
     y -= 14
 
     c.setFont("Helvetica", 10)
-    c.drawString(40, y, "Concepto")
-    c.drawRightString(360, y, "Monto")
-    c.drawRightString(520, y, "% Ingresos")
+    c.drawString(40, y, "Concept")
+    c.drawRightString(360, y, "Amount")
+    c.drawRightString(520, y, "% of Revenue")
     y -= 12
 
     for label, val, pct in rows:
@@ -346,7 +357,7 @@ def build_pdf_report(
         if fig is None:
             return y_top
         try:
-            img_bytes = fig.to_image(format="png")  # requiere kaleido
+            img_bytes = fig.to_image(format="png")  # requires kaleido
             img = ImageReader(BytesIO(img_bytes))
             c.setFont("Helvetica-Bold", 11)
             c.drawString(40, y_top, title)
@@ -355,11 +366,11 @@ def build_pdf_report(
             return y_top - 235
         except Exception:
             c.setFont("Helvetica", 9)
-            c.drawString(40, y_top, f"{title} (no se pudo exportar imagen - instala kaleido)")
+            c.drawString(40, y_top, f"{title} (could not export image - install kaleido)")
             return y_top - 15
 
     y = add_plotly_image(fig_gauge, "Gauge - Final Margin", y)
-    y = add_plotly_image(fig_waterfall, "Cascada - Ingresos → Costos → Fijos → Fees → Total", y)
+    y = add_plotly_image(fig_waterfall, "Waterfall - Revenue → Cost → Fixed → Fees → Total", y)
 
     c.showPage()
     c.save()
@@ -380,10 +391,10 @@ def get_msal_app():
 # ============================================================
 # UI + LOGIN
 # ============================================================
-st.title("📊 CNET Costeo & Neto Dashboard")
+st.title("📊 CNET Costing & Net Dashboard")
 
 if not REDIRECT_URI:
-    st.error("Falta REDIRECT_URI en Secrets. Ej: https://cnet-dashboard.streamlit.app (sin slash final).")
+    st.error("REDIRECT_URI is missing in Secrets. Example: https://cnet-dashboard.streamlit.app (no trailing slash).")
     st.stop()
 
 app = get_msal_app()
@@ -399,7 +410,7 @@ if "token_result" not in st.session_state:
                 redirect_uri=REDIRECT_URI,
             )
         except Exception as e:
-            st.error(f"Error completando login: {e}")
+            st.error(f"Login error: {e}")
             st.stop()
 
         if "access_token" in result:
@@ -407,42 +418,37 @@ if "token_result" not in st.session_state:
             _clear_query_params()
             st.rerun()
         else:
-            st.error("No se pudo obtener access_token.")
+            st.error("Could not obtain access_token.")
             st.code(result)
             st.stop()
 
-    st.warning("No has iniciado sesión en OneDrive/SharePoint")
-
-    auth_url = app.get_authorization_request_url(
-        scopes=SCOPES,
-        redirect_uri=REDIRECT_URI,
-    )
-
-    st.markdown("### 🔐 Inicia sesión")
-    st.link_button("Iniciar sesión OneDrive", auth_url)
-    st.caption(f"Auth URL (debe decir /{TENANT_ID}/): {auth_url}")
+    st.warning("You are not signed in to OneDrive/SharePoint.")
+    auth_url = app.get_authorization_request_url(scopes=SCOPES, redirect_uri=REDIRECT_URI)
+    st.markdown("### 🔐 Sign in")
+    st.link_button("Sign in to OneDrive", auth_url)
+    st.caption(f"Auth URL (should contain /{TENANT_ID}/): {auth_url}")
     st.stop()
 
 token_result = st.session_state.token_result
 
 if "access_token" not in token_result:
-    st.error("No se pudo obtener token válido.")
+    st.error("Could not obtain a valid token.")
     st.code(token_result)
     st.stop()
 
-st.success("✅ Conectado a OneDrive/SharePoint (token activo)")
+st.success("✅ Connected to OneDrive/SharePoint (active token)")
 
 # Header actions
 colA, colB = st.columns([1, 3])
 with colA:
-    if st.button("🔄 Refresh datos"):
+    if st.button("🔄 Refresh data"):
         st.session_state.pop("excel_bytes", None)
         read_real_master_from_bytes.clear()
         load_fixed_total_from_bytes.clear()
         st.rerun()
 
 with colB:
-    if st.button("🔒 Cerrar sesión"):
+    if st.button("🔒 Sign out"):
         for k in ["token_result", "excel_bytes"]:
             st.session_state.pop(k, None)
         _clear_query_params()
@@ -453,25 +459,25 @@ with colB:
 # ============================================================
 try:
     if "excel_bytes" not in st.session_state:
-        st.info("📥 Descargando Excel desde SharePoint/OneDrive…")
+        st.info("📥 Downloading Excel from SharePoint/OneDrive…")
         st.session_state.excel_bytes = download_excel_bytes_from_shared_link(
             token_result["access_token"],
             ONEDRIVE_SHARED_URL
         )
     excel_bytes = st.session_state.excel_bytes
 except Exception as e:
-    st.error("No pude descargar el archivo desde OneDrive/SharePoint.")
+    st.error("Could not download the file from OneDrive/SharePoint.")
     st.code(str(e))
     st.stop()
 
 df_all = read_real_master_from_bytes(excel_bytes)
 fixed_total = load_fixed_total_from_bytes(excel_bytes)
 
-# aplicar filtros (incluye Month + Year)
-df, selected_year = add_filters(df_all.copy())
+# Apply filters (Year breakdown comes from the Year column)
+df = add_filters(df_all.copy())
 
 # ============================================================
-# KPIs base
+# KPI base
 # ============================================================
 COL_INCOME = "Total to Bill"
 COL_COST   = "Total Cost Month"
@@ -491,8 +497,8 @@ missing = [k for k, v in {
 }.items() if v is None]
 
 if missing:
-    st.error(f"No encontré estas columnas en 'Real Master': {missing}")
-    with st.expander("Ver columnas detectadas"):
+    st.error(f"Missing columns in 'Real Master': {missing}")
+    with st.expander("Show detected columns"):
         st.write(df.columns.tolist())
     st.stop()
 
@@ -518,30 +524,30 @@ p_roy   = safe_pct(royalty_total, income)
 p_new   = safe_pct(new_total, income)
 
 # ============================================================
-# SEMÁFORO + GAUGE
+# Traffic Light + Gauge
 # ============================================================
-st.subheader("📌 Margen Ejecutivo (KPIs + Semáforo)")
+st.subheader("📌 Executive Margin (KPIs + Traffic Light)")
 
-target = st.slider("Margen objetivo (%)", 0, 60, 25) / 100
-zona_amarilla = 0.05
+target = st.slider("Target margin (%)", 0, 60, 25) / 100
+yellow_zone = 0.05
 
 gross_margin = gross / income if income else 0
 net_margin   = net / income if income else 0
 final_margin = new_total / income if income else 0
 
-def semaforo(m, tgt):
-    if m >= tgt + zona_amarilla:
+def traffic_light(m, tgt):
+    if m >= tgt + yellow_zone:
         return "🟢"
-    elif m >= tgt - zona_amarilla:
+    elif m >= tgt - yellow_zone:
         return "🟡"
     return "🔴"
 
 c1, c2, c3 = st.columns(3)
-c1.metric("Gross Margin", f"{gross_margin:.1%}", f"{semaforo(gross_margin, target)} vs {target:.0%}")
-c2.metric("Net Margin", f"{net_margin:.1%}", f"{semaforo(net_margin, target)} vs {target:.0%}")
-c3.metric("Final Margin (after fees)", f"{final_margin:.1%}", f"{semaforo(final_margin, target)} vs {target:.0%}")
+c1.metric("Gross Margin", f"{gross_margin:.1%}", f"{traffic_light(gross_margin, target)} vs {target:.0%}")
+c2.metric("Net Margin", f"{net_margin:.1%}", f"{traffic_light(net_margin, target)} vs {target:.0%}")
+c3.metric("Final Margin (after fees)", f"{final_margin:.1%}", f"{traffic_light(final_margin, target)} vs {target:.0%}")
 
-st.caption("Gauge: Margen final (después de fees)")
+st.caption("Gauge: Final margin (after fees)")
 gauge_max = 60
 fig_gauge = go.Figure(go.Indicator(
     mode="gauge+number",
@@ -551,9 +557,9 @@ fig_gauge = go.Figure(go.Indicator(
         "axis": {"range": [0, gauge_max]},
         "threshold": {"line": {"width": 4}, "value": float(target * 100)},
         "steps": [
-            {"range": [0, max(0, (target - zona_amarilla) * 100)]},
-            {"range": [max(0, (target - zona_amarilla) * 100), (target + zona_amarilla) * 100]},
-            {"range": [(target + zona_amarilla) * 100, gauge_max]},
+            {"range": [0, max(0, (target - yellow_zone) * 100)]},
+            {"range": [max(0, (target - yellow_zone) * 100), (target + yellow_zone) * 100]},
+            {"range": [(target + yellow_zone) * 100, gauge_max]},
         ],
     }
 ))
@@ -562,42 +568,52 @@ st.plotly_chart(fig_gauge, use_container_width=True)
 # ============================================================
 # KPI CARDS
 # ============================================================
-st.subheader("📊 KPIs (Ejecutivo)")
+st.subheader("📊 KPIs (Executive)")
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("Ingresos (Total to Bill)", f"${income:,.2f}")
-k2.metric("Costos (Total Cost Month)", f"${cost:,.2f}", f"{p_cost*100:,.2f}%")
-k3.metric("Gross (Ingreso - Costo)", f"${gross:,.2f}", f"{p_gross*100:,.2f}%")
-k4.metric("Gastos fijos (Gasto Fijo)", f"${fixed_total:,.2f}", f"{p_fixed*100:,.2f}%")
+k1.metric("Revenue (Total to Bill)", f"${income:,.2f}")
+k2.metric("Costs (Total Cost Month)", f"${cost:,.2f}", f"{p_cost*100:,.2f}%")
+k3.metric("Gross (Revenue - Cost)", f"${gross:,.2f}", f"{p_gross*100:,.2f}%")
+k4.metric("Fixed Expenses (Gasto Fijo)", f"${fixed_total:,.2f}", f"{p_fixed*100:,.2f}%")
 
 k5, k6, k7, k8 = st.columns(4)
-k5.metric("Neto (Gross - Fijos)", f"${net:,.2f}", f"{p_net*100:,.2f}%")
+k5.metric("Net (Gross - Fixed)", f"${net:,.2f}", f"{p_net*100:,.2f}%")
 k6.metric("Total Management Fee", f"${mgmt_fee_total:,.2f}", f"{p_mgmt*100:,.2f}%")
-k7.metric("Royalty CNET Group Inc 5%", f"${royalty_total:,.2f}", f"{p_roy*100:,.2f}%")
-k8.metric("Nuevo Total", f"${new_total:,.2f}", f"{p_new*100:,.2f}%")
+k7.metric("Royalty (5%)", f"${royalty_total:,.2f}", f"{p_roy*100:,.2f}%")
+k8.metric("New Total", f"${new_total:,.2f}", f"{p_new*100:,.2f}%")
 
 # ============================================================
 # WATERFALL
 # ============================================================
-st.subheader("📉 Cascada Ejecutiva")
+st.subheader("📉 Executive Waterfall")
 fig_waterfall = go.Figure(go.Waterfall(
     orientation="v",
     measure=["absolute", "relative", "relative", "relative", "relative", "total"],
-    x=["Ingresos", "Costos", "Gross", "Gastos fijos", "Mgmt+Royalty", "Nuevo Total"],
+    x=["Revenue", "Costs", "Gross", "Fixed", "Mgmt+Royalty", "New Total"],
     y=[income, -cost, gross, -fixed_total, (mgmt_fee_total + royalty_total), new_total],
 ))
-fig_waterfall.update_layout(title="Cascada: Ingresos → Costos → Fijos → +Fees → Nuevo Total", showlegend=False)
+fig_waterfall.update_layout(title="Waterfall: Revenue → Costs → Fixed → +Fees → New Total", showlegend=False)
 st.plotly_chart(fig_waterfall, use_container_width=True)
 
 # ============================================================
-# ✅ BREAKDOWN POR MES (FILTRADO) usando Year + Month texto
+# ✅ MONTHLY BREAKDOWN (FILTERED) — uses Year column, NO TIME AXIS
 # ============================================================
-st.subheader("🗓️ Breakdown por Mes (filtrado)")
+st.subheader("🗓️ Monthly Breakdown (Filtered)")
 
-if MONTH_COL in df.columns:
-    df_m = df.copy()  # filtrado
-    df_m["_MonthLabel"] = month_text_to_month_label(df_m[MONTH_COL], year=selected_year)
+if MONTH_COL in df.columns and YEAR_COL in df.columns:
+    if "_MonthKey" not in df.columns or "_MonthText" not in df.columns:
+        df = build_month_fields(df)
 
-    # asegurar numéricos
+    # Determine selected years (for title)
+    selected_years = sorted([int(y) for y in df["_YearInt"].dropna().unique().tolist()])
+    title_year_part = (
+        f"Years {', '.join(map(str, selected_years))}"
+        if len(selected_years) != 1
+        else f"Year {selected_years[0]}"
+    )
+
+    df_m = df.copy()
+
+    # Ensure numeric
     for col in [COL_INCOME, COL_COST, COL_MGMT, COL_ROY]:
         c = find_col(df_m, col)
         if c:
@@ -608,41 +624,54 @@ if MONTH_COL in df.columns:
     mm = find_col(df_m, COL_MGMT)
     mr = find_col(df_m, COL_ROY)
 
-    if df_m["_MonthLabel"].notna().any() and all([mi, mc, mm, mr]):
-        g = df_m.groupby("_MonthLabel", dropna=True).agg(
-            Income=(mi, "sum"),
-            Cost=(mc, "sum"),
-            MgmtFee=(mm, "sum"),
-            Royalty=(mr, "sum"),
-        ).reset_index().rename(columns={"_MonthLabel": "Month"})
+    ok = df_m["_MonthKey"].notna() & df_m["_MonthText"].notna()
+    if ok.any() and all([mi, mc, mm, mr]):
+        g = (
+            df_m[ok]
+            .groupby(["_MonthKey", "_MonthText"], dropna=True)
+            .agg(
+                Income=(mi, "sum"),
+                Cost=(mc, "sum"),
+                MgmtFee=(mm, "sum"),
+                Royalty=(mr, "sum"),
+            )
+            .reset_index()
+            .sort_values("_MonthKey")
+        )
 
         g["Gross"] = g["Income"] - g["Cost"]
         g["Net (Gross - Fixed)"] = g["Gross"] - fixed_total
         g["New Total"] = g["Net (Gross - Fixed)"] + g["MgmtFee"] + g["Royalty"]
 
-        g["Month_dt"] = pd.to_datetime(g["Month"] + "-01", errors="coerce")
-        g = g.sort_values("Month_dt").drop(columns=["Month_dt"])
-
-        g_show = g.copy()
+        # Table (pretty)
+        g_show = g.rename(columns={"_MonthText": "Month"}).copy()
         for c in ["Income", "Cost", "Gross", "MgmtFee", "Royalty", "Net (Gross - Fixed)", "New Total"]:
             g_show[c] = g_show[c].map(lambda x: f"${float(x):,.2f}")
-        st.dataframe(g_show, use_container_width=True)
+        st.dataframe(
+            g_show[["Month", "Income", "Cost", "Gross", "MgmtFee", "Royalty", "Net (Gross - Fixed)", "New Total"]],
+            use_container_width=True
+        )
+
+        # Chart (X as TEXT category, not datetime)
+        x_text = g["_MonthText"].tolist()
 
         fig_month = go.Figure()
-        fig_month.add_trace(go.Bar(name="Income", x=g["Month"], y=g["Income"]))
-        fig_month.add_trace(go.Bar(name="Cost", x=g["Month"], y=g["Cost"]))
-        fig_month.add_trace(go.Scatter(name="New Total", x=g["Month"], y=g["New Total"], mode="lines+markers"))
+        fig_month.add_trace(go.Bar(name="Income", x=x_text, y=g["Income"]))
+        fig_month.add_trace(go.Bar(name="Cost", x=x_text, y=g["Cost"]))
+        fig_month.add_trace(go.Scatter(name="New Total", x=x_text, y=g["New Total"], mode="lines+markers"))
         fig_month.update_layout(
-            title=f"Mes a Mes (filtrado) - Year {selected_year}: Income vs Cost + New Total",
+            title=f"Month-to-Month (Filtered) - {title_year_part}: Income vs Cost + New Total",
             barmode="group",
             xaxis_title="Month",
             yaxis_title="Amount",
         )
+        fig_month.update_xaxes(type="category", categoryorder="array", categoryarray=x_text)
+
         st.plotly_chart(fig_month, use_container_width=True)
     else:
-        st.info("No pude armar el breakdown por mes: revisa que Month tenga valores válidos (January, Feb, etc.).")
+        st.info("Could not build the monthly breakdown. Please verify Month/Year values and KPI columns.")
 else:
-    st.info("No existe la columna Month en el dataframe filtrado.")
+    st.info("Month/Year columns were not found in the filtered dataframe.")
 
 # ============================================================
 # EXPORT PDF
@@ -660,7 +689,7 @@ pdf_bytes = build_pdf_report(
 )
 
 st.download_button(
-    "⬇️ Descargar PDF Ejecutivo",
+    "⬇️ Download Executive PDF",
     data=pdf_bytes,
     file_name="CNET_Executive_Report.pdf",
     mime="application/pdf",
@@ -669,24 +698,24 @@ st.download_button(
 # ============================================================
 # TABLES
 # ============================================================
-st.subheader("Resumen")
+st.subheader("Summary")
 summary = pd.DataFrame([
-    ["Ingresos", income, 1.0],
-    ["Costos", cost, p_cost],
+    ["Revenue", income, 1.0],
+    ["Costs", cost, p_cost],
     ["Gross", gross, p_gross],
-    ["Gastos fijos", fixed_total, p_fixed],
-    ["Neto", net, p_net],
+    ["Fixed Expenses", fixed_total, p_fixed],
+    ["Net", net, p_net],
     ["Total Management Fee", mgmt_fee_total, p_mgmt],
-    ["Royalty CNET Group Inc 5%", royalty_total, p_roy],
-    ["Nuevo Total", new_total, p_new],
-], columns=["Concepto", "Monto", "% sobre Ingresos"])
+    ["Royalty (5%)", royalty_total, p_roy],
+    ["New Total", new_total, p_new],
+], columns=["Concept", "Amount", "% of Revenue"])
 
-summary["Monto"] = summary["Monto"].map(lambda x: f"${x:,.2f}")
-summary["% sobre Ingresos"] = summary["% sobre Ingresos"].map(lambda x: f"{x*100:,.2f}%")
+summary["Amount"] = summary["Amount"].map(lambda x: f"${x:,.2f}")
+summary["% of Revenue"] = summary["% of Revenue"].map(lambda x: f"{x*100:,.2f}%")
 st.dataframe(summary, use_container_width=True)
 
-with st.expander("Detalle Real Master (filtrado)"):
+with st.expander("Real Master details (filtered)"):
     st.dataframe(sanitize_for_arrow(df), use_container_width=True)
 
-with st.expander("Detalle Real Master (sin filtrar)"):
+with st.expander("Real Master details (unfiltered)"):
     st.dataframe(sanitize_for_arrow(df_all), use_container_width=True)
