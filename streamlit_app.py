@@ -18,7 +18,7 @@ REDIRECT_URI = st.secrets.get("REDIRECT_URI", "").strip().rstrip("/")
 
 # ✅ SINGLE TENANT: usar tu TENANT_ID (NO /common)
 TENANT_ID = st.secrets["TENANT_ID"]
-AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}/v2.0"
+AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 
 SCOPES = ["User.Read", "Files.Read.All"] 
 
