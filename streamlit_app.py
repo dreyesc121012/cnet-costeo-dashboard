@@ -178,13 +178,6 @@ if not REDIRECT_URI:
     st.error("Falta REDIRECT_URI en Secrets. Ej: https://cnet-dashboard.streamlit.app (sin slash final).")
     st.stop()
 
-# Debug opcional
-with st.expander("🔎 Debug (opcional)", expanded=False):
-    st.write("TENANT:", TENANT_ID)
-    st.write("AUTHORITY:", AUTHORITY)
-    st.write("REDIRECT_URI:", REDIRECT_URI)
-    st.write("CLIENT_ID:", CLIENT_ID)
-
 app = get_msal_app()
 qp = _get_query_params()
 
