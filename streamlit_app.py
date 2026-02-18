@@ -16,8 +16,9 @@ ONEDRIVE_SHARED_URL = st.secrets["ONEDRIVE_SHARED_URL"]
 # IMPORTANTE: sin slash final
 REDIRECT_URI = st.secrets.get("REDIRECT_URI", "").strip().rstrip("/")
 
-# ✅ MULTI-TENANT / PERSONAL: usar /common
-AUTHORITY = "https://login.microsoftonline.com/common"
+# ✅ SINGLE TENANT: usar tu TENANT_ID (NO /common)
+TENANT_ID = st.secrets["TENANT_ID"]
+AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 
 SCOPES = ["User.Read", "Files.Read.All"]  # Delegated
 
@@ -210,8 +211,8 @@ if not token_result:
     st.markdown("### 🔐 Inicia sesión")
     st.link_button("Iniciar sesión OneDrive", st.session_state.auth_url)
 
-    # ✅ Esto es lo que debes VER: .../common/oauth2/v2.0/authorize
-    st.caption(f"Auth URL (debe decir /common/): {st.session_state.auth_url}")
+    # ✅ Ahora debe verse tu TENANT_ID (NO /common/)
+    st.caption(f"Auth URL (debe decir /{TENANT_ID}/): {st.session_state.auth_url}")
 
     qp = _get_query_params()
 
