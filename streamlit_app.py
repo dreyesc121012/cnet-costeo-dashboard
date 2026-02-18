@@ -20,6 +20,11 @@ REDIRECT_URI = st.secrets.get("REDIRECT_URI", "").strip().rstrip("/")
 TENANT_ID = st.secrets["TENANT_ID"]
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 
+st.write("TENANT:", TENANT_ID)
+st.write("AUTHORITY:", AUTHORITY)
+st.write("REDIRECT_URI:", REDIRECT_URI)
+st.write("CLIENT_ID:", st.secrets["CLIENT_ID"])
+
 SCOPES = ["User.Read", "Files.Read.All"]  # Delegated
 
 # Excel config
