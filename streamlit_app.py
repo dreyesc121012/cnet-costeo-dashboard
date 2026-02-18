@@ -158,12 +158,15 @@ def safe_pct(x: float, base: float) -> float:
 # ============================================================
 # MSAL APP
 # ============================================================
+
 def get_msal_app():
     return msal.ConfidentialClientApplication(
         CLIENT_ID,
         authority=AUTHORITY,
         client_credential=CLIENT_SECRET,
+        token_cache=None,   # 👈 importante
     )
+
 
 
 # ============================================================
