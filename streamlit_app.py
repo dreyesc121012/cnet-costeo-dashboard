@@ -1,6 +1,7 @@
 import base64
 from io import BytesIO
 from datetime import datetime
+import re
 
 import pandas as pd
 import streamlit as st
@@ -142,16 +143,25 @@ def load_fixed_total_from_bytes(excel_bytes: bytes) -> float:
     amounts = pd.to_numeric(fx.iloc[:, 2], errors="coerce")
     return float(amounts.fillna(0).sum())
 
+def _norm(s: str) -> str:
+    s = "" if s is None else str(s)
+    s = s.replace("\u00A0", " ")           # non-breaking space
+    s = re.sub(r"\s+", " ", s).strip()     # collapse spaces
+    return s.lower()
+
 def find_col(df: pd.DataFrame, name: str):
-    if name in df.columns:
-        return name
-    n = name.strip().lower()
+    target = _norm(name)
+
+    # exact match (normalized)
     for c in df.columns:
-        if str(c).strip().lower() == n:
+        if _norm(c) == target:
             return c
+
+    # contains match (normalized)
     for c in df.columns:
-        if n in str(c).strip().lower():
+        if target in _norm(c):
             return c
+
     return None
 
 def safe_pct(x: float, base: float) -> float:
@@ -171,7 +181,7 @@ def pick_building_col(df: pd.DataFrame):
         if c:
             return c
     for c in df.columns:
-        if "build" in str(c).strip().lower():
+        if "build" in _norm(c):
             return c
     return None
 
@@ -194,19 +204,12 @@ _MONTH_NUM = {
 }
 
 def build_month_fields(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Adds:
-      _YearInt   -> int year
-      _MonthNum  -> 1..12
-      _MonthKey  -> YYYY-MM (for sorting)
-      _MonthText -> 'January 2026' (for display)
-    """
     out = df.copy()
 
     out["_YearInt"] = pd.to_numeric(out[YEAR_COL], errors="coerce").astype("Int64")
 
     m = out[MONTH_COL].astype(str).str.strip().str.lower()
-    m = m.str.replace(r"[^a-z]", "", regex=True)  # keep letters only
+    m = m.str.replace(r"[^a-z]", "", regex=True)
     out["_MonthNum"] = m.map(_MONTH_NUM).astype("Int64")
 
     bad = out["_YearInt"].isna() | out["_MonthNum"].isna()
@@ -316,7 +319,7 @@ def build_pdf_report(
 
     rows = [
         ("Revenue (Total to Bill)", income, 1.0),
-        ("Costs (Total Cost Month)", cost, p_cost),
+        ("Costs (Total Cost Real)", cost, p_cost),
         ("Gross (Revenue - Cost)", gross, p_gross),
         ("Fixed Expenses (Gasto Fijo)", fixed_total, p_fixed),
         ("Net (Gross - Fixed)", net, p_net),
@@ -477,15 +480,17 @@ fixed_total = load_fixed_total_from_bytes(excel_bytes)
 df = add_filters(df_all.copy())
 
 # ============================================================
-# KPI base
+# KPI base (UPDATED: cost uses Total Cost Real)
 # ============================================================
 COL_INCOME = "Total to Bill"
-COL_COST   = "Total Cost Month"
+COL_COST_REAL   = "Total Cost Real"
+COL_COST_BUDGET = "Total Cost Budget"
+COL_COST_VAR    = "Variation Total Cost (Budget vs Real)"  # Budget - Real
 COL_MGMT   = "Total Management Fee"
 COL_ROY    = "Royalty CNET Group Inc 5%"
 
 # ============================================================
-# CATEGORY SPECS (Budget vs Real uses Budget - Real in your Excel)
+# CATEGORY SPECS (Budget vs Real uses Budget - Real)
 # ============================================================
 CATEGORY_SPECS = {
     "Labor": {
@@ -516,13 +521,13 @@ CATEGORY_SPECS = {
 }
 
 c_income = find_col(df, COL_INCOME)
-c_cost   = find_col(df, COL_COST)
+c_cost   = find_col(df, COL_COST_REAL)  # <-- IMPORTANT FIX
 c_mgmt   = find_col(df, COL_MGMT)
 c_roy    = find_col(df, COL_ROY)
 
 missing = [k for k, v in {
     COL_INCOME: c_income,
-    COL_COST: c_cost,
+    COL_COST_REAL: c_cost,
     COL_MGMT: c_mgmt,
     COL_ROY: c_roy,
 }.items() if v is None]
@@ -602,7 +607,7 @@ st.plotly_chart(fig_gauge, use_container_width=True)
 st.subheader("📊 KPIs (Executive)")
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Revenue (Total to Bill)", f"${income:,.2f}")
-k2.metric("Costs (Total Cost Month)", f"${cost:,.2f}", f"{p_cost*100:,.2f}%")
+k2.metric("Costs (Total Cost Real)", f"${cost:,.2f}", f"{p_cost*100:,.2f}%")
 k3.metric("Gross (Revenue - Cost)", f"${gross:,.2f}", f"{p_gross*100:,.2f}%")
 k4.metric("Fixed Expenses (Gasto Fijo)", f"${fixed_total:,.2f}", f"{p_fixed*100:,.2f}%")
 
@@ -615,9 +620,9 @@ k8.metric("New Total", f"${new_total:,.2f}", f"{p_new*100:,.2f}%")
 # ============================================================
 # OPTIONAL KPI: Total Cost Budget vs Real + % used / variance
 # ============================================================
-tc_r = find_col(df, "Total Cost Real")
-tc_b = find_col(df, "Total Cost Budget")
-tc_v = find_col(df, "Variation Total Cost (Budget vs Real)")  # Budget - Real
+tc_r = find_col(df, COL_COST_REAL)
+tc_b = find_col(df, COL_COST_BUDGET)
+tc_v = find_col(df, COL_COST_VAR)  # Budget - Real
 
 if tc_r and tc_b and tc_v:
     df[tc_r] = pd.to_numeric(df[tc_r], errors="coerce")
@@ -688,16 +693,13 @@ else:
     budget_total = float(df[c_budget].fillna(0).sum())
     var_total = float(df[c_var].fillna(0).sum())  # Budget - Real
 
-    # Over/Under amounts
     over_amt = max(0.0, real_total - budget_total)     # Real - Budget (when over)
-    under_amt = max(0.0, budget_total - real_total)    # Budget - Real (when under) = max(0, var_total)
+    under_amt = max(0.0, budget_total - real_total)    # Budget - Real (when under)
 
-    # % consumption + % over/under
-    pct_of_budget = safe_pct(real_total, budget_total)               # Real / Budget
-    pct_under_vs_budget = safe_pct(under_amt, budget_total)          # Under / Budget
-    pct_over_vs_budget  = safe_pct(over_amt, budget_total)           # Over / Budget
+    pct_of_budget = safe_pct(real_total, budget_total)
+    pct_under_vs_budget = safe_pct(under_amt, budget_total)
+    pct_over_vs_budget  = safe_pct(over_amt, budget_total)
 
-    # Status (Budget - Real)
     status = "🟢 On track"
     if var_total < 0:
         status = "🔴 Over budget"
@@ -729,7 +731,7 @@ st.subheader("🏢 Building Profit / Loss (Filtered)")
 
 bcol = pick_building_col(df)
 c_income2 = find_col(df, COL_INCOME)
-c_total_cost_real = find_col(df, "Total Cost Real")
+c_total_cost_real = find_col(df, COL_COST_REAL)
 
 if not bcol:
     st.info("Building column not found.")
@@ -752,7 +754,6 @@ else:
     b["Profit/Loss"] = b["Revenue"] - b["TotalCostReal"]
     b["Margin %"] = b.apply(lambda r: safe_pct(r["Profit/Loss"], r["Revenue"]), axis=1)
 
-    # Sort: worst first
     b = b.sort_values("Profit/Loss")
 
     def _color_pl(v):
@@ -793,13 +794,14 @@ if MONTH_COL in df.columns and YEAR_COL in df.columns:
 
     df_m = df.copy()
 
-    for col in [COL_INCOME, COL_COST, COL_MGMT, COL_ROY]:
+    # NOTE: cost is Total Cost Real now
+    for col in [COL_INCOME, COL_COST_REAL, COL_MGMT, COL_ROY]:
         c = find_col(df_m, col)
         if c:
             df_m[c] = pd.to_numeric(df_m[c], errors="coerce")
 
     mi = find_col(df_m, COL_INCOME)
-    mc = find_col(df_m, COL_COST)
+    mc = find_col(df_m, COL_COST_REAL)
     mm = find_col(df_m, COL_MGMT)
     mr = find_col(df_m, COL_ROY)
 
@@ -882,17 +884,4 @@ summary = pd.DataFrame([
     ["Gross", gross, p_gross],
     ["Fixed Expenses", fixed_total, p_fixed],
     ["Net", net, p_net],
-    ["Total Management Fee", mgmt_fee_total, p_mgmt],
-    ["Royalty (5%)", royalty_total, p_roy],
-    ["New Total", new_total, p_new],
-], columns=["Concept", "Amount", "% of Revenue"])
-
-summary["Amount"] = summary["Amount"].map(lambda x: f"${x:,.2f}")
-summary["% of Revenue"] = summary["% of Revenue"].map(lambda x: f"{x*100:,.2f}%")
-st.dataframe(summary, use_container_width=True)
-
-with st.expander("Real Master details (filtered)"):
-    st.dataframe(sanitize_for_arrow(df), use_container_width=True)
-
-with st.expander("Real Master details (unfiltered)"):
-    st.dataframe(sanitize_for_arrow(df_all), use_container_width=True)
+    ["Tota]()
