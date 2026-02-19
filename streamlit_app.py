@@ -484,6 +484,37 @@ COL_COST   = "Total Cost Month"
 COL_MGMT   = "Total Management Fee"
 COL_ROY    = "Royalty CNET Group Inc 5%"
 
+# ============================================================
+# CATEGORY SPECS (Budget vs Real uses Budget - Real in your Excel)
+# ============================================================
+CATEGORY_SPECS = {
+    "Labor": {
+        "real": "Total Labor Real",
+        "budget": "Total Labor Budget",
+        "var": "Variation Labor  (Budget vs Real)",   # Budget - Real
+    },
+    "PW": {
+        "real": "Total PW Real",
+        "budget": "Total PW Budget",
+        "var": "Variation PW  (Budget vs Real)",      # Budget - Real
+    },
+    "Supplies": {
+        "real": "Total Supplies Real",
+        "budget": "Total Supplies Budget",
+        "var": "Variation Supplies  (Budget vs Real)",# Budget - Real
+    },
+    "Equipment": {
+        "real": "Total Equipment Real",
+        "budget": "Total Equipment Budget",
+        "var": "Variation Equipment (Budget vs Real)",# Budget - Real
+    },
+    "Total Cost": {
+        "real": "Total Cost Real",
+        "budget": "Total Cost Budget",
+        "var": "Variation Total Cost (Budget vs Real)",# Budget - Real
+    },
+}
+
 c_income = find_col(df, COL_INCOME)
 c_cost   = find_col(df, COL_COST)
 c_mgmt   = find_col(df, COL_MGMT)
@@ -582,6 +613,38 @@ k7.metric("Royalty (5%)", f"${royalty_total:,.2f}", f"{p_roy*100:,.2f}%")
 k8.metric("New Total", f"${new_total:,.2f}", f"{p_new*100:,.2f}%")
 
 # ============================================================
+# OPTIONAL KPI: Total Cost Budget vs Real + % used / variance
+# ============================================================
+tc_r = find_col(df, "Total Cost Real")
+tc_b = find_col(df, "Total Cost Budget")
+tc_v = find_col(df, "Variation Total Cost (Budget vs Real)")  # Budget - Real
+
+if tc_r and tc_b and tc_v:
+    df[tc_r] = pd.to_numeric(df[tc_r], errors="coerce")
+    df[tc_b] = pd.to_numeric(df[tc_b], errors="coerce")
+    df[tc_v] = pd.to_numeric(df[tc_v], errors="coerce")
+
+    total_cost_real = float(df[tc_r].fillna(0).sum())
+    total_cost_budget = float(df[tc_b].fillna(0).sum())
+    total_cost_var = float(df[tc_v].fillna(0).sum())  # Budget - Real
+
+    pct_used = safe_pct(total_cost_real, total_cost_budget)  # Real / Budget
+    pct_under = safe_pct(max(0.0, total_cost_var), total_cost_budget)  # Under % (Budget-Real)/Budget
+    pct_over = safe_pct(max(0.0, total_cost_real - total_cost_budget), total_cost_budget)  # Over % (Real-Budget)/Budget
+
+    status_tc = "🟢 On track"
+    if total_cost_var < 0:
+        status_tc = "🔴 Over budget"
+    elif total_cost_var > 0:
+        status_tc = "🟢 Under budget"
+
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric("Total Cost Real", f"${total_cost_real:,.2f}")
+    t2.metric("Total Cost Budget", f"${total_cost_budget:,.2f}")
+    t3.metric("Variation (Budget - Real)", f"${total_cost_var:,.2f}", status_tc)
+    t4.metric("% Budget Used", f"{pct_used*100:,.1f}%", f"Over: {pct_over*100:,.1f}% | Under: {pct_under*100:,.1f}%")
+
+# ============================================================
 # WATERFALL
 # ============================================================
 st.subheader("📉 Executive Waterfall")
@@ -595,6 +658,124 @@ fig_waterfall.update_layout(title="Waterfall: Revenue → Costs → Fixed → +F
 st.plotly_chart(fig_waterfall, use_container_width=True)
 
 # ============================================================
+# ✅ CATEGORY BUDGET vs REAL BREAKDOWN (FILTERED) — Budget - Real
+# ============================================================
+st.subheader("🧩 Budget vs Real Breakdown (Categories)")
+
+cat = st.selectbox("Select category", list(CATEGORY_SPECS.keys()), index=0)
+spec = CATEGORY_SPECS[cat]
+
+c_real = find_col(df, spec["real"])
+c_budget = find_col(df, spec["budget"])
+c_var = find_col(df, spec["var"])  # Budget - Real
+
+missing_cat = [k for k, v in {
+    spec["real"]: c_real,
+    spec["budget"]: c_budget,
+    spec["var"]: c_var,
+}.items() if v is None]
+
+if missing_cat:
+    st.error(f"Missing columns for '{cat}': {missing_cat}")
+    with st.expander("Show detected columns"):
+        st.write(df.columns.tolist())
+else:
+    df[c_real] = pd.to_numeric(df[c_real], errors="coerce")
+    df[c_budget] = pd.to_numeric(df[c_budget], errors="coerce")
+    df[c_var] = pd.to_numeric(df[c_var], errors="coerce")
+
+    real_total = float(df[c_real].fillna(0).sum())
+    budget_total = float(df[c_budget].fillna(0).sum())
+    var_total = float(df[c_var].fillna(0).sum())  # Budget - Real
+
+    # Over/Under amounts
+    over_amt = max(0.0, real_total - budget_total)     # Real - Budget (when over)
+    under_amt = max(0.0, budget_total - real_total)    # Budget - Real (when under) = max(0, var_total)
+
+    # % consumption + % over/under
+    pct_of_budget = safe_pct(real_total, budget_total)               # Real / Budget
+    pct_under_vs_budget = safe_pct(under_amt, budget_total)          # Under / Budget
+    pct_over_vs_budget  = safe_pct(over_amt, budget_total)           # Over / Budget
+
+    # Status (Budget - Real)
+    status = "🟢 On track"
+    if var_total < 0:
+        status = "🔴 Over budget"
+    elif var_total > 0:
+        status = "🟢 Under budget"
+
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric(f"{cat} - Real", f"${real_total:,.2f}")
+    a2.metric(f"{cat} - Budget", f"${budget_total:,.2f}")
+    a3.metric("Variation (Budget - Real)", f"${var_total:,.2f}", f"Over: ${over_amt:,.2f} | Under: ${under_amt:,.2f}")
+    a4.metric("% of Budget Used", f"{pct_of_budget*100:,.1f}%", f"Over: {pct_over_vs_budget*100:,.1f}% | Under: {pct_under_vs_budget*100:,.1f}%")
+
+    fig_cat = go.Figure()
+    fig_cat.add_trace(go.Bar(name="Budget", x=["Budget"], y=[budget_total]))
+    fig_cat.add_trace(go.Bar(name="Real", x=["Real"], y=[real_total]))
+    fig_cat.update_layout(
+        title=f"{cat}: Budget vs Real (Filtered)",
+        barmode="group",
+        xaxis_title="",
+        yaxis_title="Amount",
+    )
+    st.plotly_chart(fig_cat, use_container_width=True)
+
+# ============================================================
+# ✅ BUILDING PROFIT / LOSS (RED if LOSS, GREEN if PROFIT)
+# Uses: Revenue (Total to Bill) - Total Cost Real
+# ============================================================
+st.subheader("🏢 Building Profit / Loss (Filtered)")
+
+bcol = pick_building_col(df)
+c_income2 = find_col(df, COL_INCOME)
+c_total_cost_real = find_col(df, "Total Cost Real")
+
+if not bcol:
+    st.info("Building column not found.")
+elif not c_income2:
+    st.info("Revenue column (Total to Bill) not found.")
+elif not c_total_cost_real:
+    st.info("Total Cost Real column not found (needed for building P/L).")
+else:
+    df[c_income2] = pd.to_numeric(df[c_income2], errors="coerce")
+    df[c_total_cost_real] = pd.to_numeric(df[c_total_cost_real], errors="coerce")
+
+    b = (
+        df.groupby(bcol, dropna=False)
+          .agg(
+              Revenue=(c_income2, "sum"),
+              TotalCostReal=(c_total_cost_real, "sum"),
+          )
+          .reset_index()
+    )
+    b["Profit/Loss"] = b["Revenue"] - b["TotalCostReal"]
+    b["Margin %"] = b.apply(lambda r: safe_pct(r["Profit/Loss"], r["Revenue"]), axis=1)
+
+    # Sort: worst first
+    b = b.sort_values("Profit/Loss")
+
+    def _color_pl(v):
+        try:
+            v = float(v)
+        except Exception:
+            return ""
+        return "color: red; font-weight: 700;" if v < 0 else "color: green; font-weight: 700;"
+
+    b_show = b.copy()
+    b_show["Revenue"] = b_show["Revenue"].map(lambda x: f"${float(x):,.2f}")
+    b_show["TotalCostReal"] = b_show["TotalCostReal"].map(lambda x: f"${float(x):,.2f}")
+
+    sty = (
+        b_show.style
+        .format({"Profit/Loss": "${:,.2f}", "Margin %": "{:.1%}"})
+        .applymap(_color_pl, subset=["Profit/Loss"])
+        .applymap(lambda v: "color: red; font-weight: 700;" if float(v) < 0 else "color: green; font-weight: 700;",
+                  subset=["Margin %"])
+    )
+    st.dataframe(sty, use_container_width=True)
+
+# ============================================================
 # ✅ MONTHLY BREAKDOWN (FILTERED) — uses Year column, NO TIME AXIS
 # ============================================================
 st.subheader("🗓️ Monthly Breakdown (Filtered)")
@@ -603,7 +784,6 @@ if MONTH_COL in df.columns and YEAR_COL in df.columns:
     if "_MonthKey" not in df.columns or "_MonthText" not in df.columns:
         df = build_month_fields(df)
 
-    # Determine selected years (for title)
     selected_years = sorted([int(y) for y in df["_YearInt"].dropna().unique().tolist()])
     title_year_part = (
         f"Years {', '.join(map(str, selected_years))}"
@@ -613,7 +793,6 @@ if MONTH_COL in df.columns and YEAR_COL in df.columns:
 
     df_m = df.copy()
 
-    # Ensure numeric
     for col in [COL_INCOME, COL_COST, COL_MGMT, COL_ROY]:
         c = find_col(df_m, col)
         if c:
@@ -643,7 +822,6 @@ if MONTH_COL in df.columns and YEAR_COL in df.columns:
         g["Net (Gross - Fixed)"] = g["Gross"] - fixed_total
         g["New Total"] = g["Net (Gross - Fixed)"] + g["MgmtFee"] + g["Royalty"]
 
-        # Table (pretty)
         g_show = g.rename(columns={"_MonthText": "Month"}).copy()
         for c in ["Income", "Cost", "Gross", "MgmtFee", "Royalty", "Net (Gross - Fixed)", "New Total"]:
             g_show[c] = g_show[c].map(lambda x: f"${float(x):,.2f}")
@@ -652,7 +830,6 @@ if MONTH_COL in df.columns and YEAR_COL in df.columns:
             use_container_width=True
         )
 
-        # Chart (X as TEXT category, not datetime)
         x_text = g["_MonthText"].tolist()
 
         fig_month = go.Figure()
