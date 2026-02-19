@@ -884,4 +884,17 @@ summary = pd.DataFrame([
     ["Gross", gross, p_gross],
     ["Fixed Expenses", fixed_total, p_fixed],
     ["Net", net, p_net],
-    ["Tota]()
+    ["Total Management Fee", mgmt_fee_total, p_mgmt],
+    ["Royalty (5%)", royalty_total, p_roy],
+    ["New Total", new_total, p_new],
+], columns=["Concept", "Amount", "% of Revenue"])
+
+summary["Amount"] = summary["Amount"].map(lambda x: f"${x:,.2f}")
+summary["% of Revenue"] = summary["% of Revenue"].map(lambda x: f"{x*100:,.2f}%")
+st.dataframe(summary, use_container_width=True)
+
+with st.expander("Real Master details (filtered)"):
+    st.dataframe(sanitize_for_arrow(df), use_container_width=True)
+
+with st.expander("Real Master details (unfiltered)"):
+    st.dataframe(sanitize_for_arrow(df_all), use_container_width=True)
