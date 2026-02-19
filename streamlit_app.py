@@ -727,34 +727,39 @@ else:
 # ✅ BUILDING PROFIT / LOSS (RED if LOSS, GREEN if PROFIT)
 # Uses: Revenue (Total to Bill) - Total Cost Real
 # ============================================================
-st.subheader("🏢 Building Profit / Loss (Filtered)")
+st.subheader("🧾 Project Profit / Loss (Filtered)")
 
-bcol = pick_building_col(df)
+pcol = find_col(df, "Project Name")  # <-- key change
 c_income2 = find_col(df, COL_INCOME)
 c_total_cost_real = find_col(df, COL_COST_REAL)
 
-if not bcol:
-    st.info("Building column not found.")
+if not pcol:
+    st.info("Project column (Project Name) not found.")
 elif not c_income2:
     st.info("Revenue column (Total to Bill) not found.")
 elif not c_total_cost_real:
-    st.info("Total Cost Real column not found (needed for building P/L).")
+    st.info("Total Cost Real column not found (needed for Project P/L).")
 else:
     df[c_income2] = pd.to_numeric(df[c_income2], errors="coerce")
     df[c_total_cost_real] = pd.to_numeric(df[c_total_cost_real], errors="coerce")
 
-    b = (
-        df.groupby(bcol, dropna=False)
+    p = (
+        df.groupby(pcol, dropna=False)
           .agg(
               Revenue=(c_income2, "sum"),
               TotalCostReal=(c_total_cost_real, "sum"),
           )
           .reset_index()
     )
-    b["Profit/Loss"] = b["Revenue"] - b["TotalCostReal"]
-    b["Margin %"] = b.apply(lambda r: safe_pct(r["Profit/Loss"], r["Revenue"]), axis=1)
 
-    b = b.sort_values("Profit/Loss")
+    # Make project name readable + avoid NaN
+    p[pcol] = p[pcol].astype(str).replace({"nan": "None"})
+
+    p["Profit/Loss"] = p["Revenue"] - p["TotalCostReal"]
+    p["Margin %"] = p.apply(lambda r: safe_pct(r["Profit/Loss"], r["Revenue"]), axis=1)
+
+    # Sort: worst first
+    p = p.sort_values("Profit/Loss")
 
     def _color_pl(v):
         try:
@@ -763,12 +768,12 @@ else:
             return ""
         return "color: red; font-weight: 700;" if v < 0 else "color: green; font-weight: 700;"
 
-    b_show = b.copy()
-    b_show["Revenue"] = b_show["Revenue"].map(lambda x: f"${float(x):,.2f}")
-    b_show["TotalCostReal"] = b_show["TotalCostReal"].map(lambda x: f"${float(x):,.2f}")
+    p_show = p.copy()
+    p_show["Revenue"] = p_show["Revenue"].map(lambda x: f"${float(x):,.2f}")
+    p_show["TotalCostReal"] = p_show["TotalCostReal"].map(lambda x: f"${float(x):,.2f}")
 
     sty = (
-        b_show.style
+        p_show.style
         .format({"Profit/Loss": "${:,.2f}", "Margin %": "{:.1%}"})
         .applymap(_color_pl, subset=["Profit/Loss"])
         .applymap(lambda v: "color: red; font-weight: 700;" if float(v) < 0 else "color: green; font-weight: 700;",
