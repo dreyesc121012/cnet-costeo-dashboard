@@ -145,19 +145,17 @@ def load_fixed_total_from_bytes(excel_bytes: bytes) -> float:
 
 def _norm(s: str) -> str:
     s = "" if s is None else str(s)
-    s = s.replace("\u00A0", " ")           # non-breaking space
-    s = re.sub(r"\s+", " ", s).strip()     # collapse spaces
+    s = s.replace("\u00A0", " ")
+    s = re.sub(r"\s+", " ", s).strip()
     return s.lower()
 
 def find_col(df: pd.DataFrame, name: str):
     target = _norm(name)
 
-    # exact match (normalized)
     for c in df.columns:
         if _norm(c) == target:
             return c
 
-    # contains match (normalized)
     for c in df.columns:
         if target in _norm(c):
             return c
@@ -184,6 +182,27 @@ def pick_building_col(df: pd.DataFrame):
         if "build" in _norm(c):
             return c
     return None
+
+# ============================================================
+# ✅ NEW: detect if Project filter is applied (so we DON'T subtract Fixed)
+# ============================================================
+def _has_project_filter_applied(df_filtered: pd.DataFrame, df_all: pd.DataFrame) -> bool:
+    """
+    True if the user effectively filtered by Project Name.
+    We detect it by comparing # of unique projects in filtered vs full dataset.
+    """
+    try:
+        pcol_all = find_col(df_all, "Project Name")
+        pcol_flt = find_col(df_filtered, "Project Name")
+        if not pcol_all or not pcol_flt:
+            return False
+
+        n_all = df_all[pcol_all].dropna().nunique()
+        n_flt = df_filtered[pcol_flt].dropna().nunique()
+
+        return n_flt < n_all
+    except Exception:
+        return False
 
 # ============================================================
 # MONTH + YEAR -> TEXT LABELS (NO TIME AXIS)
@@ -255,35 +274,30 @@ def add_filters(df: pd.DataFrame) -> pd.DataFrame:
     else:
         st.sidebar.warning("Month/Year columns were not found in the Excel file.")
 
-    # Company
     c_company = find_col(df, "Company")
     if c_company:
         sel = st.sidebar.multiselect("Company", sorted(df[c_company].dropna().unique()))
         if sel:
             df = df[df[c_company].isin(sel)]
 
-    # Province
     c_prov = find_col(df, "Province")
     if c_prov:
         sel = st.sidebar.multiselect("Province", sorted(df[c_prov].dropna().unique()))
         if sel:
             df = df[df[c_prov].isin(sel)]
 
-    # Client
     c_client = find_col(df, "Client")
     if c_client:
         sel = st.sidebar.multiselect("Client", sorted(df[c_client].dropna().unique()))
         if sel:
             df = df[df[c_client].isin(sel)]
 
-    # Project Name
     c_proj = find_col(df, "Project Name")
     if c_proj:
         sel = st.sidebar.multiselect("Project (Project Name)", sorted(df[c_proj].dropna().unique()))
         if sel:
             df = df[df[c_proj].isin(sel)]
 
-    # Building
     c_bld = pick_building_col(df)
     if c_bld:
         uniq = sorted(df[c_bld].dropna().astype(str).unique().tolist())
@@ -441,7 +455,6 @@ if "access_token" not in token_result:
 
 st.success("✅ Connected to OneDrive/SharePoint (active token)")
 
-# Header actions
 colA, colB = st.columns([1, 3])
 with colA:
     if st.button("🔄 Refresh data"):
@@ -474,10 +487,20 @@ except Exception as e:
     st.stop()
 
 df_all = read_real_master_from_bytes(excel_bytes)
-fixed_total = load_fixed_total_from_bytes(excel_bytes)
+fixed_total_full = load_fixed_total_from_bytes(excel_bytes)
 
-# Apply filters (Year breakdown comes from the Year column)
+# Apply filters
 df = add_filters(df_all.copy())
+
+# ============================================================
+# ✅ NEW: apply Fixed Expenses ONLY when NOT filtering by Project
+# ============================================================
+project_filter_applied = _has_project_filter_applied(df, df_all)
+apply_fixed = not project_filter_applied
+fixed_total = fixed_total_full if apply_fixed else 0.0
+
+if project_filter_applied:
+    st.info("ℹ️ Project filter detected: Fixed Expenses (Gasto Fijo) will NOT be deducted from Net/New Total.")
 
 # ============================================================
 # KPI base (UPDATED: cost uses Total Cost Real)
@@ -489,39 +512,36 @@ COL_COST_VAR    = "Variation Total Cost (Budget vs Real)"  # Budget - Real
 COL_MGMT   = "Total Management Fee"
 COL_ROY    = "Royalty CNET Group Inc 5%"
 
-# ============================================================
-# CATEGORY SPECS (Budget vs Real uses Budget - Real)
-# ============================================================
 CATEGORY_SPECS = {
     "Labor": {
         "real": "Total Labor Real",
         "budget": "Total Labor Budget",
-        "var": "Variation Labor  (Budget vs Real)",   # Budget - Real
+        "var": "Variation Labor  (Budget vs Real)",
     },
     "PW": {
         "real": "Total PW Real",
         "budget": "Total PW Budget",
-        "var": "Variation PW  (Budget vs Real)",      # Budget - Real
+        "var": "Variation PW  (Budget vs Real)",
     },
     "Supplies": {
         "real": "Total Supplies Real",
         "budget": "Total Supplies Budget",
-        "var": "Variation Supplies  (Budget vs Real)",# Budget - Real
+        "var": "Variation Supplies  (Budget vs Real)",
     },
     "Equipment": {
         "real": "Total Equipment Real",
         "budget": "Total Equipment Budget",
-        "var": "Variation Equipment (Budget vs Real)",# Budget - Real
+        "var": "Variation Equipment (Budget vs Real)",
     },
     "Total Cost": {
         "real": "Total Cost Real",
         "budget": "Total Cost Budget",
-        "var": "Variation Total Cost (Budget vs Real)",# Budget - Real
+        "var": "Variation Total Cost (Budget vs Real)",
     },
 }
 
 c_income = find_col(df, COL_INCOME)
-c_cost   = find_col(df, COL_COST_REAL)  # <-- IMPORTANT FIX
+c_cost   = find_col(df, COL_COST_REAL)
 c_mgmt   = find_col(df, COL_MGMT)
 c_roy    = find_col(df, COL_ROY)
 
@@ -548,6 +568,8 @@ cost = float(df[c_cost].fillna(0).sum())
 gross = income - cost
 mgmt_fee_total = float(df[c_mgmt].fillna(0).sum())
 royalty_total = float(df[c_roy].fillna(0).sum())
+
+# ✅ fixed_total already adjusted above
 net = gross - fixed_total
 new_total = net + mgmt_fee_total + royalty_total
 
@@ -609,7 +631,10 @@ k1, k2, k3, k4 = st.columns(4)
 k1.metric("Revenue (Total to Bill)", f"${income:,.2f}")
 k2.metric("Costs (Total Cost Real)", f"${cost:,.2f}", f"{p_cost*100:,.2f}%")
 k3.metric("Gross (Revenue - Cost)", f"${gross:,.2f}", f"{p_gross*100:,.2f}%")
-k4.metric("Fixed Expenses (Gasto Fijo)", f"${fixed_total:,.2f}", f"{p_fixed*100:,.2f}%")
+
+# ✅ show fixed (0 if project filter)
+k4.metric("Fixed Expenses (Gasto Fijo)", f"${fixed_total_full:,.2f}" if apply_fixed else f"${fixed_total_full:,.2f}",
+          f"{safe_pct((fixed_total_full if apply_fixed else 0.0), income)*100:,.2f}%")
 
 k5, k6, k7, k8 = st.columns(4)
 k5.metric("Net (Gross - Fixed)", f"${net:,.2f}", f"{p_net*100:,.2f}%")
@@ -622,7 +647,7 @@ k8.metric("New Total", f"${new_total:,.2f}", f"{p_new*100:,.2f}%")
 # ============================================================
 tc_r = find_col(df, COL_COST_REAL)
 tc_b = find_col(df, COL_COST_BUDGET)
-tc_v = find_col(df, COL_COST_VAR)  # Budget - Real
+tc_v = find_col(df, COL_COST_VAR)
 
 if tc_r and tc_b and tc_v:
     df[tc_r] = pd.to_numeric(df[tc_r], errors="coerce")
@@ -631,11 +656,11 @@ if tc_r and tc_b and tc_v:
 
     total_cost_real = float(df[tc_r].fillna(0).sum())
     total_cost_budget = float(df[tc_b].fillna(0).sum())
-    total_cost_var = float(df[tc_v].fillna(0).sum())  # Budget - Real
+    total_cost_var = float(df[tc_v].fillna(0).sum())
 
-    pct_used = safe_pct(total_cost_real, total_cost_budget)  # Real / Budget
-    pct_under = safe_pct(max(0.0, total_cost_var), total_cost_budget)  # Under % (Budget-Real)/Budget
-    pct_over = safe_pct(max(0.0, total_cost_real - total_cost_budget), total_cost_budget)  # Over % (Real-Budget)/Budget
+    pct_used = safe_pct(total_cost_real, total_cost_budget)
+    pct_under = safe_pct(max(0.0, total_cost_var), total_cost_budget)
+    pct_over = safe_pct(max(0.0, total_cost_real - total_cost_budget), total_cost_budget)
 
     status_tc = "🟢 On track"
     if total_cost_var < 0:
@@ -663,7 +688,7 @@ fig_waterfall.update_layout(title="Waterfall: Revenue → Costs → Fixed → +F
 st.plotly_chart(fig_waterfall, use_container_width=True)
 
 # ============================================================
-# ✅ CATEGORY BUDGET vs REAL BREAKDOWN (FILTERED) — Budget - Real
+# ✅ CATEGORY BUDGET vs REAL BREAKDOWN (FILTERED)
 # ============================================================
 st.subheader("🧩 Budget vs Real Breakdown (Categories)")
 
@@ -672,7 +697,7 @@ spec = CATEGORY_SPECS[cat]
 
 c_real = find_col(df, spec["real"])
 c_budget = find_col(df, spec["budget"])
-c_var = find_col(df, spec["var"])  # Budget - Real
+c_var = find_col(df, spec["var"])
 
 missing_cat = [k for k, v in {
     spec["real"]: c_real,
@@ -691,10 +716,10 @@ else:
 
     real_total = float(df[c_real].fillna(0).sum())
     budget_total = float(df[c_budget].fillna(0).sum())
-    var_total = float(df[c_var].fillna(0).sum())  # Budget - Real
+    var_total = float(df[c_var].fillna(0).sum())
 
-    over_amt = max(0.0, real_total - budget_total)     # Real - Budget (when over)
-    under_amt = max(0.0, budget_total - real_total)    # Budget - Real (when under)
+    over_amt = max(0.0, real_total - budget_total)
+    under_amt = max(0.0, budget_total - real_total)
 
     pct_of_budget = safe_pct(real_total, budget_total)
     pct_under_vs_budget = safe_pct(under_amt, budget_total)
@@ -724,12 +749,11 @@ else:
     st.plotly_chart(fig_cat, use_container_width=True)
 
 # ============================================================
-# ✅ BUILDING PROFIT / LOSS (RED if LOSS, GREEN if PROFIT)
-# Uses: Revenue (Total to Bill) - Total Cost Real
+# ✅ PROJECT PROFIT / LOSS (Filtered)
 # ============================================================
 st.subheader("🧾 Project Profit / Loss (Filtered)")
 
-pcol = find_col(df, "Project Name")  # <-- key change
+pcol = find_col(df, "Project Name")
 c_income2 = find_col(df, COL_INCOME)
 c_total_cost_real = find_col(df, COL_COST_REAL)
 
@@ -751,14 +775,9 @@ else:
           )
           .reset_index()
     )
-
-    # Make project name readable + avoid NaN
     p[pcol] = p[pcol].astype(str).replace({"nan": "None"})
-
     p["Profit/Loss"] = p["Revenue"] - p["TotalCostReal"]
     p["Margin %"] = p.apply(lambda r: safe_pct(r["Profit/Loss"], r["Revenue"]), axis=1)
-
-    # Sort: worst first
     p = p.sort_values("Profit/Loss")
 
     def _color_pl(v):
@@ -782,7 +801,7 @@ else:
     st.dataframe(sty, use_container_width=True)
 
 # ============================================================
-# ✅ MONTHLY BREAKDOWN (FILTERED) — uses Year column, NO TIME AXIS
+# ✅ MONTHLY BREAKDOWN (FILTERED) — NO TIME AXIS
 # ============================================================
 st.subheader("🗓️ Monthly Breakdown (Filtered)")
 
@@ -799,7 +818,6 @@ if MONTH_COL in df.columns and YEAR_COL in df.columns:
 
     df_m = df.copy()
 
-    # NOTE: cost is Total Cost Real now
     for col in [COL_INCOME, COL_COST_REAL, COL_MGMT, COL_ROY]:
         c = find_col(df_m, col)
         if c:
@@ -826,6 +844,8 @@ if MONTH_COL in df.columns and YEAR_COL in df.columns:
         )
 
         g["Gross"] = g["Income"] - g["Cost"]
+
+        # ✅ Fixed applied only when not project-filtered (already controlled by fixed_total)
         g["Net (Gross - Fixed)"] = g["Gross"] - fixed_total
         g["New Total"] = g["Net (Gross - Fixed)"] + g["MgmtFee"] + g["Royalty"]
 
@@ -883,11 +903,15 @@ st.download_button(
 # TABLES
 # ============================================================
 st.subheader("Summary")
+
 summary = pd.DataFrame([
     ["Revenue", income, 1.0],
     ["Costs", cost, p_cost],
     ["Gross", gross, p_gross],
-    ["Fixed Expenses", fixed_total, p_fixed],
+
+    # ✅ show fixed in summary, but it will be 0 in calculations when project-filtered
+    ["Fixed Expenses (Applied)", fixed_total, p_fixed],
+
     ["Net", net, p_net],
     ["Total Management Fee", mgmt_fee_total, p_mgmt],
     ["Royalty (5%)", royalty_total, p_roy],
