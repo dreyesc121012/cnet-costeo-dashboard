@@ -782,27 +782,73 @@ else:
 
     real_total = float(df[c_real].fillna(0).sum())
     budget_total = float(df[c_budget].fillna(0).sum())
-    var_total = float(df[c_var].fillna(0).sum())
+    var_total = float(df[c_var].fillna(0).sum())  # Budget - Real
+
+    # Determine Over / Under
+    is_over = var_total < 0      # Budget - Real negative => OVER
+    is_under = var_total > 0     # Budget - Real positive => UNDER
 
     over_amt = max(0.0, real_total - budget_total)
     under_amt = max(0.0, budget_total - real_total)
 
     pct_of_budget = safe_pct(real_total, budget_total)
     pct_under_vs_budget = safe_pct(under_amt, budget_total)
-    pct_over_vs_budget  = safe_pct(over_amt, budget_total)
+    pct_over_vs_budget = safe_pct(over_amt, budget_total)
 
-    status = "🟢 On track"
-    if var_total < 0:
-        status = "🔴 Over budget"
-    elif var_total > 0:
-        status = "🟢 Under budget"
+    # Color styles
+    color_red = "#d93025"
+    color_green = "#188038"
+    color_gray = "#5f6368"
 
+    if is_over:
+        status_html = f"<span style='color:{color_red}; font-weight:700;'>🔴 Over budget</span>"
+        var_color = color_red
+    elif is_under:
+        status_html = f"<span style='color:{color_green}; font-weight:700;'>🟢 Under budget</span>"
+        var_color = color_green
+    else:
+        status_html = f"<span style='color:{color_gray}; font-weight:700;'>⚪ On budget</span>"
+        var_color = color_gray
+
+    # KPI Cards
     a1, a2, a3, a4 = st.columns(4)
+
     a1.metric(f"{cat} - Real", f"${real_total:,.2f}")
     a2.metric(f"{cat} - Budget", f"${budget_total:,.2f}")
-    a3.metric("Variation (Budget - Real)", f"${var_total:,.2f}", f"Over: ${over_amt:,.2f} | Under: ${under_amt:,.2f}")
-    a4.metric("% of Budget Used", f"{pct_of_budget*100:,.1f}%", f"Over: {pct_over_vs_budget*100:,.1f}% | Under: {pct_under_vs_budget*100:,.1f}%")
 
+    # Variation (colored number)
+    a3.markdown(
+        f"""
+        <div style="font-size:14px;">Variation (Budget - Real)</div>
+        <div style="font-size:28px; font-weight:700; color:{var_color};">
+            ${var_total:,.2f}
+        </div>
+        {status_html}
+        """,
+        unsafe_allow_html=True
+    )
+
+    # % Used
+    a4.markdown(
+        f"""
+        <div style="font-size:14px;">% of Budget Used</div>
+        <div style="font-size:28px; font-weight:700;">
+            {pct_of_budget*100:,.1f}%
+        </div>
+        <div>
+            <span style="color:{color_red}; font-weight:700;">
+                Over: {pct_over_vs_budget*100:,.1f}%
+            </span>
+            &nbsp;&nbsp;|&nbsp;&nbsp;
+            <span style="color:{color_green}; font-weight:700;">
+                Under: {pct_under_vs_budget*100:,.1f}%
+            </span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # Chart
     fig_cat = go.Figure()
     fig_cat.add_trace(go.Bar(name="Budget", x=["Budget"], y=[budget_total]))
     fig_cat.add_trace(go.Bar(name="Real", x=["Real"], y=[real_total]))
