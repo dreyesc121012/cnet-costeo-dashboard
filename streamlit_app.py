@@ -52,7 +52,7 @@ HEADER_IDX = 6
 MONTH_COL = "Month"   # text: "January", "February", etc.
 YEAR_COL  = "Year"    # numeric or text year like 2026
 
-st.set_page_config(page_title="CNET Financial Performance & Budget Control", layout="wide")
+st.set_page_config(page_title="Financial Performance & Budget Control", layout="wide")
 
 # ============================================================
 # HEADER (Logo + Title)
@@ -63,7 +63,7 @@ with h1:
     if lp:
         st.image(lp, use_container_width=True)
 with h2:
-    st.markdown("## CNET Financial Performance & Budget Control")
+    st.markdown("## Financial Performance & Budget Control")
     st.caption("Real vs Budget • Executive KPIs • Margin Control")
 
 st.divider()
@@ -356,7 +356,7 @@ def build_pdf_report(
             pass
 
     c.setFont("Helvetica-Bold", 16)
-    c.drawString(200, y_top - 6, "CNET Financial Performance & Budget Control")
+    c.drawString(200, y_top - 6, "Financial Performance & Budget Control")
     c.setFont("Helvetica", 9)
     c.drawString(200, y_top - 20, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     c.drawString(200, y_top - 32, f"Target Margin: {target:.0%}")
