@@ -40,6 +40,14 @@ YEAR_COL  = "Year"    # numeric or text year like 2026
 st.set_page_config(page_title="CNET Costing Dashboard", layout="wide")
 
 # ============================================================
+# BUSINESS RULES (your request)
+# ============================================================
+COMPANY_FIXED = "12433087 Canada"                 # Fixed Expenses ONLY applies here (and only when NOT Project-filtered)
+COMPANY_NETFEES = "9359-6633 Quebec Inc"          # Net includes fees ONLY here
+CLIENT_BG = "BGIS"                                # and ONLY for BGIS
+ROY3_COL_NAME = "Royalty CNET Master 3% BGIS"     # exact column name you provided
+
+# ============================================================
 # HELPERS (Streamlit URL params)
 # ============================================================
 def _get_query_params() -> dict:
@@ -184,13 +192,9 @@ def pick_building_col(df: pd.DataFrame):
     return None
 
 # ============================================================
-# ✅ NEW: detect if Project filter is applied (so we DON'T subtract Fixed)
+# detect if Project filter is applied
 # ============================================================
 def _has_project_filter_applied(df_filtered: pd.DataFrame, df_all: pd.DataFrame) -> bool:
-    """
-    True if the user effectively filtered by Project Name.
-    We detect it by comparing # of unique projects in filtered vs full dataset.
-    """
     try:
         pcol_all = find_col(df_all, "Project Name")
         pcol_flt = find_col(df_filtered, "Project Name")
@@ -203,6 +207,18 @@ def _has_project_filter_applied(df_filtered: pd.DataFrame, df_all: pd.DataFrame)
         return n_flt < n_all
     except Exception:
         return False
+
+# ============================================================
+# Stored selections helpers
+# ============================================================
+def _selected_equals(key: str, value: str) -> bool:
+    v = st.session_state.get(key, [])
+    return isinstance(v, list) and len(v) == 1 and str(v[0]).strip() == str(value).strip()
+
+def _selected_contains(key: str, value: str) -> bool:
+    v = st.session_state.get(key, [])
+    value = str(value).strip().lower()
+    return any(str(x).strip().lower() == value for x in (v or []))
 
 # ============================================================
 # MONTH + YEAR -> TEXT LABELS (NO TIME AXIS)
@@ -250,15 +266,26 @@ def build_month_fields(df: pd.DataFrame) -> pd.DataFrame:
 
 # ============================================================
 # FILTERS (Year + Month + Company + Province + Client + Project + Building)
+# Stores selections in st.session_state
 # ============================================================
 def add_filters(df: pd.DataFrame) -> pd.DataFrame:
     st.sidebar.header("Executive Filters")
+
+    # reset stored selections each rerun
+    st.session_state["sel_years"] = []
+    st.session_state["sel_months"] = []
+    st.session_state["sel_company"] = []
+    st.session_state["sel_province"] = []
+    st.session_state["sel_client"] = []
+    st.session_state["sel_project"] = []
+    st.session_state["sel_building"] = []
 
     if MONTH_COL in df.columns and YEAR_COL in df.columns:
         df = build_month_fields(df)
 
         years = sorted([int(y) for y in df["_YearInt"].dropna().unique().tolist()])
         sel_years = st.sidebar.multiselect("Year", years, default=[])
+        st.session_state["sel_years"] = sel_years
         if sel_years:
             df = df[df["_YearInt"].isin(sel_years)]
 
@@ -269,39 +296,50 @@ def add_filters(df: pd.DataFrame) -> pd.DataFrame:
             .sort_values("_MonthKey")
         )
         sel_months = st.sidebar.multiselect("Month", month_table["_MonthText"].tolist(), default=[])
+        st.session_state["sel_months"] = sel_months
         if sel_months:
             df = df[df["_MonthText"].isin(sel_months)]
     else:
         st.sidebar.warning("Month/Year columns were not found in the Excel file.")
 
+    # Company
     c_company = find_col(df, "Company")
     if c_company:
         sel = st.sidebar.multiselect("Company", sorted(df[c_company].dropna().unique()))
+        st.session_state["sel_company"] = sel
         if sel:
             df = df[df[c_company].isin(sel)]
 
+    # Province
     c_prov = find_col(df, "Province")
     if c_prov:
         sel = st.sidebar.multiselect("Province", sorted(df[c_prov].dropna().unique()))
+        st.session_state["sel_province"] = sel
         if sel:
             df = df[df[c_prov].isin(sel)]
 
+    # Client
     c_client = find_col(df, "Client")
     if c_client:
         sel = st.sidebar.multiselect("Client", sorted(df[c_client].dropna().unique()))
+        st.session_state["sel_client"] = sel
         if sel:
             df = df[df[c_client].isin(sel)]
 
+    # Project Name
     c_proj = find_col(df, "Project Name")
     if c_proj:
         sel = st.sidebar.multiselect("Project (Project Name)", sorted(df[c_proj].dropna().unique()))
+        st.session_state["sel_project"] = sel
         if sel:
             df = df[df[c_proj].isin(sel)]
 
+    # Building
     c_bld = pick_building_col(df)
     if c_bld:
         uniq = sorted(df[c_bld].dropna().astype(str).unique().tolist())
         sel = st.sidebar.multiselect("Building", uniq)
+        st.session_state["sel_building"] = sel
         if sel:
             df = df[df[c_bld].astype(str).isin(sel)]
 
@@ -309,10 +347,12 @@ def add_filters(df: pd.DataFrame) -> pd.DataFrame:
 
 # ============================================================
 # PDF REPORT
+# (Fixed row is shown ONLY when fixed_total != 0)
 # ============================================================
 def build_pdf_report(
     *,
-    income, cost, gross, fixed_total, net, mgmt_fee_total, royalty_total, new_total,
+    income, cost, gross,
+    fixed_total, net, mgmt_fee_total, royalty5_total, royalty3_total, new_total,
     p_cost, p_gross, p_fixed, p_net, p_mgmt, p_roy, p_new,
     target, gross_margin, net_margin, final_margin,
     fig_waterfall=None, fig_gauge=None,
@@ -335,10 +375,15 @@ def build_pdf_report(
         ("Revenue (Total to Bill)", income, 1.0),
         ("Costs (Total Cost Real)", cost, p_cost),
         ("Gross (Revenue - Cost)", gross, p_gross),
-        ("Fixed Expenses (Gasto Fijo)", fixed_total, p_fixed),
-        ("Net (Gross - Fixed)", net, p_net),
+    ]
+
+    if fixed_total and fixed_total != 0:
+        rows.append(("Fixed Expenses (Gasto Fijo)", fixed_total, p_fixed))
+
+    rows += [
+        ("Net", net, p_net),
         ("Management Fee", mgmt_fee_total, p_mgmt),
-        ("Royalty 5%", royalty_total, p_roy),
+        ("Royalty (5%) + Royalty (3%)", (royalty5_total + royalty3_total), p_roy),
         ("New Total", new_total, p_new),
     ]
 
@@ -353,7 +398,7 @@ def build_pdf_report(
     y -= 12
 
     for label, val, pct in rows:
-        c.drawString(40, y, label[:55])
+        c.drawString(40, y, label[:60])
         c.drawRightString(360, y, f"${val:,.2f}")
         c.drawRightString(520, y, f"{pct:.1%}")
         y -= 14
@@ -367,7 +412,7 @@ def build_pdf_report(
     y -= 14
     c.drawString(40, y, f"Net Margin: {net_margin:.1%}")
     y -= 14
-    c.drawString(40, y, f"Final Margin (after fees): {final_margin:.1%}")
+    c.drawString(40, y, f"Final Margin (after rules): {final_margin:.1%}")
     y -= 18
 
     def add_plotly_image(fig, title, y_top):
@@ -387,7 +432,7 @@ def build_pdf_report(
             return y_top - 15
 
     y = add_plotly_image(fig_gauge, "Gauge - Final Margin", y)
-    y = add_plotly_image(fig_waterfall, "Waterfall - Revenue → Cost → Fixed → Fees → Total", y)
+    y = add_plotly_image(fig_waterfall, "Waterfall - Revenue → Cost → (Fixed) → Fees → Total", y)
 
     c.showPage()
     c.save()
@@ -489,29 +534,23 @@ except Exception as e:
 df_all = read_real_master_from_bytes(excel_bytes)
 fixed_total_full = load_fixed_total_from_bytes(excel_bytes)
 
-# Apply filters
+# Apply filters (stores selections in session_state)
 df = add_filters(df_all.copy())
 
 # ============================================================
-# ✅ NEW: apply Fixed Expenses ONLY when NOT filtering by Project
-# ============================================================
-project_filter_applied = _has_project_filter_applied(df, df_all)
-apply_fixed = not project_filter_applied
-fixed_total = fixed_total_full if apply_fixed else 0.0
-
-if project_filter_applied:
-    st.info("ℹ️ Project filter detected: Fixed Expenses (Gasto Fijo) will NOT be deducted from Net/New Total.")
-
-# ============================================================
-# KPI base (UPDATED: cost uses Total Cost Real)
+# KPI base (cost uses Total Cost Real)
 # ============================================================
 COL_INCOME = "Total to Bill"
 COL_COST_REAL   = "Total Cost Real"
 COL_COST_BUDGET = "Total Cost Budget"
 COL_COST_VAR    = "Variation Total Cost (Budget vs Real)"  # Budget - Real
-COL_MGMT   = "Total Management Fee"
-COL_ROY    = "Royalty CNET Group Inc 5%"
+COL_MGMT        = "Total Management Fee"
+COL_ROY5        = "Royalty CNET Group Inc 5%"
+COL_ROY3        = ROY3_COL_NAME
 
+# ============================================================
+# CATEGORY SPECS (Budget - Real)
+# ============================================================
 CATEGORY_SPECS = {
     "Labor": {
         "real": "Total Labor Real",
@@ -540,16 +579,20 @@ CATEGORY_SPECS = {
     },
 }
 
+# ============================================================
+# Columns detection
+# ============================================================
 c_income = find_col(df, COL_INCOME)
 c_cost   = find_col(df, COL_COST_REAL)
 c_mgmt   = find_col(df, COL_MGMT)
-c_roy    = find_col(df, COL_ROY)
+c_roy5   = find_col(df, COL_ROY5)
+c_roy3   = find_col(df, COL_ROY3)  # optional but expected for BGIS rule
 
 missing = [k for k, v in {
     COL_INCOME: c_income,
     COL_COST_REAL: c_cost,
     COL_MGMT: c_mgmt,
-    COL_ROY: c_roy,
+    COL_ROY5: c_roy5,
 }.items() if v is None]
 
 if missing:
@@ -558,27 +601,51 @@ if missing:
         st.write(df.columns.tolist())
     st.stop()
 
+# numeric conversions
 df[c_income] = pd.to_numeric(df[c_income], errors="coerce")
 df[c_cost]   = pd.to_numeric(df[c_cost], errors="coerce")
 df[c_mgmt]   = pd.to_numeric(df[c_mgmt], errors="coerce")
-df[c_roy]    = pd.to_numeric(df[c_roy], errors="coerce")
+df[c_roy5]   = pd.to_numeric(df[c_roy5], errors="coerce")
+if c_roy3:
+    df[c_roy3] = pd.to_numeric(df[c_roy3], errors="coerce")
 
+# ============================================================
+# ✅ Fixed Expenses rule:
+# Fixed applies ONLY for Company=12433087 Canada AND NOT Project-filtered
+# ============================================================
+project_filter_applied = _has_project_filter_applied(df, df_all)
+apply_fixed = _selected_equals("sel_company", COMPANY_FIXED) and (not project_filter_applied)
+fixed_total = fixed_total_full if apply_fixed else 0.0
+
+# ============================================================
+# ✅ Net-fees rule:
+# Net includes Mgmt + Roy5 + Roy3 ONLY for Company=9359-6633 Quebec Inc AND Client includes BGIS
+# ============================================================
+apply_net_fees = _selected_equals("sel_company", COMPANY_NETFEES) and _selected_contains("sel_client", CLIENT_BG)
+
+# ============================================================
+# Totals
+# ============================================================
 income = float(df[c_income].fillna(0).sum())
-cost = float(df[c_cost].fillna(0).sum())
-gross = income - cost
+cost   = float(df[c_cost].fillna(0).sum())
+gross  = income - cost
+
 mgmt_fee_total = float(df[c_mgmt].fillna(0).sum())
-royalty_total = float(df[c_roy].fillna(0).sum())
+royalty5_total = float(df[c_roy5].fillna(0).sum())
+royalty3_total = float(df[c_roy3].fillna(0).sum()) if c_roy3 else 0.0
+fees_total = mgmt_fee_total + royalty5_total + royalty3_total
 
-# ✅ fixed_total already adjusted above
-net = gross - fixed_total
-new_total = net + mgmt_fee_total + royalty_total
+net_base = gross - fixed_total
+net = net_base + (fees_total if apply_net_fees else 0.0)
+new_total = net + (0.0 if apply_net_fees else fees_total)
 
+# percents
 p_cost  = safe_pct(cost, income)
 p_gross = safe_pct(gross, income)
 p_fixed = safe_pct(fixed_total, income)
 p_net   = safe_pct(net, income)
 p_mgmt  = safe_pct(mgmt_fee_total, income)
-p_roy   = safe_pct(royalty_total, income)
+p_roy   = safe_pct((royalty5_total + royalty3_total), income)
 p_new   = safe_pct(new_total, income)
 
 # ============================================================
@@ -603,9 +670,16 @@ def traffic_light(m, tgt):
 c1, c2, c3 = st.columns(3)
 c1.metric("Gross Margin", f"{gross_margin:.1%}", f"{traffic_light(gross_margin, target)} vs {target:.0%}")
 c2.metric("Net Margin", f"{net_margin:.1%}", f"{traffic_light(net_margin, target)} vs {target:.0%}")
-c3.metric("Final Margin (after fees)", f"{final_margin:.1%}", f"{traffic_light(final_margin, target)} vs {target:.0%}")
+c3.metric("Final Margin (after rules)", f"{final_margin:.1%}", f"{traffic_light(final_margin, target)} vs {target:.0%}")
 
-st.caption("Gauge: Final margin (after fees)")
+if apply_net_fees:
+    st.info("ℹ️ Rule applied: Net includes Mgmt Fee + Royalty (5%) + Royalty (3%) for 9359-6633 Quebec Inc / BGIS.")
+
+if _selected_contains("sel_project", "") is False and project_filter_applied and apply_fixed is False:
+    # only informational; fixed won't apply anyway unless Company_FIXED
+    pass
+
+st.caption("Gauge: Final margin (after rules)")
 gauge_max = 60
 fig_gauge = go.Figure(go.Indicator(
     mode="gauge+number",
@@ -624,22 +698,26 @@ fig_gauge = go.Figure(go.Indicator(
 st.plotly_chart(fig_gauge, use_container_width=True)
 
 # ============================================================
-# KPI CARDS
+# KPI CARDS (Fixed ONLY shown when apply_fixed)
 # ============================================================
 st.subheader("📊 KPIs (Executive)")
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Revenue (Total to Bill)", f"${income:,.2f}")
-k2.metric("Costs (Total Cost Real)", f"${cost:,.2f}", f"{p_cost*100:,.2f}%")
-k3.metric("Gross (Revenue - Cost)", f"${gross:,.2f}", f"{p_gross*100:,.2f}%")
 
-# ✅ show fixed (0 if project filter)
-k4.metric("Fixed Expenses (Gasto Fijo)", f"${fixed_total_full:,.2f}" if apply_fixed else f"${fixed_total_full:,.2f}",
-          f"{safe_pct((fixed_total_full if apply_fixed else 0.0), income)*100:,.2f}%")
+if apply_fixed:
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Revenue (Total to Bill)", f"${income:,.2f}")
+    k2.metric("Costs (Total Cost Real)", f"${cost:,.2f}", f"{p_cost*100:,.2f}%")
+    k3.metric("Gross (Revenue - Cost)", f"${gross:,.2f}", f"{p_gross*100:,.2f}%")
+    k4.metric("Fixed Expenses (Gasto Fijo)", f"${fixed_total:,.2f}", f"{p_fixed*100:,.2f}%")
+else:
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Revenue (Total to Bill)", f"${income:,.2f}")
+    k2.metric("Costs (Total Cost Real)", f"${cost:,.2f}", f"{p_cost*100:,.2f}%")
+    k3.metric("Gross (Revenue - Cost)", f"${gross:,.2f}", f"{p_gross*100:,.2f}%")
 
 k5, k6, k7, k8 = st.columns(4)
-k5.metric("Net (Gross - Fixed)", f"${net:,.2f}", f"{p_net*100:,.2f}%")
+k5.metric("Net", f"${net:,.2f}", f"{p_net*100:,.2f}%")
 k6.metric("Total Management Fee", f"${mgmt_fee_total:,.2f}", f"{p_mgmt*100:,.2f}%")
-k7.metric("Royalty (5%)", f"${royalty_total:,.2f}", f"{p_roy*100:,.2f}%")
+k7.metric("Royalty (5%) + Royalty (3%)", f"${(royalty5_total + royalty3_total):,.2f}", f"{p_roy*100:,.2f}%")
 k8.metric("New Total", f"${new_total:,.2f}", f"{p_new*100:,.2f}%")
 
 # ============================================================
@@ -675,16 +753,29 @@ if tc_r and tc_b and tc_v:
     t4.metric("% Budget Used", f"{pct_used*100:,.1f}%", f"Over: {pct_over*100:,.1f}% | Under: {pct_under*100:,.1f}%")
 
 # ============================================================
-# WATERFALL
+# WATERFALL (Fixed hidden unless apply_fixed)
+# Note: if apply_net_fees, fees are already in Net, but New Total still shows correctly.
 # ============================================================
 st.subheader("📉 Executive Waterfall")
-fig_waterfall = go.Figure(go.Waterfall(
-    orientation="v",
-    measure=["absolute", "relative", "relative", "relative", "relative", "total"],
-    x=["Revenue", "Costs", "Gross", "Fixed", "Mgmt+Royalty", "New Total"],
-    y=[income, -cost, gross, -fixed_total, (mgmt_fee_total + royalty_total), new_total],
-))
-fig_waterfall.update_layout(title="Waterfall: Revenue → Costs → Fixed → +Fees → New Total", showlegend=False)
+
+fees_for_waterfall = 0.0 if apply_net_fees else fees_total
+
+if apply_fixed:
+    fig_waterfall = go.Figure(go.Waterfall(
+        orientation="v",
+        measure=["absolute", "relative", "relative", "relative", "relative", "total"],
+        x=["Revenue", "Costs", "Gross", "Fixed", "Fees", "New Total"],
+        y=[income, -cost, gross, -fixed_total, fees_for_waterfall, new_total],
+    ))
+else:
+    fig_waterfall = go.Figure(go.Waterfall(
+        orientation="v",
+        measure=["absolute", "relative", "relative", "relative", "total"],
+        x=["Revenue", "Costs", "Gross", "Fees", "New Total"],
+        y=[income, -cost, gross, fees_for_waterfall, new_total],
+    ))
+
+fig_waterfall.update_layout(title="Waterfall: Revenue → Costs → (Fixed) → Fees → New Total", showlegend=False)
 st.plotly_chart(fig_waterfall, use_container_width=True)
 
 # ============================================================
@@ -750,6 +841,7 @@ else:
 
 # ============================================================
 # ✅ PROJECT PROFIT / LOSS (Filtered)
+# Uses: Revenue - Total Cost Real (unchanged)
 # ============================================================
 st.subheader("🧾 Project Profit / Loss (Filtered)")
 
@@ -801,7 +893,7 @@ else:
     st.dataframe(sty, use_container_width=True)
 
 # ============================================================
-# ✅ MONTHLY BREAKDOWN (FILTERED) — NO TIME AXIS
+# ✅ MONTHLY BREAKDOWN (FILTERED) — rules applied
 # ============================================================
 st.subheader("🗓️ Monthly Breakdown (Filtered)")
 
@@ -818,7 +910,8 @@ if MONTH_COL in df.columns and YEAR_COL in df.columns:
 
     df_m = df.copy()
 
-    for col in [COL_INCOME, COL_COST_REAL, COL_MGMT, COL_ROY]:
+    # numeric
+    for col in [COL_INCOME, COL_COST_REAL, COL_MGMT, COL_ROY5, COL_ROY3]:
         c = find_col(df_m, col)
         if c:
             df_m[c] = pd.to_numeric(df_m[c], errors="coerce")
@@ -826,37 +919,57 @@ if MONTH_COL in df.columns and YEAR_COL in df.columns:
     mi = find_col(df_m, COL_INCOME)
     mc = find_col(df_m, COL_COST_REAL)
     mm = find_col(df_m, COL_MGMT)
-    mr = find_col(df_m, COL_ROY)
+    mr5 = find_col(df_m, COL_ROY5)
+    mr3 = find_col(df_m, COL_ROY3)
 
     ok = df_m["_MonthKey"].notna() & df_m["_MonthText"].notna()
-    if ok.any() and all([mi, mc, mm, mr]):
+    if ok.any() and all([mi, mc, mm, mr5]):
+        # if mr3 is missing, we sum 0
+        if mr3:
+            agg_dict = {
+                "Income": (mi, "sum"),
+                "Cost": (mc, "sum"),
+                "MgmtFee": (mm, "sum"),
+                "Royalty5": (mr5, "sum"),
+                "Royalty3": (mr3, "sum"),
+            }
+        else:
+            agg_dict = {
+                "Income": (mi, "sum"),
+                "Cost": (mc, "sum"),
+                "MgmtFee": (mm, "sum"),
+                "Royalty5": (mr5, "sum"),
+            }
+
         g = (
             df_m[ok]
             .groupby(["_MonthKey", "_MonthText"], dropna=True)
-            .agg(
-                Income=(mi, "sum"),
-                Cost=(mc, "sum"),
-                MgmtFee=(mm, "sum"),
-                Royalty=(mr, "sum"),
-            )
+            .agg(**agg_dict)
             .reset_index()
             .sort_values("_MonthKey")
         )
 
+        if "Royalty3" not in g.columns:
+            g["Royalty3"] = 0.0
+
         g["Gross"] = g["Income"] - g["Cost"]
+        g["Fees"] = g["MgmtFee"] + g["Royalty5"] + g["Royalty3"]
 
-        # ✅ Fixed applied only when not project-filtered (already controlled by fixed_total)
-        g["Net (Gross - Fixed)"] = g["Gross"] - fixed_total
-        g["New Total"] = g["Net (Gross - Fixed)"] + g["MgmtFee"] + g["Royalty"]
+        net_base_month = g["Gross"] - (fixed_total if apply_fixed else 0.0)
+        g["Net"] = net_base_month + (g["Fees"] if apply_net_fees else 0.0)
+        g["New Total"] = g["Net"] + (0.0 if apply_net_fees else g["Fees"])
 
+        # table
         g_show = g.rename(columns={"_MonthText": "Month"}).copy()
-        for c in ["Income", "Cost", "Gross", "MgmtFee", "Royalty", "Net (Gross - Fixed)", "New Total"]:
+        for c in ["Income", "Cost", "Gross", "Fees", "Net", "New Total"]:
             g_show[c] = g_show[c].map(lambda x: f"${float(x):,.2f}")
+
         st.dataframe(
-            g_show[["Month", "Income", "Cost", "Gross", "MgmtFee", "Royalty", "Net (Gross - Fixed)", "New Total"]],
+            g_show[["Month", "Income", "Cost", "Gross", "Fees", "Net", "New Total"]],
             use_container_width=True
         )
 
+        # chart
         x_text = g["_MonthText"].tolist()
 
         fig_month = go.Figure()
@@ -884,8 +997,12 @@ st.divider()
 st.subheader("📄 Export Executive Report (PDF)")
 
 pdf_bytes = build_pdf_report(
-    income=income, cost=cost, gross=gross, fixed_total=fixed_total, net=net,
-    mgmt_fee_total=mgmt_fee_total, royalty_total=royalty_total, new_total=new_total,
+    income=income, cost=cost, gross=gross,
+    fixed_total=fixed_total, net=net,
+    mgmt_fee_total=mgmt_fee_total,
+    royalty5_total=royalty5_total,
+    royalty3_total=royalty3_total,
+    new_total=new_total,
     p_cost=p_cost, p_gross=p_gross, p_fixed=p_fixed, p_net=p_net, p_mgmt=p_mgmt, p_roy=p_roy, p_new=p_new,
     target=target, gross_margin=gross_margin, net_margin=net_margin, final_margin=final_margin,
     fig_waterfall=fig_waterfall,
@@ -904,20 +1021,23 @@ st.download_button(
 # ============================================================
 st.subheader("Summary")
 
-summary = pd.DataFrame([
+rows = [
     ["Revenue", income, 1.0],
     ["Costs", cost, p_cost],
     ["Gross", gross, p_gross],
+]
 
-    # ✅ show fixed in summary, but it will be 0 in calculations when project-filtered
-    ["Fixed Expenses (Applied)", fixed_total, p_fixed],
+if apply_fixed:
+    rows.append(["Fixed Expenses (Gasto Fijo)", fixed_total, p_fixed])
 
+rows += [
     ["Net", net, p_net],
     ["Total Management Fee", mgmt_fee_total, p_mgmt],
-    ["Royalty (5%)", royalty_total, p_roy],
+    ["Royalty (5%) + Royalty (3%)", (royalty5_total + royalty3_total), p_roy],
     ["New Total", new_total, p_new],
-], columns=["Concept", "Amount", "% of Revenue"])
+]
 
+summary = pd.DataFrame(rows, columns=["Concept", "Amount", "% of Revenue"])
 summary["Amount"] = summary["Amount"].map(lambda x: f"${x:,.2f}")
 summary["% of Revenue"] = summary["% of Revenue"].map(lambda x: f"{x*100:,.2f}%")
 st.dataframe(summary, use_container_width=True)
