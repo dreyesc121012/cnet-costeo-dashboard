@@ -412,7 +412,7 @@ def get_msal_app():
 # ============================================================
 # UI + LOGIN
 # ============================================================
-st.title("📊 CNET Costing & Net Dashboard")
+st.title("📊 CNET Financial Performance & Budget Control")
 
 if not REDIRECT_URI:
     st.error("REDIRECT_URI is missing in Secrets. Example: https://cnet-dashboard.streamlit.app (no trailing slash).")
