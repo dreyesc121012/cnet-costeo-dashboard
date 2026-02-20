@@ -2,6 +2,7 @@ import base64
 from io import BytesIO
 from datetime import datetime
 import re
+import os
 
 import pandas as pd
 import streamlit as st
@@ -13,6 +14,20 @@ import plotly.graph_objects as go
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
+
+# ============================================================
+# LOGO CONFIG (local file in repo)
+# Put your file in the repo root as: cnet_logo.png
+# ============================================================
+LOGO_FILE = "cnet_logo.png"
+
+def _logo_path() -> str:
+    """Return absolute path for the logo if it exists, else empty string."""
+    try:
+        p = os.path.join(os.getcwd(), LOGO_FILE)
+        return p if os.path.exists(p) else ""
+    except Exception:
+        return ""
 
 # ============================================================
 # CONFIG (Secrets)
@@ -37,7 +52,21 @@ HEADER_IDX = 6
 MONTH_COL = "Month"   # text: "January", "February", etc.
 YEAR_COL  = "Year"    # numeric or text year like 2026
 
-st.set_page_config(page_title="CNET Costing Dashboard", layout="wide")
+st.set_page_config(page_title="CNET Financial Performance & Budget Control", layout="wide")
+
+# ============================================================
+# HEADER (Logo + Title)
+# ============================================================
+lp = _logo_path()
+h1, h2 = st.columns([1, 4])
+with h1:
+    if lp:
+        st.image(lp, use_container_width=True)
+with h2:
+    st.markdown("## CNET Financial Performance & Budget Control")
+    st.caption("Real vs Budget • Executive KPIs • Margin Control")
+
+st.divider()
 
 # ============================================================
 # HELPERS (Streamlit URL params)
@@ -296,6 +325,7 @@ def add_filters(df: pd.DataFrame) -> pd.DataFrame:
 
 # ============================================================
 # PDF REPORT (dynamic rows: Fixed appears only when applied)
+# + LOGO IN PDF HEADER
 # ============================================================
 def build_pdf_report(
     *,
@@ -310,15 +340,28 @@ def build_pdf_report(
     c = canvas.Canvas(buf, pagesize=letter)
     width, height = letter
 
-    y = height - 50
+    # --- Header with logo (if exists)
+    y_top = height - 40
+    lp = _logo_path()
+    if lp:
+        try:
+            c.drawImage(
+                ImageReader(lp),
+                40, y_top - 30,          # x, y
+                width=140, height=30,    # logo size
+                preserveAspectRatio=True,
+                mask="auto"
+            )
+        except Exception:
+            pass
+
     c.setFont("Helvetica-Bold", 16)
-    c.drawString(40, y, "CNET Costing & Net - Executive Summary")
-    y -= 16
+    c.drawString(200, y_top - 6, "CNET Financial Performance & Budget Control")
     c.setFont("Helvetica", 9)
-    c.drawString(40, y, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    y -= 10
-    c.drawString(40, y, f"Target Margin: {target:.0%}")
-    y -= 20
+    c.drawString(200, y_top - 20, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    c.drawString(200, y_top - 32, f"Target Margin: {target:.0%}")
+
+    y = y_top - 60
 
     rows = [
         ("Revenue (Total to Bill)", income, 1.0),
@@ -332,9 +375,7 @@ def build_pdf_report(
             ("Net (Gross - Fixed)", net, p_net),
         ]
     else:
-        rows += [
-            ("Net", net, p_net),
-        ]
+        rows += [("Net", net, p_net)]
 
     rows += [
         ("Management Fee", mgmt_fee_total, p_mgmt),
@@ -374,21 +415,21 @@ def build_pdf_report(
     c.drawString(40, y, f"Final Margin (after fees): {final_margin:.1%}")
     y -= 18
 
-    def add_plotly_image(fig, title, y_top):
+    def add_plotly_image(fig, title, y_top_local):
         if fig is None:
-            return y_top
+            return y_top_local
         try:
             img_bytes = fig.to_image(format="png")  # requires kaleido
             img = ImageReader(BytesIO(img_bytes))
             c.setFont("Helvetica-Bold", 11)
-            c.drawString(40, y_top, title)
-            y_top -= 10
-            c.drawImage(img, 40, y_top - 220, width=520, height=220, preserveAspectRatio=True, mask='auto')
-            return y_top - 235
+            c.drawString(40, y_top_local, title)
+            y_top_local -= 10
+            c.drawImage(img, 40, y_top_local - 220, width=520, height=220, preserveAspectRatio=True, mask='auto')
+            return y_top_local - 235
         except Exception:
             c.setFont("Helvetica", 9)
-            c.drawString(40, y_top, f"{title} (could not export image - install kaleido)")
-            return y_top - 15
+            c.drawString(40, y_top_local, f"{title} (could not export image - install kaleido)")
+            return y_top_local - 15
 
     y = add_plotly_image(fig_gauge, "Gauge - Final Margin", y)
     y = add_plotly_image(fig_waterfall, "Waterfall - Revenue → Cost → Fixed → Fees → Total", y)
@@ -412,8 +453,6 @@ def get_msal_app():
 # ============================================================
 # UI + LOGIN
 # ============================================================
-st.title("📊 CNET Financial Performance & Budget Control")
-
 if not REDIRECT_URI:
     st.error("REDIRECT_URI is missing in Secrets. Example: https://cnet-dashboard.streamlit.app (no trailing slash).")
     st.stop()
@@ -458,6 +497,10 @@ if "access_token" not in token_result:
     st.stop()
 
 st.success("✅ Connected to OneDrive/SharePoint (active token)")
+
+# Optional: small warning if logo file missing
+if not _logo_path():
+    st.warning("⚠️ Logo file not found. Please ensure 'cnet_logo.png' is in the repo root.")
 
 colA, colB = st.columns([1, 3])
 with colA:
@@ -677,7 +720,7 @@ else:
     k5, k6, k7 = st.columns(3)
     k5.metric("Net", f"${net:,.2f}", f"{p_net*100:,.2f}%")
     k6.metric("Total Management Fee", f"${mgmt_fee_total:,.2f}", f"{p_mgmt*100:,.2f}%")
-    k7.metric("", "", "")  # spacer to keep layout consistent
+    k7.metric("", "", "")  # spacer
 
 # Fees row (Royalty 5% ONLY here; Royalty 3% only when applies)
 f1, f2, f3 = st.columns(3)
@@ -784,9 +827,8 @@ else:
     budget_total = float(df[c_budget].fillna(0).sum())
     var_total = float(df[c_var].fillna(0).sum())  # Budget - Real
 
-    # Determine Over / Under
-    is_over = var_total < 0      # Budget - Real negative => OVER
-    is_under = var_total > 0     # Budget - Real positive => UNDER
+    is_over = var_total < 0
+    is_under = var_total > 0
 
     over_amt = max(0.0, real_total - budget_total)
     under_amt = max(0.0, budget_total - real_total)
@@ -795,7 +837,6 @@ else:
     pct_under_vs_budget = safe_pct(under_amt, budget_total)
     pct_over_vs_budget = safe_pct(over_amt, budget_total)
 
-    # Color styles
     color_red = "#d93025"
     color_green = "#188038"
     color_gray = "#5f6368"
@@ -810,13 +851,10 @@ else:
         status_html = f"<span style='color:{color_gray}; font-weight:700;'>⚪ On budget</span>"
         var_color = color_gray
 
-    # KPI Cards
     a1, a2, a3, a4 = st.columns(4)
-
     a1.metric(f"{cat} - Real", f"${real_total:,.2f}")
     a2.metric(f"{cat} - Budget", f"${budget_total:,.2f}")
 
-    # Variation (colored number)
     a3.markdown(
         f"""
         <div style="font-size:14px;">Variation (Budget - Real)</div>
@@ -828,7 +866,6 @@ else:
         unsafe_allow_html=True
     )
 
-    # % Used
     a4.markdown(
         f"""
         <div style="font-size:14px;">% of Budget Used</div>
@@ -848,7 +885,6 @@ else:
         unsafe_allow_html=True
     )
 
-    # Chart
     fig_cat = go.Figure()
     fig_cat.add_trace(go.Bar(name="Budget", x=["Budget"], y=[budget_total]))
     fig_cat.add_trace(go.Bar(name="Real", x=["Real"], y=[real_total]))
@@ -914,8 +950,6 @@ else:
 
 # ============================================================
 # ✅ MONTHLY BREAKDOWN (FILTERED) — NO TIME AXIS
-# Fixed is applied per month ONLY when company rule applies
-# Roy3 is applied per month ONLY when company+client rule applies
 # ============================================================
 st.subheader("🗓️ Monthly Breakdown (Filtered)")
 
@@ -961,7 +995,6 @@ if MONTH_COL in df.columns and YEAR_COL in df.columns:
 
         g["Gross"] = g["Income"] - g["Cost"]
 
-        # Fixed is a single global from sheet; apply only when company rule applies
         if apply_fixed:
             g["Fixed"] = fixed_total
             g["Net"] = g["Gross"] - g["Fixed"]
