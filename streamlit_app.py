@@ -548,7 +548,7 @@ COL_COST_BUDGET = "Total Cost Budget"
 COL_COST_VAR    = "Variation Total Cost (Budget vs Real)"  # Budget - Real
 COL_MGMT   = "Total Management Fee"
 COL_ROY_5  = "Royalty CNET Group Inc 5%"
-COL_ROY_3  = "Royalty CNET Master 3% BGIS"  # ✅ user confirmed exact name
+COL_ROY_3  = "Royalty CNET Master 3% BGIS"  # exact name in your Excel
 
 # ============================================================
 # CATEGORY SPECS
@@ -612,20 +612,20 @@ if c_roy3:
 
 # ============================================================
 # ✅ FINAL BUSINESS RULES (YOUR REQUEST)
-# 1) Fixed Expenses ONLY for Company = 12433087 Canada Inc
-# 2) Royalty 3% ONLY for Company = 9359-6633 Quebec Inc AND Client = BGIS
+# - Fixed Expenses ONLY for Company = 12433087 Canada Inc
+# - Grand Total (New Total) ALWAYS sums: Net + Mgmt Fee + Roy5
+# - PLUS Roy3 ONLY when Company = 9390-6633 Quebec Inc
 # ============================================================
 COMPANY_FIXED = "12433087 Canada Inc"
-COMPANY_BG_QC = "9359-6633 Quebec Inc"
-CLIENT_BGIS   = "BGIS"
+COMPANY_BG_QC_GRAND = "9390-6633 Quebec Inc"
 
 income = float(df[c_income].fillna(0).sum())
 cost   = float(df[c_cost].fillna(0).sum())
 gross  = income - cost
 
-mgmt_fee_total = float(df[c_mgmt].fillna(0).sum())
-royalty_5_total = float(df[c_roy5].fillna(0).sum())
-royalty_3_total = float(df[c_roy3].fillna(0).sum()) if c_roy3 else 0.0
+mgmt_fee_total   = float(df[c_mgmt].fillna(0).sum())
+royalty_5_total  = float(df[c_roy5].fillna(0).sum())
+royalty_3_total  = float(df[c_roy3].fillna(0).sum()) if c_roy3 else 0.0
 
 # --- Apply Fixed ONLY when filtered Company is exactly 12433087 Canada Inc
 apply_fixed = False
@@ -636,17 +636,14 @@ if c_company:
 fixed_total = fixed_total_full if apply_fixed else 0.0
 net = gross - fixed_total
 
-# --- Apply Royalty 3% ONLY when filtered Company=9359-6633 Quebec Inc AND Client=BGIS
-apply_roy3 = False
-if c_company and c_client:
+# --- Apply Royalty 3% ONLY for GRAND TOTAL when filtered Company is exactly 9390-6633 Quebec Inc
+apply_roy3_grand = False
+if c_company:
     companies = df[c_company].dropna().astype(str).unique().tolist()
-    clients   = df[c_client].dropna().astype(str).unique().tolist()
-    apply_roy3 = (len(companies) == 1 and companies[0] == COMPANY_BG_QC and len(clients) == 1 and clients[0] == CLIENT_BGIS)
+    apply_roy3_grand = (len(companies) == 1 and companies[0] == COMPANY_BG_QC_GRAND)
 
-if apply_roy3:
-    new_total = net + mgmt_fee_total + royalty_5_total + royalty_3_total
-else:
-    new_total = net + mgmt_fee_total + royalty_5_total
+# ✅ New Total (Grand Total)
+new_total = net + mgmt_fee_total + royalty_5_total + (royalty_3_total if apply_roy3_grand else 0.0)
 
 # % of revenue
 p_cost  = safe_pct(cost, income)
@@ -655,8 +652,11 @@ p_fixed = safe_pct(fixed_total, income)
 p_net   = safe_pct(net, income)
 p_mgmt  = safe_pct(mgmt_fee_total, income)
 p_roy5  = safe_pct(royalty_5_total, income)
-p_roy3  = safe_pct(royalty_3_total, income) if apply_roy3 else 0.0
+p_roy3  = safe_pct(royalty_3_total, income) if apply_roy3_grand else 0.0
 p_new   = safe_pct(new_total, income)
+
+# (Optional) keep Monthly Breakdown unchanged: never apply Roy3 month-by-month
+apply_roy3_monthly = False
 
 # ============================================================
 # Traffic Light + Gauge
@@ -722,10 +722,14 @@ else:
     k6.metric("Total Management Fee", f"${mgmt_fee_total:,.2f}", f"{p_mgmt*100:,.2f}%")
     k7.metric("", "", "")  # spacer
 
-# Fees row (Royalty 5% ONLY here; Royalty 3% only when applies)
+# Fees row (Royalty 5% ONLY here; Royalty 3% ONLY included in GRAND TOTAL when company matches)
 f1, f2, f3 = st.columns(3)
 f1.metric("Royalty (5%)", f"${royalty_5_total:,.2f}", f"{p_roy5*100:,.2f}%")
-f2.metric("Royalty (3%) BGIS", f"${royalty_3_total:,.2f}" if apply_roy3 else "$0.00", f"{p_roy3*100:,.2f}%")
+f2.metric(
+    "Royalty (3%) BGIS",
+    f"${royalty_3_total:,.2f}" if apply_roy3_grand else "$0.00",
+    f"{p_roy3*100:,.2f}%"
+)
 f3.metric("New Total", f"${new_total:,.2f}", f"{p_new*100:,.2f}%")
 
 # ============================================================
@@ -761,7 +765,7 @@ if tc_r and tc_b and tc_v:
     t4.metric("% Budget Used", f"{pct_used*100:,.1f}%", f"Over: {pct_over*100:,.1f}% | Under: {pct_under*100:,.1f}%")
 
 # ============================================================
-# WATERFALL (hide Fixed step when not applied; include Roy3 when applied)
+# WATERFALL (hide Fixed step when not applied; include Roy3 ONLY in GRAND TOTAL when company matches)
 # ============================================================
 st.subheader("📉 Executive Waterfall")
 
@@ -778,7 +782,7 @@ wf_x += ["Mgmt Fee", "Royalty 5%"]
 wf_y += [mgmt_fee_total, royalty_5_total]
 wf_measure += ["relative", "relative"]
 
-if apply_roy3:
+if apply_roy3_grand:
     wf_x += ["Royalty 3%"]
     wf_y += [royalty_3_total]
     wf_measure += ["relative"]
@@ -950,6 +954,7 @@ else:
 
 # ============================================================
 # ✅ MONTHLY BREAKDOWN (FILTERED) — NO TIME AXIS
+# (kept unchanged: Roy3 NOT applied monthly)
 # ============================================================
 st.subheader("🗓️ Monthly Breakdown (Filtered)")
 
@@ -987,7 +992,7 @@ if MONTH_COL in df.columns and YEAR_COL in df.columns:
                 Cost=(mc, "sum"),
                 MgmtFee=(mm, "sum"),
                 Royalty5=(mr5, "sum"),
-                Royalty3=(mr3, "sum") if (mr3 and apply_roy3) else (mr5, lambda s: 0.0),
+                Royalty3=(mr3, "sum") if (mr3 and apply_roy3_monthly) else (mr5, lambda s: 0.0),
             )
             .reset_index()
             .sort_values("_MonthKey")
@@ -1001,7 +1006,7 @@ if MONTH_COL in df.columns and YEAR_COL in df.columns:
         else:
             g["Net"] = g["Gross"]
 
-        if apply_roy3:
+        if apply_roy3_monthly:
             g["New Total"] = g["Net"] + g["MgmtFee"] + g["Royalty5"] + g["Royalty3"]
         else:
             g["New Total"] = g["Net"] + g["MgmtFee"] + g["Royalty5"]
@@ -1012,7 +1017,7 @@ if MONTH_COL in df.columns and YEAR_COL in df.columns:
         else:
             cols_show += ["Net"]
         cols_show += ["MgmtFee", "Royalty5"]
-        if apply_roy3:
+        if apply_roy3_monthly:
             cols_show += ["Royalty3"]
         cols_show += ["New Total"]
 
@@ -1055,7 +1060,7 @@ pdf_bytes = build_pdf_report(
     net=net,
     mgmt_fee_total=mgmt_fee_total,
     royalty_5_total=royalty_5_total,
-    royalty_3_total=(royalty_3_total if apply_roy3 else 0.0),
+    royalty_3_total=(royalty_3_total if apply_roy3_grand else 0.0),
     new_total=new_total,
     p_cost=p_cost, p_gross=p_gross, p_fixed=p_fixed, p_net=p_net,
     p_mgmt=p_mgmt, p_roy5=p_roy5, p_roy3=p_roy3, p_new=p_new,
@@ -1072,7 +1077,7 @@ st.download_button(
 )
 
 # ============================================================
-# TABLES (Fixed shown only when applied; Roy3 shown only when applied)
+# TABLES (Fixed shown only when applied; Roy3 shown only when applied in GRAND TOTAL)
 # ============================================================
 st.subheader("Summary")
 
@@ -1091,7 +1096,7 @@ summary_rows += [
     ["Royalty (5%)", royalty_5_total, p_roy5],
 ]
 
-if apply_roy3:
+if apply_roy3_grand:
     summary_rows += [["Royalty (3%) BGIS", royalty_3_total, p_roy3]]
 
 summary_rows += [["New Total", new_total, p_new]]
