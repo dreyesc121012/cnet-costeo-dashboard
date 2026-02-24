@@ -6,3 +6,5 @@ requests
 reportlab
 kaleido
 plotly
+beautifulsoup4
+lxml
