@@ -81,11 +81,24 @@ def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
     def province_from_taxes(row):
         hits = []
         for c in tax_cols:
-            if safe_num(row.get(c, 0)) > 0:
+          if abs(safe_num(row.get(c, 0))) > 0:
                 hits.append(c.upper())
 
-        if not hits:
-            return "Unknown"
+       if not hits:
+    txt = f"{row.get('Buyer Company Name','')} {row.get('Vendor Company Name','')} {row.get('Work Description','')}".upper()
+
+    if "QUEBEC" in txt or " QC " in txt:
+        return "Quebec"
+    if "NOVA SCOTIA" in txt or " NS " in txt:
+        return "Nova Scotia"
+    if "ONTARIO" in txt or " ON " in txt:
+        return "Ontario"
+    if "NEW BRUNSWICK" in txt or " NB " in txt:
+        return "New Brunswick"
+    if "PEI" in txt or "PRINCE EDWARD" in txt:
+        return "Prince Edward Island"
+
+    return "Unknown"
 
         # Specific rule: QST QC => Quebec
         for c in hits:
