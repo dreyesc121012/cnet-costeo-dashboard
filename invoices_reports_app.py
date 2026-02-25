@@ -65,7 +65,7 @@ def download_export_file() -> bytes:
     if "login" in r2.url.lower():
         raise Exception("Login falló. Revisa usuario/clave.")
 
-    # 3) GET export (tu export actual devuelve CSV)
+    # 3) GET export (your export returns CSV)
     export_url = st.secrets["EXPORT_EXCEL_URL"]
     r3 = session.get(export_url, timeout=60)
     r3.raise_for_status()
@@ -98,6 +98,7 @@ def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
             "NL": "Newfoundland and Labrador", "PE": "Prince Edward Island",
             "NT": "Northwest Territories", "NU": "Nunavut", "YT": "Yukon"
         }
+
         for code, prov in mapping.items():
             for c in hits:
                 if re.search(rf"\b{code}\b", c):
@@ -168,7 +169,7 @@ def build_columns(df: pd.DataFrame) -> pd.DataFrame:
         axis=1
     )
 
-    # 2.5% Brokerage Fee (placeholder -> 0)
+    # 2.5% Brokerage Fee (placeholder)
     df["2.5% Brokerage Fee"] = 0.0
 
     # Province
@@ -180,7 +181,6 @@ def build_columns(df: pd.DataFrame) -> pd.DataFrame:
 # Reports
 # =========================================================
 def report_resume_without_fees(df: pd.DataFrame) -> pd.DataFrame:
-    # Pivot like Excel:
     pivot = pd.pivot_table(
         df,
         index=["Vendor Company Name", "Service", "Buyer Company Name"],
@@ -217,7 +217,7 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
 # =========================================================
 st.title("CNET - Invoice Reports")
 
-# Sidebar: report + month filter (inputs visibles desde el inicio)
+# ---- Sidebar (inputs always visible)
 with st.sidebar:
     st.subheader("Select report")
 
@@ -242,39 +242,51 @@ with st.sidebar:
     st.divider()
     run = st.button("Download + Process")
 
-if not run:
-    st.info("Selecciona mes/año y presiona **Download + Process**.")
+# ---- Download/process ONLY when button is clicked
+if run:
+    with st.spinner("Downloading export from CNET..."):
+        content = download_export_file()
+
+    df_raw = read_any_table(content)
+
+    if "Creation Date" not in df_raw.columns:
+        st.error("No encuentro la columna 'Creation Date' para filtrar por mes.")
+        st.stop()
+
+    df_raw["Creation Date"] = pd.to_datetime(df_raw["Creation Date"], errors="coerce")
+
+    df_month = df_raw[
+        (df_raw["Creation Date"].dt.month == month_num) &
+        (df_raw["Creation Date"].dt.year == int(year))
+    ].copy()
+
+    df_final = build_columns(df_month)
+
+    # ✅ Save to session_state so filters won't reset the app
+    st.session_state["df_final"] = df_final
+    st.session_state["loaded_month"] = month_name
+    st.session_state["loaded_year"] = int(year)
+
+# ---- If no data loaded yet, show message and stop
+if "df_final" not in st.session_state:
+    st.info("Selecciona Month/Year y presiona **Download + Process** para cargar la data.")
     st.stop()
 
-# Download + read + month filter
-with st.spinner("Downloading export from CNET..."):
-    content = download_export_file()
+df_final = st.session_state["df_final"]
+loaded_month = st.session_state.get("loaded_month", month_name)
+loaded_year = st.session_state.get("loaded_year", int(year))
 
-df_raw = read_any_table(content)
-
-if "Creation Date" not in df_raw.columns:
-    st.error("No encuentro la columna 'Creation Date' para filtrar por mes.")
-    st.stop()
-
-df_raw["Creation Date"] = pd.to_datetime(df_raw["Creation Date"], errors="coerce")
-df_month = df_raw[(df_raw["Creation Date"].dt.month == month_num) & (df_raw["Creation Date"].dt.year == int(year))].copy()
-
-st.success(f"Archivo descargado. Filas totales: {len(df_raw):,} | Filas del mes: {len(df_month):,}")
-
-# Apply business rules
-df_final = build_columns(df_month)
+st.success(f"Data cargada en memoria: {loaded_month} {loaded_year} | Rows: {len(df_final):,}")
 
 # =========================================================
-# Sidebar filters (DESPUÉS de procesar, para filtrar reportes)
+# Filters (left) - work on df_final in memory
 # =========================================================
-# Company column: use Company Name if exists, else fallback
 company_col = "Company Name" if "Company Name" in df_final.columns else ("Company" if "Company" in df_final.columns else None)
 
 with st.sidebar:
     st.divider()
     st.subheader("Filters")
 
-    # Company filter
     if company_col:
         companies = sorted(df_final[company_col].dropna().astype(str).unique().tolist())
         sel_company = st.multiselect("Company", companies, default=[])
@@ -296,31 +308,26 @@ with st.sidebar:
     vendors = sorted(df_final["Vendor Company Name"].dropna().astype(str).unique().tolist())
     sel_vendor = st.multiselect("Vendor Company Name", vendors, default=[])
 
-# Apply filters to df_final
+# Apply filters
 df_filtered = df_final.copy()
 
 if company_col and sel_company:
     df_filtered = df_filtered[df_filtered[company_col].astype(str).isin(sel_company)]
-
 if sel_service:
     df_filtered = df_filtered[df_filtered["Service"].astype(str).isin(sel_service)]
-
 if sel_province:
     df_filtered = df_filtered[df_filtered["Province"].astype(str).isin(sel_province)]
-
 if sel_buyer:
     df_filtered = df_filtered[df_filtered["Buyer Company Name"].astype(str).isin(sel_buyer)]
-
 if sel_brokerage:
     df_filtered = df_filtered[df_filtered["Brokerage"].astype(str).isin(sel_brokerage)]
-
 if sel_vendor:
     df_filtered = df_filtered[df_filtered["Vendor Company Name"].astype(str).isin(sel_vendor)]
 
 st.caption(f"Filtered rows: {len(df_filtered):,}")
 
 # =========================================================
-# Build selected report (using FILTERED data)
+# Show selected report using filtered data
 # =========================================================
 if report_choice == "Resume Without Fees":
     st.subheader("Resume Without Fees")
@@ -332,7 +339,6 @@ elif report_choice == "Validation":
 
 else:
     st.subheader("Jeff-validation")
-    # Igual que Validation por ahora (si Jeff tiene regla específica, la agregamos)
     rep = report_validation(df_filtered)
 
 st.dataframe(rep, use_container_width=True)
@@ -340,11 +346,13 @@ st.dataframe(rep, use_container_width=True)
 st.download_button(
     label="Download selected report (CSV)",
     data=df_to_csv_bytes(rep),
-    file_name=f"{report_choice.replace(' ', '_').lower()}_{month_name.lower()}_{int(year)}.csv",
+    file_name=f"{report_choice.replace(' ', '_').lower()}_{loaded_month.lower()}_{loaded_year}.csv",
     mime="text/csv"
 )
 
-# Preview calculated columns (for verification)
+# =========================================================
+# Preview calculated columns
+# =========================================================
 st.divider()
 st.subheader("Preview - Calculated Columns (incluye Province)")
 
