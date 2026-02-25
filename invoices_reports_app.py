@@ -4,6 +4,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
+import plotly.graph_objects as go
 
 # =========================================================
 # CONFIG
@@ -161,7 +162,7 @@ def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
         hits = []
         for c in tax_cols:
             v = safe_num(row.get(c, 0))
-            if abs(v) > 0:  # includes negatives
+            if abs(v) > 0:
                 hits.append(c.upper())
 
         if not hits:
@@ -364,12 +365,64 @@ def report_validation(df: pd.DataFrame, hide_marketing: bool = False) -> pd.Data
     return rep
 
 # =========================================================
-# Executive Summary + Comparison
+# Executive Summary (UPDATED: multi-month by Province trend)
 # =========================================================
 def executive_summary(df: pd.DataFrame):
     st.subheader("Executive Summary")
 
-    # By Province
+    if df.empty:
+        st.info("No data for Executive Summary with the selected filters.")
+        return
+
+    # Ensure Month key exists for trend
+    if "Creation Date" in df.columns:
+        df = df.copy()
+        df["Month"] = pd.to_datetime(df["Creation Date"], errors="coerce").dt.to_period("M").astype(str)
+    else:
+        df = df.copy()
+        df["Month"] = "Unknown"
+
+    # --------- UPDATED SECTION (Trend by Province + Multi-month behavior) ----------
+    st.markdown("### By Province (Total Amount Without Taxes) - Multi-Month Trend")
+
+    trend = (
+        df.groupby(["Month", "Province"], dropna=False)["Total Amount Without Taxes"]
+        .sum()
+        .reset_index()
+    )
+    trend["Province"] = trend["Province"].fillna("Unknown")
+
+    # Sort months chronologically (best effort)
+    try:
+        trend["_m"] = pd.to_datetime(trend["Month"] + "-01", errors="coerce")
+        trend = trend.sort_values("_m").drop(columns=["_m"])
+    except Exception:
+        pass
+
+    # Plotly line chart
+    fig = go.Figure()
+    for prov in sorted(trend["Province"].astype(str).unique().tolist()):
+        d = trend[trend["Province"].astype(str) == prov]
+        fig.add_trace(go.Scatter(
+            x=d["Month"],
+            y=d["Total Amount Without Taxes"],
+            mode="lines+markers",
+            name=str(prov)
+        ))
+
+    fig.update_layout(
+        title="Total Amount Without Taxes by Province",
+        xaxis_title="Month",
+        yaxis_title="Total Amount Without Taxes ($)",
+        hovermode="x unified",
+        legend_title="Province"
+    )
+
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Summary table (Province totals for selected months)
     prov_sum = (
         df.groupby("Province", dropna=False)[
             ["Total Amount Without Taxes", "3% Royalty Fee Group", "5% Royalty Fee Group", "5% Brokerage Fee", "2.5% Brokerage Fee"]
@@ -379,12 +432,11 @@ def executive_summary(df: pd.DataFrame):
     )
     prov_sum["Province"] = prov_sum["Province"].fillna("Unknown")
 
-    st.markdown("### By Province (Total Amount Without Taxes)")
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        st.bar_chart(prov_sum.set_index("Province")["Total Amount Without Taxes"].sort_values(ascending=False))
     with c2:
-        st.dataframe(format_report_for_display(prov_sum.sort_values("Total Amount Without Taxes", ascending=False)), use_container_width=True)
+        st.dataframe(
+            format_report_for_display(prov_sum.sort_values("Total Amount Without Taxes", ascending=False)),
+            use_container_width=True
+        )
 
     # Service Mix
     st.markdown("### Service Mix (Regular vs One Shot)")
@@ -474,7 +526,6 @@ def comparison_section(df_curr: pd.DataFrame, df_prev: pd.DataFrame, hide_market
 
     st.dataframe(format_report_for_display(prov_compare.sort_values("Current", ascending=False)), use_container_width=True)
 
-    # bar chart with two columns in a single df (Streamlit bar_chart supports multi-series)
     chart_df = prov_compare.set_index("Province")[["Current", "Compare"]].sort_values("Current", ascending=False)
     st.bar_chart(chart_df)
 
@@ -490,6 +541,7 @@ month_labels = [
 
 with st.sidebar:
     st.subheader("Select report")
+    # ✅ Keep internal logic but show clean label in report header later
     report_choice = st.radio("Report type", ["Resume Without Fees", "Validation", "Jeff-validation"], index=0)
 
     st.divider()
@@ -498,9 +550,19 @@ with st.sidebar:
     year = st.number_input("Year", min_value=2020, max_value=2035, value=2026, step=1, key="main_year")
 
     st.divider()
+    st.subheader("Executive Summary by Province (Multi-month)")
+    exec_year = st.number_input("Executive Year", min_value=2020, max_value=2035, value=int(year), step=1, key="exec_year")
+    exec_months = st.multiselect(
+        "Executive Months",
+        month_labels,
+        default=[month_name],
+        key="exec_months"
+    )
+
+    st.divider()
     st.subheader("Comparison")
     enable_compare = st.checkbox("Enable comparison", value=True)
-    compare_month = st.selectbox("Compare month", month_labels, index=1, key="cmp_month")  # default February
+    compare_month = st.selectbox("Compare month", month_labels, index=1, key="cmp_month")
     compare_year = st.number_input("Compare year", min_value=2020, max_value=2035, value=2026, step=1, key="cmp_year")
 
     st.divider()
@@ -518,7 +580,7 @@ if run:
 
     df_raw["Creation Date"] = pd.to_datetime(df_raw["Creation Date"], errors="coerce")
 
-    st.session_state["df_raw"] = df_raw  # ✅ keep raw
+    st.session_state["df_raw"] = df_raw
     st.session_state["last_download_ok"] = True
 
 # Need raw data first
@@ -605,13 +667,27 @@ if report_choice == "Jeff-validation":
 show_kpis_from_df(df_for_report, hide_marketing=hide_marketing)
 
 # =========================================================
-# Executive + Comparison
+# Executive Summary (UPDATED: multi-month filter just for Executive Summary)
 # =========================================================
 st.divider()
-executive_summary(df_for_report)
 
+# Build Executive Summary dataset from multi-month selection (same filters + Jeff logic)
+exec_month_nums = [month_name_to_num(mn) for mn in (exec_months or [month_name])]
+ey = int(exec_year)
+
+df_exec_raw = df_raw[(df_raw["Creation Date"].dt.year == ey) & (df_raw["Creation Date"].dt.month.isin(exec_month_nums))].copy()
+df_exec = build_columns(df_exec_raw)
+df_exec = apply_filters(df_exec)
+
+if report_choice == "Jeff-validation":
+    df_exec = apply_jeff_exclusions_only_buyer_exact(df_exec)
+
+executive_summary(df_exec)
+
+# =========================================================
+# Comparison (still based on main month vs compare month)
+# =========================================================
 if enable_compare and df_cmp is not None:
-    # apply same filters to compare month (except options list comes from main; still works)
     df_cmp_filtered = apply_filters(df_cmp)
 
     if report_choice == "Jeff-validation":
@@ -640,7 +716,8 @@ elif report_choice == "Validation":
     rep = report_validation(df_for_report, hide_marketing=False)
 
 else:
-    st.subheader("Jeff-validation (NO Marketing Fee) + EXACT Buyer exclusions + totals")
+    # ✅ CHANGE REQUEST: show only JEFF-VALIDATION (no long name)
+    st.subheader("JEFF-VALIDATION")
     rep = report_validation(df_for_report, hide_marketing=True)
 
 st.dataframe(format_report_for_display(rep), use_container_width=True)
