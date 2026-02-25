@@ -41,14 +41,23 @@ def fmt_money(x: float) -> str:
 
 def format_report_for_display(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Formatea SOLO para visualización:
-    - columnas numéricas a 2 decimales y separador de miles: 1,234.56
+    Display-only formatting:
+    numeric cols -> 1,234.56 (two decimals + thousands separator)
     """
     out = df.copy()
     num_cols = out.select_dtypes(include="number").columns.tolist()
     for c in num_cols:
         out[c] = out[c].map(lambda v: f"{v:,.2f}")
     return out
+
+def norm_name(s: str) -> str:
+    """
+    Normalize for exact matching:
+    - strip
+    - collapse whitespace
+    - lowercase
+    """
+    return re.sub(r"\s+", " ", str(s or "").strip().lower())
 
 # =========================================================
 # Login + Download (CSRF)
@@ -87,7 +96,7 @@ def download_export_file() -> bytes:
     return r3.content
 
 # =========================================================
-# Province inference
+# Province inference (tax cols + negative taxes + text fallback)
 # =========================================================
 def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -154,7 +163,7 @@ def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # =========================================================
-# Build columns
+# Build columns (your rules)
 # =========================================================
 def build_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -193,13 +202,13 @@ def build_columns(df: pd.DataFrame) -> pd.DataFrame:
         lambda r: r[col_total] * r["Brokerages"] if r["Brokerages"] == 0.05 else 0.0,
         axis=1
     )
-    df["2.5% Brokerage Fee"] = 0.0
 
+    df["2.5% Brokerage Fee"] = 0.0
     df = add_province_from_taxes(df)
     return df
 
 # =========================================================
-# Totals helpers
+# Totals helpers (Grand Total row + KPI metrics)
 # =========================================================
 def add_grand_total_row(df: pd.DataFrame, label_cols: list[str], total_label: str = "Grand Total") -> pd.DataFrame:
     df2 = df.copy()
@@ -240,7 +249,7 @@ def show_kpis_from_df(df: pd.DataFrame, hide_marketing: bool = False):
         c6.metric("2.5% Brokerage Fee", fmt_money(b25))
 
 # =========================================================
-# Jeff exclusions: ONLY Buyer Company Name
+# Jeff exclusions: EXACT match ONLY on Buyer Company Name
 # =========================================================
 JEFF_EXCLUDE_BUYERS = [
     "12433087 Canada Inc",
@@ -268,13 +277,19 @@ JEFF_EXCLUDE_BUYERS = [
     "Evripos",
 ]
 
-def apply_jeff_exclusions_only_buyer(df: pd.DataFrame) -> pd.DataFrame:
+EXCLUDE_SET_NORM = set(norm_name(x) for x in JEFF_EXCLUDE_BUYERS)
+
+def apply_jeff_exclusions_only_buyer_exact(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    ✅ Exclude ONLY when Buyer Company Name matches exactly one of the names
+       (case/space-insensitive).
+    ❌ Does NOT exclude variations like "Allen Maintenance Ltd-47".
+    """
     if "Buyer Company Name" not in df.columns:
-        return df
-    buyer = df["Buyer Company Name"].astype(str).fillna("")
-    mask_exclude = pd.Series(False, index=df.index)
-    for name in JEFF_EXCLUDE_BUYERS:
-        mask_exclude = mask_exclude | buyer.str.contains(re.escape(name), case=False, na=False)
+        return df.copy()
+
+    buyer_norm = df["Buyer Company Name"].astype(str).map(norm_name)
+    mask_exclude = buyer_norm.isin(EXCLUDE_SET_NORM)
     return df[~mask_exclude].copy()
 
 # =========================================================
@@ -347,6 +362,7 @@ with st.sidebar:
     st.divider()
     run = st.button("Download + Process")
 
+# Download/process only on click
 if run:
     with st.spinner("Downloading export from CNET..."):
         content = download_export_file()
@@ -363,6 +379,7 @@ if run:
     ].copy()
 
     df_final = build_columns(df_month)
+
     st.session_state["df_final"] = df_final
     st.session_state["loaded_month"] = month_name
     st.session_state["loaded_year"] = int(year)
@@ -420,11 +437,12 @@ if sel_vendor:
 
 st.caption(f"Filtered rows: {len(df_filtered):,}")
 
-# Jeff: apply exclusions only on Buyer Company Name + hide marketing
+# Jeff: apply EXACT exclusions only on Buyer Company Name + hide marketing
 hide_marketing = (report_choice == "Jeff-validation")
 df_for_report = df_filtered
+
 if report_choice == "Jeff-validation":
-    df_for_report = apply_jeff_exclusions_only_buyer(df_filtered)
+    df_for_report = apply_jeff_exclusions_only_buyer_exact(df_filtered)
 
 show_kpis_from_df(df_for_report, hide_marketing=hide_marketing)
 
@@ -436,10 +454,10 @@ elif report_choice == "Validation":
     st.subheader("Validation (with totals)")
     rep = report_validation(df_for_report, hide_marketing=False)
 else:
-    st.subheader("Jeff-validation (NO Marketing Fee) + exclusions (Buyer only) + totals")
+    st.subheader("Jeff-validation (NO Marketing Fee) + EXACT Buyer exclusions + totals")
     rep = report_validation(df_for_report, hide_marketing=True)
 
-# ✅ Show formatted table (2 decimals + thousands)
+# Display formatted (two decimals + thousands)
 st.dataframe(format_report_for_display(rep), use_container_width=True)
 
 st.download_button(
@@ -449,7 +467,7 @@ st.download_button(
     mime="text/csv"
 )
 
-# Preview (raw, for audit)
+# Preview
 st.divider()
 st.subheader("Preview - Calculated Columns (include Province)")
 
