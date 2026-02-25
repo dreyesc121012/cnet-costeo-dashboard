@@ -15,6 +15,9 @@ def safe_num(x) -> float:
         if pd.isna(x):
             return 0.0
         s = str(x).replace("$", "").replace(",", "").strip()
+        # Manejar paréntesis contables (1,234.56) -> -1234.56
+        if s.startswith("(") and s.endswith(")"):
+            s = "-" + s[1:-1]
         return float(s) if s else 0.0
     except Exception:
         return 0.0
@@ -73,32 +76,49 @@ def download_export_file() -> bytes:
 
 # =========================================================
 # Province inference (from tax columns like "QST QC")
+#   ✅ FIX: detecta taxes negativos con abs(...)
+#   ✅ Fallback: detecta por texto si no hay taxes
 # =========================================================
 def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+
+    # columnas que parezcan taxes
     tax_cols = [c for c in df.columns if any(k in c.upper() for k in ["GST", "HST", "QST", "PST", "RST", "TAX"])]
 
     def province_from_taxes(row):
         hits = []
         for c in tax_cols:
-          if abs(safe_num(row.get(c, 0))) > 0:
+            # ✅ detecta positivos y negativos
+            if abs(safe_num(row.get(c, 0))) > 0:
                 hits.append(c.upper())
 
-       if not hits:
-    txt = f"{row.get('Buyer Company Name','')} {row.get('Vendor Company Name','')} {row.get('Work Description','')}".upper()
+        # ✅ fallback si no hay taxes (por texto)
+        if not hits:
+            txt = f"{row.get('Buyer Company Name','')} {row.get('Vendor Company Name','')} {row.get('Work Description','')}".upper()
 
-    if "QUEBEC" in txt or " QC " in txt:
-        return "Quebec"
-    if "NOVA SCOTIA" in txt or " NS " in txt:
-        return "Nova Scotia"
-    if "ONTARIO" in txt or " ON " in txt:
-        return "Ontario"
-    if "NEW BRUNSWICK" in txt or " NB " in txt:
-        return "New Brunswick"
-    if "PEI" in txt or "PRINCE EDWARD" in txt:
-        return "Prince Edward Island"
+            # patrones comunes
+            if "QUEBEC" in txt or " QC " in txt or txt.endswith(" QC"):
+                return "Quebec"
+            if "ONTARIO" in txt or " ON " in txt or txt.endswith(" ON"):
+                return "Ontario"
+            if "NOVA SCOTIA" in txt or " NS " in txt or txt.endswith(" NS"):
+                return "Nova Scotia"
+            if "NEW BRUNSWICK" in txt or " NB " in txt or txt.endswith(" NB"):
+                return "New Brunswick"
+            if "PRINCE EDWARD" in txt or " PEI " in txt or txt.endswith(" PEI"):
+                return "Prince Edward Island"
+            if "BRITISH COLUMBIA" in txt or " BC " in txt or txt.endswith(" BC"):
+                return "British Columbia"
+            if "ALBERTA" in txt or " AB " in txt or txt.endswith(" AB"):
+                return "Alberta"
+            if "MANITOBA" in txt or " MB " in txt or txt.endswith(" MB"):
+                return "Manitoba"
+            if "SASKATCHEWAN" in txt or " SK " in txt or txt.endswith(" SK"):
+                return "Saskatchewan"
+            if "NEWFOUNDLAND" in txt or " NL " in txt or txt.endswith(" NL"):
+                return "Newfoundland and Labrador"
 
-    return "Unknown"
+            return "Unknown"
 
         # Specific rule: QST QC => Quebec
         for c in hits:
@@ -117,7 +137,7 @@ def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
                 if re.search(rf"\b{code}\b", c):
                     return prov
 
-        # fallback
+        # fallback final
         for c in hits:
             if "QST" in c:
                 return "Quebec"
@@ -125,6 +145,7 @@ def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
                 return "HST Province (Unknown)"
             if "GST" in c:
                 return "GST Only (Unknown)"
+
         return "Unknown"
 
     df["Province"] = df.apply(province_from_taxes, axis=1)
@@ -194,6 +215,7 @@ def build_columns(df: pd.DataFrame) -> pd.DataFrame:
 # Reports
 # =========================================================
 def report_resume_without_fees(df: pd.DataFrame) -> pd.DataFrame:
+    # Pivot like Excel:
     pivot = pd.pivot_table(
         df,
         index=["Vendor Company Name", "Service", "Buyer Company Name"],
