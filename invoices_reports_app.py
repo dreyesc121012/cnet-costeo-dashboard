@@ -184,13 +184,13 @@ def build_columns(df: pd.DataFrame) -> pd.DataFrame:
     df["Brokerage"] = df[col_buyer].apply(lambda x: "Brokerage5" if contains_ci(x, "5BF") else "Without Brokerage")
 
     df["3% Royalty Fee Group"] = df.apply(
-        lambda r: r[col_total] * 0.03 if contains_ci(r["Service and Name"], "BGIS SCS regular") else 0.0,
+        lambda r: r[col_total] * 0.03 if contains_ci(r["Service and Name"], "Regular BGIS SCS") else 0.0,
         axis=1
     )
     df["3% Royalty Fee Master"] = df["3% Royalty Fee Group"]
 
     df["5% Royalty Fee Group"] = df.apply(
-        lambda r: 0.0 if contains_ci(r["Service and Name"], "BGIS SCS regular") else r[col_total] * 0.05,
+        lambda r: 0.0 if contains_ci(r["Service and Name"], "Regular BGIS SCS") else r[col_total] * 0.05,
         axis=1
     )
     df["5% Royalty Fee Master2"] = df["5% Royalty Fee Group"]
