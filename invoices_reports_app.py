@@ -39,6 +39,17 @@ def fmt_money(x: float) -> str:
     except Exception:
         return "$0.00"
 
+def format_report_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Formatea SOLO para visualización:
+    - columnas numéricas a 2 decimales y separador de miles: 1,234.56
+    """
+    out = df.copy()
+    num_cols = out.select_dtypes(include="number").columns.tolist()
+    for c in num_cols:
+        out[c] = out[c].map(lambda v: f"{v:,.2f}")
+    return out
+
 # =========================================================
 # Login + Download (CSRF)
 # =========================================================
@@ -76,7 +87,7 @@ def download_export_file() -> bytes:
     return r3.content
 
 # =========================================================
-# Province inference (tax cols + negative taxes + text fallback)
+# Province inference
 # =========================================================
 def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -143,7 +154,7 @@ def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # =========================================================
-# Build columns (your rules)
+# Build columns
 # =========================================================
 def build_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -229,7 +240,7 @@ def show_kpis_from_df(df: pd.DataFrame, hide_marketing: bool = False):
         c6.metric("2.5% Brokerage Fee", fmt_money(b25))
 
 # =========================================================
-# Jeff exclusions by Buyer Company Name
+# Jeff exclusions: ONLY Buyer Company Name
 # =========================================================
 JEFF_EXCLUDE_BUYERS = [
     "12433087 Canada Inc",
@@ -257,13 +268,13 @@ JEFF_EXCLUDE_BUYERS = [
     "Evripos",
 ]
 
-def apply_jeff_exclusions(df: pd.DataFrame) -> pd.DataFrame:
+def apply_jeff_exclusions_only_buyer(df: pd.DataFrame) -> pd.DataFrame:
     if "Buyer Company Name" not in df.columns:
         return df
-    s = df["Buyer Company Name"].astype(str).fillna("")
-    mask_exclude = False
+    buyer = df["Buyer Company Name"].astype(str).fillna("")
+    mask_exclude = pd.Series(False, index=df.index)
     for name in JEFF_EXCLUDE_BUYERS:
-        mask_exclude = mask_exclude | s.str.contains(re.escape(name), case=False, na=False)
+        mask_exclude = mask_exclude | buyer.str.contains(re.escape(name), case=False, na=False)
     return df[~mask_exclude].copy()
 
 # =========================================================
@@ -324,7 +335,6 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Month filter")
-
     months = [
         ("January", 1), ("February", 2), ("March", 3), ("April", 4),
         ("May", 5), ("June", 6), ("July", 7), ("August", 8),
@@ -337,26 +347,22 @@ with st.sidebar:
     st.divider()
     run = st.button("Download + Process")
 
-# ---- Download/process ONLY when button is clicked
 if run:
     with st.spinner("Downloading export from CNET..."):
         content = download_export_file()
 
     df_raw = read_any_table(content)
-
     if "Creation Date" not in df_raw.columns:
         st.error("No encuentro la columna 'Creation Date' para filtrar por mes.")
         st.stop()
 
     df_raw["Creation Date"] = pd.to_datetime(df_raw["Creation Date"], errors="coerce")
-
     df_month = df_raw[
         (df_raw["Creation Date"].dt.month == month_num) &
         (df_raw["Creation Date"].dt.year == int(year))
     ].copy()
 
     df_final = build_columns(df_month)
-
     st.session_state["df_final"] = df_final
     st.session_state["loaded_month"] = month_name
     st.session_state["loaded_year"] = int(year)
@@ -368,12 +374,9 @@ if "df_final" not in st.session_state:
 df_final = st.session_state["df_final"]
 loaded_month = st.session_state.get("loaded_month", month_name)
 loaded_year = st.session_state.get("loaded_year", int(year))
-
 st.success(f"Data cargada en memoria: {loaded_month} {loaded_year} | Rows: {len(df_final):,}")
 
-# =========================================================
-# Filters (left)
-# =========================================================
+# Filters
 company_col = "Company Name" if "Company Name" in df_final.columns else ("Company" if "Company" in df_final.columns else None)
 
 with st.sidebar:
@@ -402,7 +405,6 @@ with st.sidebar:
     sel_vendor = st.multiselect("Vendor Company Name", vendors, default=[])
 
 df_filtered = df_final.copy()
-
 if company_col and sel_company:
     df_filtered = df_filtered[df_filtered[company_col].astype(str).isin(sel_company)]
 if sel_service:
@@ -418,45 +420,36 @@ if sel_vendor:
 
 st.caption(f"Filtered rows: {len(df_filtered):,}")
 
-# =========================================================
-# KPIs (Totals)
-# =========================================================
+# Jeff: apply exclusions only on Buyer Company Name + hide marketing
 hide_marketing = (report_choice == "Jeff-validation")
-
-# For Jeff: apply buyer exclusions BEFORE totals and report
 df_for_report = df_filtered
 if report_choice == "Jeff-validation":
-    df_for_report = apply_jeff_exclusions(df_filtered)
+    df_for_report = apply_jeff_exclusions_only_buyer(df_filtered)
 
 show_kpis_from_df(df_for_report, hide_marketing=hide_marketing)
 
-# =========================================================
-# Selected report
-# =========================================================
+# Report
 if report_choice == "Resume Without Fees":
     st.subheader("Resume Without Fees (with totals)")
     rep = report_resume_without_fees(df_for_report)
-
 elif report_choice == "Validation":
     st.subheader("Validation (with totals)")
     rep = report_validation(df_for_report, hide_marketing=False)
-
 else:
-    st.subheader("Jeff-validation (NO Marketing Fee) + Buyer exclusions + totals")
+    st.subheader("Jeff-validation (NO Marketing Fee) + exclusions (Buyer only) + totals")
     rep = report_validation(df_for_report, hide_marketing=True)
 
-st.dataframe(rep, use_container_width=True)
+# ✅ Show formatted table (2 decimals + thousands)
+st.dataframe(format_report_for_display(rep), use_container_width=True)
 
 st.download_button(
     label="Download selected report (CSV)",
-    data=df_to_csv_bytes(rep),
+    data=df_to_csv_bytes(rep),  # download keeps numeric values
     file_name=f"{report_choice.replace(' ', '_').lower()}_{loaded_month.lower()}_{loaded_year}.csv",
     mime="text/csv"
 )
 
-# =========================================================
-# Preview calculated columns
-# =========================================================
+# Preview (raw, for audit)
 st.divider()
 st.subheader("Preview - Calculated Columns (include Province)")
 
