@@ -15,7 +15,6 @@ def safe_num(x) -> float:
         if pd.isna(x):
             return 0.0
         s = str(x).replace("$", "").replace(",", "").strip()
-        # Manejar paréntesis contables (1,234.56) -> -1234.56
         if s.startswith("(") and s.endswith(")"):
             s = "-" + s[1:-1]
         return float(s) if s else 0.0
@@ -26,7 +25,6 @@ def contains_ci(text, needle: str) -> bool:
     return needle.lower() in str(text or "").lower()
 
 def read_any_table(file_bytes: bytes) -> pd.DataFrame:
-    # Auto-detect excel vs csv
     try:
         return pd.read_excel(io.BytesIO(file_bytes))
     except Exception:
@@ -35,13 +33,18 @@ def read_any_table(file_bytes: bytes) -> pd.DataFrame:
         except Exception:
             return pd.read_csv(io.BytesIO(file_bytes), encoding="latin1", engine="python")
 
+def fmt_money(x: float) -> str:
+    try:
+        return f"${x:,.2f}"
+    except Exception:
+        return "$0.00"
+
 # =========================================================
 # Login + Download (CSRF)
 # =========================================================
 def download_export_file() -> bytes:
     session = requests.Session()
 
-    # 1) GET login page to get CSRF
     r1 = session.get("https://app.master.cnetfranchise.com/login", timeout=60)
     r1.raise_for_status()
 
@@ -51,7 +54,6 @@ def download_export_file() -> bytes:
         raise Exception("No pude encontrar _csrf_token en /login")
     csrf = token_el["value"]
 
-    # 2) POST login_check
     payload = {
         "_csrf_token": csrf,
         "_username": st.secrets["SYSTEM_USERNAME"],
@@ -68,35 +70,27 @@ def download_export_file() -> bytes:
     if "login" in r2.url.lower():
         raise Exception("Login falló. Revisa usuario/clave.")
 
-    # 3) GET export (your export returns CSV)
     export_url = st.secrets["EXPORT_EXCEL_URL"]
     r3 = session.get(export_url, timeout=60)
     r3.raise_for_status()
     return r3.content
 
 # =========================================================
-# Province inference (from tax columns like "QST QC")
-#   ✅ FIX: detecta taxes negativos con abs(...)
-#   ✅ Fallback: detecta por texto si no hay taxes
+# Province inference (tax cols + negative taxes + text fallback)
 # =========================================================
 def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-
-    # columnas que parezcan taxes
     tax_cols = [c for c in df.columns if any(k in c.upper() for k in ["GST", "HST", "QST", "PST", "RST", "TAX"])]
 
     def province_from_taxes(row):
         hits = []
         for c in tax_cols:
-            # ✅ detecta positivos y negativos
             if abs(safe_num(row.get(c, 0))) > 0:
                 hits.append(c.upper())
 
-        # ✅ fallback si no hay taxes (por texto)
         if not hits:
             txt = f"{row.get('Buyer Company Name','')} {row.get('Vendor Company Name','')} {row.get('Work Description','')}".upper()
 
-            # patrones comunes
             if "QUEBEC" in txt or " QC " in txt or txt.endswith(" QC"):
                 return "Quebec"
             if "ONTARIO" in txt or " ON " in txt or txt.endswith(" ON"):
@@ -117,10 +111,8 @@ def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
                 return "Saskatchewan"
             if "NEWFOUNDLAND" in txt or " NL " in txt or txt.endswith(" NL"):
                 return "Newfoundland and Labrador"
-
             return "Unknown"
 
-        # Specific rule: QST QC => Quebec
         for c in hits:
             if "QST" in c and "QC" in c:
                 return "Quebec"
@@ -137,7 +129,6 @@ def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
                 if re.search(rf"\b{code}\b", c):
                     return prov
 
-        # fallback final
         for c in hits:
             if "QST" in c:
                 return "Quebec"
@@ -168,54 +159,117 @@ def build_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     df[col_total] = df[col_total].apply(safe_num)
 
-    # Service
     df["Service"] = df[col_work].apply(lambda x: "Regular" if contains_ci(x, "janitorial") else "One Shot")
-
-    # Service and Name
     df["Service and Name"] = df["Service"].astype(str) + " " + df[col_buyer].astype(str)
-
-    # Brokerage
     df["Brokerage"] = df[col_buyer].apply(lambda x: "Brokerage5" if contains_ci(x, "5BF") else "Without Brokerage")
 
-    # 3% Royalty Fee Group & Master
     df["3% Royalty Fee Group"] = df.apply(
         lambda r: r[col_total] * 0.03 if contains_ci(r["Service and Name"], "BGIS SCS regular") else 0.0,
         axis=1
     )
     df["3% Royalty Fee Master"] = df["3% Royalty Fee Group"]
 
-    # 5% Royalty Fee Group & Master2
     df["5% Royalty Fee Group"] = df.apply(
         lambda r: 0.0 if contains_ci(r["Service and Name"], "BGIS SCS regular") else r[col_total] * 0.05,
         axis=1
     )
     df["5% Royalty Fee Master2"] = df["5% Royalty Fee Group"]
 
-    # 1% Marketing Fee
     df["1% Marketing Fee"] = df[col_total] * 0.01
 
-    # Brokerages (rate)
     df["Brokerages"] = df["Brokerage"].apply(lambda x: 0.05 if x == "Brokerage5" else 0.0)
-
-    # 5% Brokerage Fee
     df["5% Brokerage Fee"] = df.apply(
         lambda r: r[col_total] * r["Brokerages"] if r["Brokerages"] == 0.05 else 0.0,
         axis=1
     )
-
-    # 2.5% Brokerage Fee (placeholder)
     df["2.5% Brokerage Fee"] = 0.0
 
-    # Province
     df = add_province_from_taxes(df)
-
     return df
+
+# =========================================================
+# Totals helpers
+# =========================================================
+def add_grand_total_row(df: pd.DataFrame, label_cols: list[str], total_label: str = "Grand Total") -> pd.DataFrame:
+    df2 = df.copy()
+    num_cols = df2.select_dtypes(include="number").columns.tolist()
+
+    total_row = {c: "" for c in df2.columns}
+    for c in label_cols:
+        if c in df2.columns:
+            total_row[c] = total_label
+
+    for c in num_cols:
+        total_row[c] = float(df2[c].sum())
+
+    return pd.concat([df2, pd.DataFrame([total_row])], ignore_index=True)
+
+def show_kpis_from_df(df: pd.DataFrame, hide_marketing: bool = False):
+    total = float(df.get("Total Amount Without Taxes", pd.Series([0])).sum())
+    r3 = float(df.get("3% Royalty Fee Group", pd.Series([0])).sum())
+    r5 = float(df.get("5% Royalty Fee Group", pd.Series([0])).sum())
+    m1 = float(df.get("1% Marketing Fee", pd.Series([0])).sum()) if (not hide_marketing) else None
+    b5 = float(df.get("5% Brokerage Fee", pd.Series([0])).sum())
+    b25 = float(df.get("2.5% Brokerage Fee", pd.Series([0])).sum())
+
+    if hide_marketing:
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Total Amount (No Taxes)", fmt_money(total))
+        c2.metric("3% Royalty Fee", fmt_money(r3))
+        c3.metric("5% Royalty Fee", fmt_money(r5))
+        c4.metric("5% Brokerage Fee", fmt_money(b5))
+        c5.metric("2.5% Brokerage Fee", fmt_money(b25))
+    else:
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1.metric("Total Amount (No Taxes)", fmt_money(total))
+        c2.metric("3% Royalty Fee", fmt_money(r3))
+        c3.metric("5% Royalty Fee", fmt_money(r5))
+        c4.metric("1% Marketing Fee", fmt_money(m1 or 0.0))
+        c5.metric("5% Brokerage Fee", fmt_money(b5))
+        c6.metric("2.5% Brokerage Fee", fmt_money(b25))
+
+# =========================================================
+# Jeff exclusions by Buyer Company Name
+# =========================================================
+JEFF_EXCLUDE_BUYERS = [
+    "12433087 Canada Inc",
+    "12433087 Canada Inc - Master",
+    "Rojo construction Management Inc",
+    "Academie St Laurent Academy Inc",
+    "10342548 Canada Inc",
+    "Osgoode Properties Limited",
+    "2501308 Ontario Inc",
+    "Hallmark Housekeeping",
+    "Hotel plaza de la Chaudiere Inc",
+    "Allen Maintenance Ltd (do not use)",
+    "CCI Ottawa",
+    "13037622 Canada Inc",
+    "Aylmer Street Developments",
+    "Syndicat de Copropietaires Jardins Maisonneuve",
+    "Ladies Space",
+    "INDIGO PARK CANADA Inc",
+    "TAYANTI OTTAWA INC",
+    "TERLIN CONSTRUCTION LTD",
+    "ICS CLEAN INC",
+    "ALPINE BUILDING MAINTENANCE INC.",
+    "Stationnements Parkeo Inc",
+    "Allen Maintenance Ltd",
+    "Evripos",
+]
+
+def apply_jeff_exclusions(df: pd.DataFrame) -> pd.DataFrame:
+    if "Buyer Company Name" not in df.columns:
+        return df
+    s = df["Buyer Company Name"].astype(str).fillna("")
+    mask_exclude = False
+    for name in JEFF_EXCLUDE_BUYERS:
+        mask_exclude = mask_exclude | s.str.contains(re.escape(name), case=False, na=False)
+    return df[~mask_exclude].copy()
 
 # =========================================================
 # Reports
 # =========================================================
 def report_resume_without_fees(df: pd.DataFrame) -> pd.DataFrame:
-    # Pivot like Excel:
     pivot = pd.pivot_table(
         df,
         index=["Vendor Company Name", "Service", "Buyer Company Name"],
@@ -224,9 +278,14 @@ def report_resume_without_fees(df: pd.DataFrame) -> pd.DataFrame:
         aggfunc="sum",
         fill_value=0
     ).reset_index()
+
+    province_cols = [c for c in pivot.columns if c not in ["Vendor Company Name", "Service", "Buyer Company Name"]]
+    pivot["Row Total"] = pivot[province_cols].sum(axis=1) if province_cols else 0.0
+
+    pivot = add_grand_total_row(pivot, label_cols=["Vendor Company Name"], total_label="Grand Total")
     return pivot
 
-def report_validation(df: pd.DataFrame) -> pd.DataFrame:
+def report_validation(df: pd.DataFrame, hide_marketing: bool = False) -> pd.DataFrame:
     cols = [
         "Total Amount Without Taxes",
         "3% Royalty Fee Group",
@@ -235,6 +294,8 @@ def report_validation(df: pd.DataFrame) -> pd.DataFrame:
         "5% Brokerage Fee",
         "2.5% Brokerage Fee",
     ]
+    if hide_marketing:
+        cols = [c for c in cols if c != "1% Marketing Fee"]
     cols = [c for c in cols if c in df.columns]
 
     rep = (
@@ -242,6 +303,7 @@ def report_validation(df: pd.DataFrame) -> pd.DataFrame:
           .sum()
           .reset_index()
     )
+    rep = add_grand_total_row(rep, label_cols=["Province", "Vendor Company Name"], total_label="Grand Total")
     return rep
 
 def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
@@ -252,10 +314,8 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
 # =========================================================
 st.title("CNET - Invoice Reports")
 
-# ---- Sidebar (inputs always visible)
 with st.sidebar:
     st.subheader("Select report")
-
     report_choice = st.radio(
         "Report type",
         ["Resume Without Fees", "Validation", "Jeff-validation"],
@@ -297,12 +357,10 @@ if run:
 
     df_final = build_columns(df_month)
 
-    # ✅ Save to session_state so filters won't reset the app
     st.session_state["df_final"] = df_final
     st.session_state["loaded_month"] = month_name
     st.session_state["loaded_year"] = int(year)
 
-# ---- If no data loaded yet, show message and stop
 if "df_final" not in st.session_state:
     st.info("Selecciona Month/Year y presiona **Download + Process** para cargar la data.")
     st.stop()
@@ -314,7 +372,7 @@ loaded_year = st.session_state.get("loaded_year", int(year))
 st.success(f"Data cargada en memoria: {loaded_month} {loaded_year} | Rows: {len(df_final):,}")
 
 # =========================================================
-# Filters (left) - work on df_final in memory
+# Filters (left)
 # =========================================================
 company_col = "Company Name" if "Company Name" in df_final.columns else ("Company" if "Company" in df_final.columns else None)
 
@@ -343,7 +401,6 @@ with st.sidebar:
     vendors = sorted(df_final["Vendor Company Name"].dropna().astype(str).unique().tolist())
     sel_vendor = st.multiselect("Vendor Company Name", vendors, default=[])
 
-# Apply filters
 df_filtered = df_final.copy()
 
 if company_col and sel_company:
@@ -362,19 +419,31 @@ if sel_vendor:
 st.caption(f"Filtered rows: {len(df_filtered):,}")
 
 # =========================================================
-# Show selected report using filtered data
+# KPIs (Totals)
+# =========================================================
+hide_marketing = (report_choice == "Jeff-validation")
+
+# For Jeff: apply buyer exclusions BEFORE totals and report
+df_for_report = df_filtered
+if report_choice == "Jeff-validation":
+    df_for_report = apply_jeff_exclusions(df_filtered)
+
+show_kpis_from_df(df_for_report, hide_marketing=hide_marketing)
+
+# =========================================================
+# Selected report
 # =========================================================
 if report_choice == "Resume Without Fees":
-    st.subheader("Resume Without Fees")
-    rep = report_resume_without_fees(df_filtered)
+    st.subheader("Resume Without Fees (with totals)")
+    rep = report_resume_without_fees(df_for_report)
 
 elif report_choice == "Validation":
-    st.subheader("Validation")
-    rep = report_validation(df_filtered)
+    st.subheader("Validation (with totals)")
+    rep = report_validation(df_for_report, hide_marketing=False)
 
 else:
-    st.subheader("Jeff-validation")
-    rep = report_validation(df_filtered)
+    st.subheader("Jeff-validation (NO Marketing Fee) + Buyer exclusions + totals")
+    rep = report_validation(df_for_report, hide_marketing=True)
 
 st.dataframe(rep, use_container_width=True)
 
@@ -389,7 +458,7 @@ st.download_button(
 # Preview calculated columns
 # =========================================================
 st.divider()
-st.subheader("Preview - Calculated Columns (incluye Province)")
+st.subheader("Preview - Calculated Columns (include Province)")
 
 cols_show = [
     "Creation Date",
@@ -413,5 +482,5 @@ cols_show = [
 if company_col:
     cols_show.insert(0, company_col)
 
-cols_show = [c for c in cols_show if c in df_filtered.columns]
-st.dataframe(df_filtered[cols_show].head(200), use_container_width=True)
+cols_show = [c for c in cols_show if c in df_for_report.columns]
+st.dataframe(df_for_report[cols_show].head(200), use_container_width=True)
