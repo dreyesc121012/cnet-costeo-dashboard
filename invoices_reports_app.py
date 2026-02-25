@@ -76,8 +76,7 @@ def download_export_file() -> bytes:
 # =========================================================
 def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-
-    tax_cols = [c for c in df.columns if any(k in c.upper() for k in ["GST","HST","QST","PST","RST","TAX"])]
+    tax_cols = [c for c in df.columns if any(k in c.upper() for k in ["GST", "HST", "QST", "PST", "RST", "TAX"])]
 
     def province_from_taxes(row):
         hits = []
@@ -99,7 +98,6 @@ def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
             "NL": "Newfoundland and Labrador", "PE": "Prince Edward Island",
             "NT": "Northwest Territories", "NU": "Nunavut", "YT": "Yukon"
         }
-
         for code, prov in mapping.items():
             for c in hits:
                 if re.search(rf"\b{code}\b", c):
@@ -113,7 +111,6 @@ def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
                 return "HST Province (Unknown)"
             if "GST" in c:
                 return "GST Only (Unknown)"
-
         return "Unknown"
 
     df["Province"] = df.apply(province_from_taxes, axis=1)
@@ -125,7 +122,6 @@ def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
 def build_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # Required columns (adjust if your export uses different names)
     col_work = "Work Description"
     col_vendor = "Vendor Company Name"
     col_buyer = "Buyer Company Name"
@@ -146,34 +142,24 @@ def build_columns(df: pd.DataFrame) -> pd.DataFrame:
     # Brokerage
     df["Brokerage"] = df[col_buyer].apply(lambda x: "Brokerage5" if contains_ci(x, "5BF") else "Without Brokerage")
 
-    # 3% Royalty Fee Group
+    # 3% Royalty Fee Group & Master
     df["3% Royalty Fee Group"] = df.apply(
         lambda r: r[col_total] * 0.03 if contains_ci(r["Service and Name"], "BGIS SCS regular") else 0.0,
         axis=1
     )
+    df["3% Royalty Fee Master"] = df["3% Royalty Fee Group"]
 
-    # 3% Royalty Fee Master
-    df["3% Royalty Fee Master"] = df.apply(
-        lambda r: r[col_total] * 0.03 if contains_ci(r["Service and Name"], "BGIS SCS regular") else 0.0,
-        axis=1
-    )
-
-    # 5% Royalty Fee Group
+    # 5% Royalty Fee Group & Master2
     df["5% Royalty Fee Group"] = df.apply(
         lambda r: 0.0 if contains_ci(r["Service and Name"], "BGIS SCS regular") else r[col_total] * 0.05,
         axis=1
     )
-
-    # 5% Royalty Fee Master2
-    df["5% Royalty Fee Master2"] = df.apply(
-        lambda r: 0.0 if contains_ci(r["Service and Name"], "BGIS SCS regular") else r[col_total] * 0.05,
-        axis=1
-    )
+    df["5% Royalty Fee Master2"] = df["5% Royalty Fee Group"]
 
     # 1% Marketing Fee
     df["1% Marketing Fee"] = df[col_total] * 0.01
 
-    # Brokerages rate (numeric)
+    # Brokerages (rate)
     df["Brokerages"] = df["Brokerage"].apply(lambda x: 0.05 if x == "Brokerage5" else 0.0)
 
     # 5% Brokerage Fee
@@ -182,7 +168,7 @@ def build_columns(df: pd.DataFrame) -> pd.DataFrame:
         axis=1
     )
 
-    # 2.5% Brokerage Fee (placeholder)
+    # 2.5% Brokerage Fee (placeholder -> 0)
     df["2.5% Brokerage Fee"] = 0.0
 
     # Province
@@ -194,10 +180,7 @@ def build_columns(df: pd.DataFrame) -> pd.DataFrame:
 # Reports
 # =========================================================
 def report_resume_without_fees(df: pd.DataFrame) -> pd.DataFrame:
-    # Pivot like your Excel:
-    # Rows: Vendor -> Service -> Buyer
-    # Columns: Province
-    # Values: Sum Total Amount Without Taxes
+    # Pivot like Excel:
     pivot = pd.pivot_table(
         df,
         index=["Vendor Company Name", "Service", "Buyer Company Name"],
@@ -226,40 +209,6 @@ def report_validation(df: pd.DataFrame) -> pd.DataFrame:
     )
     return rep
 
-def report_breakdown(df: pd.DataFrame) -> pd.DataFrame:
-    # "Company" column: use Company Name if exists, else fallback
-    company_col = "Company Name" if "Company Name" in df.columns else ("Company" if "Company" in df.columns else "Vendor Company Name")
-
-    group_cols = [
-        company_col,
-        "Service",
-        "Province",
-        "Buyer Company Name",
-        "Brokerage",
-        "Vendor Company Name",
-    ]
-
-    value_cols = [
-        "Total Amount Without Taxes",
-        "3% Royalty Fee Group",
-        "5% Royalty Fee Group",
-        "1% Marketing Fee",
-        "5% Brokerage Fee",
-        "2.5% Brokerage Fee",
-    ]
-    value_cols = [c for c in value_cols if c in df.columns]
-
-    rep = (
-        df.groupby(group_cols, dropna=False)[value_cols]
-          .sum()
-          .reset_index()
-    ).rename(columns={company_col: "Company"})
-
-    if "Total Amount Without Taxes" in rep.columns:
-        rep = rep.sort_values("Total Amount Without Taxes", ascending=False)
-
-    return rep
-
 def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
 
@@ -268,17 +217,13 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
 # =========================================================
 st.title("CNET - Invoice Reports")
 
+# Sidebar: report + month filter (inputs visibles desde el inicio)
 with st.sidebar:
     st.subheader("Select report")
 
     report_choice = st.radio(
         "Report type",
-        [
-            "Resume Without Fees",
-            "Validation",
-            "Jeff-validation",
-            "Breakdown"
-        ],
+        ["Resume Without Fees", "Validation", "Jeff-validation"],
         index=0
     )
 
@@ -294,17 +239,19 @@ with st.sidebar:
     month_num = dict(months)[month_name]
     year = st.number_input("Year", min_value=2020, max_value=2035, value=2026, step=1)
 
+    st.divider()
     run = st.button("Download + Process")
 
 if not run:
+    st.info("Selecciona mes/año y presiona **Download + Process**.")
     st.stop()
 
+# Download + read + month filter
 with st.spinner("Downloading export from CNET..."):
     content = download_export_file()
 
 df_raw = read_any_table(content)
 
-# Parse date and filter by month/year
 if "Creation Date" not in df_raw.columns:
     st.error("No encuentro la columna 'Creation Date' para filtrar por mes.")
     st.stop()
@@ -317,27 +264,79 @@ st.success(f"Archivo descargado. Filas totales: {len(df_raw):,} | Filas del mes:
 # Apply business rules
 df_final = build_columns(df_month)
 
-# Report output
+# =========================================================
+# Sidebar filters (DESPUÉS de procesar, para filtrar reportes)
+# =========================================================
+# Company column: use Company Name if exists, else fallback
+company_col = "Company Name" if "Company Name" in df_final.columns else ("Company" if "Company" in df_final.columns else None)
+
+with st.sidebar:
+    st.divider()
+    st.subheader("Filters")
+
+    # Company filter
+    if company_col:
+        companies = sorted(df_final[company_col].dropna().astype(str).unique().tolist())
+        sel_company = st.multiselect("Company", companies, default=[])
+    else:
+        sel_company = []
+
+    services = sorted(df_final["Service"].dropna().astype(str).unique().tolist())
+    sel_service = st.multiselect("Service", services, default=[])
+
+    provinces = sorted(df_final["Province"].dropna().astype(str).unique().tolist())
+    sel_province = st.multiselect("Province", provinces, default=[])
+
+    buyers = sorted(df_final["Buyer Company Name"].dropna().astype(str).unique().tolist())
+    sel_buyer = st.multiselect("Buyer Company Name", buyers, default=[])
+
+    brokerages = sorted(df_final["Brokerage"].dropna().astype(str).unique().tolist())
+    sel_brokerage = st.multiselect("Brokerage", brokerages, default=[])
+
+    vendors = sorted(df_final["Vendor Company Name"].dropna().astype(str).unique().tolist())
+    sel_vendor = st.multiselect("Vendor Company Name", vendors, default=[])
+
+# Apply filters to df_final
+df_filtered = df_final.copy()
+
+if company_col and sel_company:
+    df_filtered = df_filtered[df_filtered[company_col].astype(str).isin(sel_company)]
+
+if sel_service:
+    df_filtered = df_filtered[df_filtered["Service"].astype(str).isin(sel_service)]
+
+if sel_province:
+    df_filtered = df_filtered[df_filtered["Province"].astype(str).isin(sel_province)]
+
+if sel_buyer:
+    df_filtered = df_filtered[df_filtered["Buyer Company Name"].astype(str).isin(sel_buyer)]
+
+if sel_brokerage:
+    df_filtered = df_filtered[df_filtered["Brokerage"].astype(str).isin(sel_brokerage)]
+
+if sel_vendor:
+    df_filtered = df_filtered[df_filtered["Vendor Company Name"].astype(str).isin(sel_vendor)]
+
+st.caption(f"Filtered rows: {len(df_filtered):,}")
+
+# =========================================================
+# Build selected report (using FILTERED data)
+# =========================================================
 if report_choice == "Resume Without Fees":
     st.subheader("Resume Without Fees")
-    rep = report_resume_without_fees(df_final)
+    rep = report_resume_without_fees(df_filtered)
 
 elif report_choice == "Validation":
     st.subheader("Validation")
-    rep = report_validation(df_final)
-
-elif report_choice == "Jeff-validation":
-    st.subheader("Jeff-validation")
-    # Same structure as Validation (if Jeff has special rule, we add it)
-    rep = report_validation(df_final)
+    rep = report_validation(df_filtered)
 
 else:
-    st.subheader("Breakdown (Company / Service / Province / Buyer / Brokerage / Vendor)")
-    rep = report_breakdown(df_final)
+    st.subheader("Jeff-validation")
+    # Igual que Validation por ahora (si Jeff tiene regla específica, la agregamos)
+    rep = report_validation(df_filtered)
 
 st.dataframe(rep, use_container_width=True)
 
-# Download button for selected report
 st.download_button(
     label="Download selected report (CSV)",
     data=df_to_csv_bytes(rep),
@@ -345,7 +344,7 @@ st.download_button(
     mime="text/csv"
 )
 
-# Preview calculated columns so you can verify Province + rules
+# Preview calculated columns (for verification)
 st.divider()
 st.subheader("Preview - Calculated Columns (incluye Province)")
 
@@ -368,5 +367,8 @@ cols_show = [
     "5% Brokerage Fee",
     "2.5% Brokerage Fee",
 ]
-cols_show = [c for c in cols_show if c in df_final.columns]
-st.dataframe(df_final[cols_show].head(200), use_container_width=True)
+if company_col:
+    cols_show.insert(0, company_col)
+
+cols_show = [c for c in cols_show if c in df_filtered.columns]
+st.dataframe(df_filtered[cols_show].head(200), use_container_width=True)
