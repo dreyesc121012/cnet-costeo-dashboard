@@ -366,7 +366,7 @@ def report_validation(df: pd.DataFrame, hide_marketing: bool = False) -> pd.Data
 # Sales Summary (UPDATED: Month labels + Multi-year)
 # =========================================================
 def sales_summary(df: pd.DataFrame):
-    st.subheader("Monthly Sales")
+    st.subheader("Sales Summary")
 
     if df.empty:
         st.info("No data for Monthly Sales with the selected filters.")
