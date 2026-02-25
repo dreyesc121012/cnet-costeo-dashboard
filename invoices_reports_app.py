@@ -64,7 +64,12 @@ if not run:
     st.stop()
 
 file = download_excel()
-df = pd.read_excel(io.BytesIO(file))
+# Intentar leer como Excel; si no, leer como CSV
+try:
+    df = pd.read_excel(io.BytesIO(file))
+except Exception:
+    # CSV
+    df = pd.read_csv(io.BytesIO(file), encoding="utf-8", engine="python")
 
 st.success("Excel downloaded successfully")
 
