@@ -363,47 +363,45 @@ def report_validation(df: pd.DataFrame, hide_marketing: bool = False) -> pd.Data
     return rep
 
 # =========================================================
-# Executive Summary (UPDATED: Monthly accumulated totals)
+# Sales Summary (UPDATED: Month labels + Multi-year)
 # =========================================================
-def executive_summary(df: pd.DataFrame):
-    st.subheader("Executive Summary")
+def sales_summary(df: pd.DataFrame):
+    st.subheader("Monthly Sales")
 
     if df.empty:
-        st.info("No data for Executive Summary with the selected filters.")
+        st.info("No data for Monthly Sales with the selected filters.")
         return
 
     df = df.copy()
-    df["Month"] = pd.to_datetime(df["Creation Date"], errors="coerce").dt.to_period("M").astype(str)
+    df["Creation Date"] = pd.to_datetime(df["Creation Date"], errors="coerce")
+    df = df.dropna(subset=["Creation Date"])
     df["Province"] = df["Province"].fillna("Unknown")
 
-    # ✅ Monthly accumulated totals (overall)
-    st.markdown("### Total Amount Without Taxes - Monthly Accumulated (Selected Months)")
+    df["MonthStart"] = df["Creation Date"].dt.to_period("M").dt.to_timestamp()
+    df["MonthLabel"] = df["MonthStart"].dt.strftime("%B %Y")
+
+    st.markdown("### Monthly Sales (Total Amount Without Taxes)")
 
     month_totals = (
-        df.groupby("Month", dropna=False)["Total Amount Without Taxes"]
+        df.groupby(["MonthStart", "MonthLabel"], dropna=False)["Total Amount Without Taxes"]
         .sum()
         .reset_index()
+        .sort_values("MonthStart")
     )
-
-    # Sort months chronologically
-    try:
-        month_totals["_m"] = pd.to_datetime(month_totals["Month"] + "-01", errors="coerce")
-        month_totals = month_totals.sort_values("_m").drop(columns=["_m"])
-    except Exception:
-        pass
 
     fig_month = go.Figure()
     fig_month.add_trace(
         go.Bar(
-            x=month_totals["Month"],
+            x=month_totals["MonthLabel"],
             y=month_totals["Total Amount Without Taxes"],
-            name="Total Amount Without Taxes"
+            name="Monthly Sales"
         )
     )
     fig_month.update_layout(
-        title="Monthly Total Amount Without Taxes (Accumulated)",
+        title="Monthly Sales (No Taxes)",
         xaxis_title="Month",
         yaxis_title="Total Amount Without Taxes ($)",
+        xaxis=dict(type="category"),
         hovermode="x unified"
     )
 
@@ -411,25 +409,26 @@ def executive_summary(df: pd.DataFrame):
     with c1:
         st.plotly_chart(fig_month, use_container_width=True)
     with c2:
-        st.dataframe(format_report_for_display(month_totals), use_container_width=True)
+        st.dataframe(
+            format_report_for_display(
+                month_totals[["MonthLabel", "Total Amount Without Taxes"]].rename(columns={"MonthLabel": "Month"})
+            ),
+            use_container_width=True
+        )
 
-    # Optional: monthly by province (pivot)
     st.markdown("### Monthly by Province (Total Amount Without Taxes)")
     pivot = pd.pivot_table(
         df,
-        index="Month",
+        index="MonthLabel",
         columns="Province",
         values="Total Amount Without Taxes",
         aggfunc="sum",
         fill_value=0.0
     ).reset_index()
 
-    # Sort pivot months too
-    try:
-        pivot["_m"] = pd.to_datetime(pivot["Month"] + "-01", errors="coerce")
-        pivot = pivot.sort_values("_m").drop(columns=["_m"])
-    except Exception:
-        pass
+    order = month_totals["MonthLabel"].tolist()
+    pivot["__order"] = pivot["MonthLabel"].apply(lambda x: order.index(x) if x in order else 999999)
+    pivot = pivot.sort_values("__order").drop(columns="__order")
 
     st.dataframe(format_report_for_display(pivot), use_container_width=True)
 
@@ -461,10 +460,11 @@ with st.sidebar:
     year = st.number_input("Year", min_value=2020, max_value=2035, value=2026, step=1, key="main_year")
 
     st.divider()
-    st.subheader("Executive Summary by Province (Multi-month)")
-    exec_year = st.number_input("Executive Year", min_value=2020, max_value=2035, value=int(year), step=1, key="exec_year")
+    st.subheader("Sales Summary")
+
+    # We will populate years list from df_raw after download; for now set a default range
     exec_months = st.multiselect(
-        "Executive Months",
+        "Months",
         month_labels,
         default=[month_name],
         key="exec_months"
@@ -506,6 +506,18 @@ st.success(f"Data cargada en memoria: {month_name} {y} | Rows: {len(df_main):,}"
 company_col = get_company_col(df_main)
 
 with st.sidebar:
+    # Multi-year selector (after df_raw is loaded)
+    available_years = sorted(df_raw["Creation Date"].dropna().dt.year.unique().tolist())
+    if not available_years:
+        available_years = list(range(2020, 2036))
+
+    sel_years = st.multiselect(
+        "Years",
+        options=available_years,
+        default=[y],
+        key="sel_years"
+    )
+
     st.divider()
     st.subheader("Filters")
 
@@ -549,26 +561,24 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
 df_filtered = apply_filters(df_main)
 st.caption(f"Filtered rows: {len(df_filtered):,}")
 
-# Jeff rules apply only to Jeff-validation
 hide_marketing = (report_choice == "Jeff-validation")
 
 df_for_report = df_filtered
 if report_choice == "Jeff-validation":
     df_for_report = apply_jeff_exclusions_only_buyer_exact(df_filtered)
 
-# KPIs
 show_kpis_from_df(df_for_report, hide_marketing=hide_marketing)
 
 # =========================================================
-# Executive Summary (multi-month selection; monthly accumulated totals)
+# Sales Summary (multi-month + multi-year + service filter applied)
 # =========================================================
 st.divider()
 
 exec_month_nums = [month_name_to_num(mn) for mn in (exec_months or [month_name])]
-ey = int(exec_year)
+years_for_summary = sel_years or [y]
 
 df_exec_raw = df_raw[
-    (df_raw["Creation Date"].dt.year == ey) &
+    (df_raw["Creation Date"].dt.year.isin(years_for_summary)) &
     (df_raw["Creation Date"].dt.month.isin(exec_month_nums))
 ].copy()
 
@@ -578,7 +588,7 @@ df_exec = apply_filters(df_exec)
 if report_choice == "Jeff-validation":
     df_exec = apply_jeff_exclusions_only_buyer_exact(df_exec)
 
-executive_summary(df_exec)
+sales_summary(df_exec)
 
 # =========================================================
 # Build selected report
