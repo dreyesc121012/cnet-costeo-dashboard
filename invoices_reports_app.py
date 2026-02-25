@@ -321,11 +321,6 @@ def show_kpis_from_df(df: pd.DataFrame, hide_marketing: bool = False):
         c5.metric("5% Brokerage Fee", fmt_money(vals["b5"]))
         c6.metric("2.5% Brokerage Fee", fmt_money(vals["b25"]))
 
-def delta_pct(curr: float, prev: float) -> float:
-    if prev == 0:
-        return 0.0
-    return (curr - prev) / prev * 100.0
-
 # =========================================================
 # Reports
 # =========================================================
@@ -368,7 +363,7 @@ def report_validation(df: pd.DataFrame, hide_marketing: bool = False) -> pd.Data
     return rep
 
 # =========================================================
-# Executive Summary (UPDATED: multi-month by Province trend)
+# Executive Summary (UPDATED: Monthly accumulated totals)
 # =========================================================
 def executive_summary(df: pd.DataFrame):
     st.subheader("Executive Summary")
@@ -377,154 +372,66 @@ def executive_summary(df: pd.DataFrame):
         st.info("No data for Executive Summary with the selected filters.")
         return
 
-    # Ensure Month key exists for trend
-    if "Creation Date" in df.columns:
-        df = df.copy()
-        df["Month"] = pd.to_datetime(df["Creation Date"], errors="coerce").dt.to_period("M").astype(str)
-    else:
-        df = df.copy()
-        df["Month"] = "Unknown"
+    df = df.copy()
+    df["Month"] = pd.to_datetime(df["Creation Date"], errors="coerce").dt.to_period("M").astype(str)
+    df["Province"] = df["Province"].fillna("Unknown")
 
-    st.markdown("### By Province (Total Amount Without Taxes) - Multi-Month Trend")
+    # ✅ Monthly accumulated totals (overall)
+    st.markdown("### Total Amount Without Taxes - Monthly Accumulated (Selected Months)")
 
-    trend = (
-        df.groupby(["Month", "Province"], dropna=False)["Total Amount Without Taxes"]
+    month_totals = (
+        df.groupby("Month", dropna=False)["Total Amount Without Taxes"]
         .sum()
         .reset_index()
     )
-    trend["Province"] = trend["Province"].fillna("Unknown")
 
-    # Sort months chronologically (best effort)
+    # Sort months chronologically
     try:
-        trend["_m"] = pd.to_datetime(trend["Month"] + "-01", errors="coerce")
-        trend = trend.sort_values("_m").drop(columns=["_m"])
+        month_totals["_m"] = pd.to_datetime(month_totals["Month"] + "-01", errors="coerce")
+        month_totals = month_totals.sort_values("_m").drop(columns=["_m"])
     except Exception:
         pass
 
-    fig = go.Figure()
-    for prov in sorted(trend["Province"].astype(str).unique().tolist()):
-        d = trend[trend["Province"].astype(str) == prov]
-        fig.add_trace(go.Scatter(
-            x=d["Month"],
-            y=d["Total Amount Without Taxes"],
-            mode="lines+markers",
-            name=str(prov)
-        ))
-
-    fig.update_layout(
-        title="Total Amount Without Taxes by Province",
+    fig_month = go.Figure()
+    fig_month.add_trace(
+        go.Bar(
+            x=month_totals["Month"],
+            y=month_totals["Total Amount Without Taxes"],
+            name="Total Amount Without Taxes"
+        )
+    )
+    fig_month.update_layout(
+        title="Monthly Total Amount Without Taxes (Accumulated)",
         xaxis_title="Month",
         yaxis_title="Total Amount Without Taxes ($)",
-        hovermode="x unified",
-        legend_title="Province"
+        hovermode="x unified"
     )
 
     c1, c2 = st.columns([2, 1])
     with c1:
-        st.plotly_chart(fig, use_container_width=True)
-
-    prov_sum = (
-        df.groupby("Province", dropna=False)[
-            ["Total Amount Without Taxes", "3% Royalty Fee Group", "5% Royalty Fee Group", "5% Brokerage Fee", "2.5% Brokerage Fee"]
-        ]
-        .sum()
-        .reset_index()
-    )
-    prov_sum["Province"] = prov_sum["Province"].fillna("Unknown")
-
+        st.plotly_chart(fig_month, use_container_width=True)
     with c2:
-        st.dataframe(
-            format_report_for_display(prov_sum.sort_values("Total Amount Without Taxes", ascending=False)),
-            use_container_width=True
-        )
+        st.dataframe(format_report_for_display(month_totals), use_container_width=True)
 
-    st.markdown("### Service Mix (Regular vs One Shot)")
-    mix = (
-        df.groupby("Service")["Total Amount Without Taxes"]
-        .sum()
-        .reset_index()
-        .sort_values("Total Amount Without Taxes", ascending=False)
-    )
-    m1, m2 = st.columns([1, 2])
-    with m1:
-        st.dataframe(format_report_for_display(mix), use_container_width=True)
-    with m2:
-        st.bar_chart(mix.set_index("Service")["Total Amount Without Taxes"])
+    # Optional: monthly by province (pivot)
+    st.markdown("### Monthly by Province (Total Amount Without Taxes)")
+    pivot = pd.pivot_table(
+        df,
+        index="Month",
+        columns="Province",
+        values="Total Amount Without Taxes",
+        aggfunc="sum",
+        fill_value=0.0
+    ).reset_index()
 
-    st.markdown("### Concentration (Top 10)")
-    t1, t2 = st.columns(2)
+    # Sort pivot months too
+    try:
+        pivot["_m"] = pd.to_datetime(pivot["Month"] + "-01", errors="coerce")
+        pivot = pivot.sort_values("_m").drop(columns=["_m"])
+    except Exception:
+        pass
 
-    top_buyers = (
-        df.groupby("Buyer Company Name")["Total Amount Without Taxes"]
-        .sum()
-        .reset_index()
-        .sort_values("Total Amount Without Taxes", ascending=False)
-        .head(10)
-    )
-    top_vendors = (
-        df.groupby("Vendor Company Name")["Total Amount Without Taxes"]
-        .sum()
-        .reset_index()
-        .sort_values("Total Amount Without Taxes", ascending=False)
-        .head(10)
-    )
-
-    with t1:
-        st.markdown("**Top 10 Buyers**")
-        st.bar_chart(top_buyers.set_index("Buyer Company Name")["Total Amount Without Taxes"])
-        st.dataframe(format_report_for_display(top_buyers), use_container_width=True)
-
-    with t2:
-        st.markdown("**Top 10 Vendors**")
-        st.bar_chart(top_vendors.set_index("Vendor Company Name")["Total Amount Without Taxes"])
-        st.dataframe(format_report_for_display(top_vendors), use_container_width=True)
-
-def comparison_section(df_curr: pd.DataFrame, df_prev: pd.DataFrame, hide_marketing: bool, label_curr: str, label_prev: str):
-    st.subheader(f"Comparison: {label_curr} vs {label_prev}")
-
-    curr = kpi_values(df_curr, hide_marketing)
-    prev = kpi_values(df_prev, hide_marketing)
-
-    if hide_marketing:
-        cols = st.columns(5)
-        items = [
-            ("Total (No Taxes)", "total"),
-            ("3% Royalty", "r3"),
-            ("5% Royalty", "r5"),
-            ("5% Brokerage", "b5"),
-            ("2.5% Brokerage", "b25"),
-        ]
-    else:
-        cols = st.columns(6)
-        items = [
-            ("Total (No Taxes)", "total"),
-            ("3% Royalty", "r3"),
-            ("5% Royalty", "r5"),
-            ("1% Marketing", "m1"),
-            ("5% Brokerage", "b5"),
-            ("2.5% Brokerage", "b25"),
-        ]
-
-    for i, (title, key) in enumerate(items):
-        c = cols[i]
-        curr_val = curr[key] if curr[key] is not None else 0.0
-        prev_val = prev[key] if prev[key] is not None else 0.0
-        delta_val = curr_val - prev_val
-        delta_str = f"{fmt_money(delta_val)} ({delta_pct(curr_val, prev_val):.1f}%)" if prev_val != 0 else fmt_money(delta_val)
-        c.metric(title, fmt_money(curr_val), delta_str)
-
-    st.markdown("### By Province (Total Amount Without Taxes) - Comparison")
-
-    curr_prov = df_curr.groupby("Province")["Total Amount Without Taxes"].sum().rename("Current")
-    prev_prov = df_prev.groupby("Province")["Total Amount Without Taxes"].sum().rename("Compare")
-
-    prov_compare = pd.concat([curr_prov, prev_prov], axis=1).fillna(0.0).reset_index().rename(columns={"index": "Province"})
-    prov_compare["Delta"] = prov_compare["Current"] - prov_compare["Compare"]
-
-    st.dataframe(format_report_for_display(prov_compare.sort_values("Current", ascending=False)), use_container_width=True)
-
-    chart_df = prov_compare.set_index("Province")[["Current", "Compare"]].sort_values("Current", ascending=False)
-    st.bar_chart(chart_df)
+    st.dataframe(format_report_for_display(pivot), use_container_width=True)
 
 # =========================================================
 # HEADER (Logo + Title)
@@ -536,6 +443,9 @@ with h1:
 with h2:
     st.title(APP_TITLE)
 
+# =========================================================
+# UI (NO COMPARISON ANYMORE)
+# =========================================================
 month_labels = [
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December"
@@ -559,12 +469,6 @@ with st.sidebar:
         default=[month_name],
         key="exec_months"
     )
-
-    st.divider()
-    st.subheader("Comparison")
-    enable_compare = st.checkbox("Enable comparison", value=True)
-    compare_month = st.selectbox("Compare month", month_labels, index=1, key="cmp_month")
-    compare_year = st.number_input("Compare year", min_value=2020, max_value=2035, value=2026, step=1, key="cmp_year")
 
     st.divider()
     run = st.button("Download + Process", type="primary")
@@ -598,17 +502,7 @@ df_main = build_columns(df_month)
 
 st.success(f"Data cargada en memoria: {month_name} {y} | Rows: {len(df_main):,}")
 
-# Compare df
-df_cmp = None
-label_main = f"{month_name} {y}"
-label_cmp = f"{compare_month} {int(compare_year)}"
-if enable_compare:
-    cm = month_name_to_num(compare_month)
-    cy = int(compare_year)
-    df_month_cmp = df_raw[(df_raw["Creation Date"].dt.month == cm) & (df_raw["Creation Date"].dt.year == cy)].copy()
-    df_cmp = build_columns(df_month_cmp)
-
-# ============== Sidebar Filters (filters only) ==============
+# ============== Sidebar Filters (ONLY THESE — NO COMPARISON FILTERS) ==============
 company_col = get_company_col(df_main)
 
 with st.sidebar:
@@ -655,16 +549,18 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
 df_filtered = apply_filters(df_main)
 st.caption(f"Filtered rows: {len(df_filtered):,}")
 
+# Jeff rules apply only to Jeff-validation
 hide_marketing = (report_choice == "Jeff-validation")
 
 df_for_report = df_filtered
 if report_choice == "Jeff-validation":
     df_for_report = apply_jeff_exclusions_only_buyer_exact(df_filtered)
 
+# KPIs
 show_kpis_from_df(df_for_report, hide_marketing=hide_marketing)
 
 # =========================================================
-# Executive Summary (multi-month filter just for Executive Summary)
+# Executive Summary (multi-month selection; monthly accumulated totals)
 # =========================================================
 st.divider()
 
@@ -685,24 +581,6 @@ if report_choice == "Jeff-validation":
 executive_summary(df_exec)
 
 # =========================================================
-# Comparison (main month vs compare month)
-# =========================================================
-if enable_compare and df_cmp is not None:
-    df_cmp_filtered = apply_filters(df_cmp)
-
-    if report_choice == "Jeff-validation":
-        df_cmp_filtered = apply_jeff_exclusions_only_buyer_exact(df_cmp_filtered)
-
-    st.divider()
-    comparison_section(
-        df_curr=df_for_report,
-        df_prev=df_cmp_filtered,
-        hide_marketing=hide_marketing,
-        label_curr=label_main,
-        label_prev=label_cmp
-    )
-
-# =========================================================
 # Build selected report
 # =========================================================
 st.divider()
@@ -716,7 +594,6 @@ elif report_choice == "Validation":
     rep = report_validation(df_for_report, hide_marketing=False)
 
 else:
-    # ✅ show only JEFF-VALIDATION
     st.subheader("JEFF-VALIDATION")
     rep = report_validation(df_for_report, hide_marketing=True)
 
