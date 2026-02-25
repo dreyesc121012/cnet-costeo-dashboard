@@ -1,5 +1,7 @@
 import io
 import re
+from pathlib import Path
+
 import pandas as pd
 import requests
 import streamlit as st
@@ -9,8 +11,10 @@ import plotly.graph_objects as go
 # =========================================================
 # CONFIG
 # =========================================================
-st.set_page_config(page_title="CNET - Invoice Reports", layout="wide")
-TITLE = "CNET - Invoice Reports"
+APP_TITLE = "CNET - Sales Reports"
+LOGO_PATH = Path(__file__).parent / "cnet_logo.png"
+
+st.set_page_config(page_title=APP_TITLE, layout="wide")
 
 # Jeff exclusions (Buyer ONLY, exact match)
 JEFF_EXCLUDE_BUYERS = [
@@ -231,7 +235,6 @@ def build_columns(df: pd.DataFrame) -> pd.DataFrame:
     )
     df["3% Royalty Fee Master"] = df["3% Royalty Fee Group"]
 
-    # ✅ FIX: 5% royalty = 0 if BGIS SCS + Regular (any order), else Total*0.05
     df["5% Royalty Fee Group"] = df.apply(
         lambda r: 0.0 if is_bgis_scs_regular(r["Service and Name"]) else r[col_total] * 0.05,
         axis=1
@@ -271,7 +274,7 @@ def apply_jeff_exclusions_only_buyer_exact(df: pd.DataFrame) -> pd.DataFrame:
     if "Buyer Company Name" not in df.columns:
         return df.copy()
     buyer_norm = df["Buyer Company Name"].astype(str).map(norm_name)
-    mask_exclude = buyer_norm.isin(EXCLUDE_SET_NORM)  # exact match only
+    mask_exclude = buyer_norm.isin(EXCLUDE_SET_NORM)
     return df[~mask_exclude].copy()
 
 # =========================================================
@@ -382,7 +385,6 @@ def executive_summary(df: pd.DataFrame):
         df = df.copy()
         df["Month"] = "Unknown"
 
-    # --------- UPDATED SECTION (Trend by Province + Multi-month behavior) ----------
     st.markdown("### By Province (Total Amount Without Taxes) - Multi-Month Trend")
 
     trend = (
@@ -399,7 +401,6 @@ def executive_summary(df: pd.DataFrame):
     except Exception:
         pass
 
-    # Plotly line chart
     fig = go.Figure()
     for prov in sorted(trend["Province"].astype(str).unique().tolist()):
         d = trend[trend["Province"].astype(str) == prov]
@@ -422,7 +423,6 @@ def executive_summary(df: pd.DataFrame):
     with c1:
         st.plotly_chart(fig, use_container_width=True)
 
-    # Summary table (Province totals for selected months)
     prov_sum = (
         df.groupby("Province", dropna=False)[
             ["Total Amount Without Taxes", "3% Royalty Fee Group", "5% Royalty Fee Group", "5% Brokerage Fee", "2.5% Brokerage Fee"]
@@ -438,7 +438,6 @@ def executive_summary(df: pd.DataFrame):
             use_container_width=True
         )
 
-    # Service Mix
     st.markdown("### Service Mix (Regular vs One Shot)")
     mix = (
         df.groupby("Service")["Total Amount Without Taxes"]
@@ -452,7 +451,6 @@ def executive_summary(df: pd.DataFrame):
     with m2:
         st.bar_chart(mix.set_index("Service")["Total Amount Without Taxes"])
 
-    # Top 10 Buyers / Vendors
     st.markdown("### Concentration (Top 10)")
     t1, t2 = st.columns(2)
 
@@ -487,7 +485,6 @@ def comparison_section(df_curr: pd.DataFrame, df_prev: pd.DataFrame, hide_market
     curr = kpi_values(df_curr, hide_marketing)
     prev = kpi_values(df_prev, hide_marketing)
 
-    # KPI comparison cards
     if hide_marketing:
         cols = st.columns(5)
         items = [
@@ -530,9 +527,14 @@ def comparison_section(df_curr: pd.DataFrame, df_prev: pd.DataFrame, hide_market
     st.bar_chart(chart_df)
 
 # =========================================================
-# UI
+# HEADER (Logo + Title)
 # =========================================================
-st.title(TITLE)
+h1, h2 = st.columns([1, 3])
+with h1:
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), use_container_width=True)
+with h2:
+    st.title(APP_TITLE)
 
 month_labels = [
     "January", "February", "March", "April", "May", "June",
@@ -541,7 +543,6 @@ month_labels = [
 
 with st.sidebar:
     st.subheader("Select report")
-    # ✅ Keep internal logic but show clean label in report header later
     report_choice = st.radio("Report type", ["Resume Without Fees", "Validation", "Jeff-validation"], index=0)
 
     st.divider()
@@ -568,7 +569,7 @@ with st.sidebar:
     st.divider()
     run = st.button("Download + Process", type="primary")
 
-# Download/process on click (store raw data for flexible month filters)
+# Download/process on click
 if run:
     with st.spinner("Downloading export from CNET..."):
         content = download_export_file()
@@ -583,7 +584,6 @@ if run:
     st.session_state["df_raw"] = df_raw
     st.session_state["last_download_ok"] = True
 
-# Need raw data first
 if "df_raw" not in st.session_state:
     st.info("Selecciona Month/Year y presiona **Download + Process** para cargar la data.")
     st.stop()
@@ -598,11 +598,10 @@ df_main = build_columns(df_month)
 
 st.success(f"Data cargada en memoria: {month_name} {y} | Rows: {len(df_main):,}")
 
-# Build compare df if enabled
+# Compare df
 df_cmp = None
 label_main = f"{month_name} {y}"
 label_cmp = f"{compare_month} {int(compare_year)}"
-
 if enable_compare:
     cm = month_name_to_num(compare_month)
     cy = int(compare_year)
@@ -656,26 +655,27 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
 df_filtered = apply_filters(df_main)
 st.caption(f"Filtered rows: {len(df_filtered):,}")
 
-# Jeff rules apply only to Jeff-validation
 hide_marketing = (report_choice == "Jeff-validation")
 
 df_for_report = df_filtered
 if report_choice == "Jeff-validation":
     df_for_report = apply_jeff_exclusions_only_buyer_exact(df_filtered)
 
-# KPIs
 show_kpis_from_df(df_for_report, hide_marketing=hide_marketing)
 
 # =========================================================
-# Executive Summary (UPDATED: multi-month filter just for Executive Summary)
+# Executive Summary (multi-month filter just for Executive Summary)
 # =========================================================
 st.divider()
 
-# Build Executive Summary dataset from multi-month selection (same filters + Jeff logic)
 exec_month_nums = [month_name_to_num(mn) for mn in (exec_months or [month_name])]
 ey = int(exec_year)
 
-df_exec_raw = df_raw[(df_raw["Creation Date"].dt.year == ey) & (df_raw["Creation Date"].dt.month.isin(exec_month_nums))].copy()
+df_exec_raw = df_raw[
+    (df_raw["Creation Date"].dt.year == ey) &
+    (df_raw["Creation Date"].dt.month.isin(exec_month_nums))
+].copy()
+
 df_exec = build_columns(df_exec_raw)
 df_exec = apply_filters(df_exec)
 
@@ -685,7 +685,7 @@ if report_choice == "Jeff-validation":
 executive_summary(df_exec)
 
 # =========================================================
-# Comparison (still based on main month vs compare month)
+# Comparison (main month vs compare month)
 # =========================================================
 if enable_compare and df_cmp is not None:
     df_cmp_filtered = apply_filters(df_cmp)
@@ -716,7 +716,7 @@ elif report_choice == "Validation":
     rep = report_validation(df_for_report, hide_marketing=False)
 
 else:
-    # ✅ CHANGE REQUEST: show only JEFF-VALIDATION (no long name)
+    # ✅ show only JEFF-VALIDATION
     st.subheader("JEFF-VALIDATION")
     rep = report_validation(df_for_report, hide_marketing=True)
 
