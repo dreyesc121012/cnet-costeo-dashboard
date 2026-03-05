@@ -1,134 +1,178 @@
-import base64
-from io import BytesIO
-import pandas as pd
 import streamlit as st
+import pandas as pd
 import requests
 import msal
+import io
 
-st.set_page_config(page_title="Invoice Category Control", layout="wide")
+st.set_page_config(page_title="Category Control Dashboard", layout="wide")
 
-# -----------------------------
+# =========================================================
 # SECRETS
-# -----------------------------
+# =========================================================
+
 TENANT_ID = st.secrets["TENANT_ID"]
 CLIENT_ID = st.secrets["CLIENT_ID"]
 CLIENT_SECRET = st.secrets["CLIENT_SECRET"]
-ONEDRIVE_SHARED_URL = st.secrets["ONEDRIVE_SHARED_URL"]
+
+ONEDRIVE_FOLDER_URL = st.secrets["ONEDRIVE_FOLDER_URL"]
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 SCOPES = ["https://graph.microsoft.com/.default"]
 
-# -----------------------------
-# FUNCTIONS
-# -----------------------------
-def encode_share_url(url):
-    b64 = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
-    return "u!" + b64
+# =========================================================
+# AUTHENTICATION
+# =========================================================
 
-
-@st.cache_data(ttl=300)
-def download_excel():
-
+@st.cache_resource
+def get_access_token():
+    
     app = msal.ConfidentialClientApplication(
         CLIENT_ID,
         authority=AUTHORITY,
-        client_credential=CLIENT_SECRET,
+        client_credential=CLIENT_SECRET
     )
 
     token = app.acquire_token_for_client(scopes=SCOPES)
 
-    headers = {"Authorization": f"Bearer {token['access_token']}"}
+    if "access_token" in token:
+        return token["access_token"]
+    else:
+        st.error("Error getting access token")
+        st.stop()
 
-    share_id = encode_share_url(ONEDRIVE_SHARED_URL)
+# =========================================================
+# GET FILE LIST FROM SHAREPOINT
+# =========================================================
 
-    meta_url = f"https://graph.microsoft.com/v1.0/shares/{share_id}/driveItem"
+def get_files():
 
-    meta = requests.get(meta_url, headers=headers).json()
+    token = get_access_token()
 
-    drive_id = meta["parentReference"]["driveId"]
-    item_id = meta["id"]
+    headers = {
+        "Authorization": f"Bearer {token}"
+    }
 
-    download_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
+    graph_url = f"https://graph.microsoft.com/v1.0/sites/root:/{ONEDRIVE_FOLDER_URL}:/children"
 
-    file = requests.get(download_url, headers=headers)
+    r = requests.get(graph_url, headers=headers)
 
-    return BytesIO(file.content)
+    if r.status_code != 200:
+        st.error("Error accessing SharePoint folder")
+        st.stop()
+
+    data = r.json()
+
+    files = []
+
+    for item in data["value"]:
+        if item["name"].endswith(".xlsx"):
+            files.append({
+                "name": item["name"],
+                "download": item["@microsoft.graph.downloadUrl"]
+            })
+
+    return files
 
 
-# -----------------------------
-# LOAD DATA
-# -----------------------------
-excel = download_excel()
+# =========================================================
+# LOAD EXCEL
+# =========================================================
 
-payments = pd.read_excel(
-    excel,
-    sheet_name="2025 Summary PAYMENTS"
+def load_excel(download_url):
+
+    r = requests.get(download_url)
+
+    excel_file = io.BytesIO(r.content)
+
+    df = pd.read_excel(
+        excel_file,
+        sheet_name="2025 Summary PAYMENTS"
+    )
+
+    return df
+
+
+# =========================================================
+# UI
+# =========================================================
+
+st.title("📊 Supplier Payments Category Control")
+
+files = get_files()
+
+file_names = [f["name"] for f in files]
+
+selected = st.selectbox(
+    "Select Excel file",
+    file_names
 )
 
-excel.seek(0)
-
-invoicing = pd.read_excel(
-    excel,
-    sheet_name="Invoicing"
+selected_file = next(
+    f for f in files if f["name"] == selected
 )
 
-# -----------------------------
+df = load_excel(selected_file["download"])
+
+# =========================================================
 # CLEAN DATA
-# -----------------------------
-payments = payments[[
+# =========================================================
+
+df = df[[
     "Building Address",
     "Category",
     "Amount without taxes"
 ]]
 
-payments["Amount without taxes"] = pd.to_numeric(
-    payments["Amount without taxes"],
-    errors="coerce"
+df = df.dropna()
+
+# =========================================================
+# METRICS
+# =========================================================
+
+col1, col2 = st.columns(2)
+
+col1.metric(
+    "Total Expenses",
+    f"${df['Amount without taxes'].sum():,.2f}"
 )
 
-payments = payments.dropna(subset=["Amount without taxes"])
-
-# -----------------------------
-# GROUP DATA
-# -----------------------------
-summary = payments.groupby(
-    ["Building Address", "Category"]
-)["Amount without taxes"].sum().reset_index()
-
-# -----------------------------
-# UI
-# -----------------------------
-st.title("📊 Invoice Category Control")
-
-building = st.selectbox(
-    "Building",
-    ["All"] + sorted(summary["Building Address"].dropna().unique())
+col2.metric(
+    "Transactions",
+    len(df)
 )
 
-if building != "All":
-    summary = summary[summary["Building Address"] == building]
+# =========================================================
+# BUILDING SUMMARY
+# =========================================================
 
-st.subheader("Category Expenses")
+st.subheader("Expenses by Building")
 
-st.dataframe(summary, use_container_width=True)
-
-# -----------------------------
-# BUDGET COMPARISON
-# -----------------------------
-st.subheader("Budget Comparison")
-
-budget = invoicing[[
-    "Building Address",
-    "Total Labor Budget",
-    "Total Supplies Budget",
-    "Total Equipment Budget",
-    "Total PW Budget"
-]]
-
-merged = summary.merge(
-    budget,
-    on="Building Address",
-    how="left"
+building = (
+    df.groupby("Building Address")["Amount without taxes"]
+    .sum()
+    .sort_values(ascending=False)
 )
 
-st.dataframe(merged, use_container_width=True)
+st.bar_chart(building)
+
+# =========================================================
+# CATEGORY SUMMARY
+# =========================================================
+
+st.subheader("Expenses by Category")
+
+category = (
+    df.groupby("Category")["Amount without taxes"]
+    .sum()
+    .sort_values(ascending=False)
+)
+
+st.bar_chart(category)
+
+# =========================================================
+# TABLE
+# =========================================================
+
+st.subheader("Detailed Data")
+
+st.dataframe(df, use_container_width=True)
