@@ -43,10 +43,17 @@ AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 
 SCOPES = ["User.Read", "Files.Read.All"]
 
-# Excel config
+# ============================================================
+# EXCEL CONFIG
+# ============================================================
 SHEET_REAL = "Real Master"
-SHEET_FIXED = "Gasto Fijo"
 HEADER_IDX = 6
+
+# Fixed expenses sheets by company (PER YOUR REQUEST)
+COMPANY_FIXED_SHEETS = {
+    "12433087 Canada Inc": "Gasto Fijo",
+    "9359-6633 Quebec Inc": "Gasto Fijo 9359",
+}
 
 # Exact column names
 MONTH_COL = "Month"   # text: "January", "February", etc.
@@ -166,11 +173,74 @@ def read_real_master_from_bytes(excel_bytes: bytes) -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
+def _pick_amount_column(df: pd.DataFrame):
+    """
+    Try to find a numeric 'amount' column in a fixed-expenses sheet.
+    Falls back to the column with most numeric values.
+    """
+    for c in df.columns:
+        cname = str(c).strip().lower()
+        if any(k in cname for k in ["amount", "importe", "monto", "valor", "total", "cost", "costo"]):
+            return c
+
+    best_col = None
+    best_score = -1
+    for c in df.columns:
+        s = pd.to_numeric(df[c], errors="coerce")
+        score = int(s.notna().sum())
+        if score > best_score:
+            best_score = score
+            best_col = c
+    return best_col
+
 @st.cache_data(ttl=300, show_spinner=False)
-def load_fixed_total_from_bytes(excel_bytes: bytes) -> float:
-    fx = pd.read_excel(BytesIO(excel_bytes), sheet_name=SHEET_FIXED, header=None)
-    amounts = pd.to_numeric(fx.iloc[:, 2], errors="coerce")
-    return float(amounts.fillna(0).sum())
+def load_fixed_detail_from_bytes(excel_bytes: bytes, sheet_name: str) -> tuple[float, pd.DataFrame]:
+    """
+    Returns (fixed_total, fixed_detail_df) for a given sheet.
+    Attempts to read with headers; if that fails, reads raw and uses col index 2 as amount.
+    """
+    # 1) header mode
+    try:
+        fx = pd.read_excel(BytesIO(excel_bytes), sheet_name=sheet_name)
+        fx = fx.dropna(how="all")
+        if fx.empty:
+            return 0.0, fx
+
+        amt_col = _pick_amount_column(fx)
+        if amt_col is None:
+            raise ValueError("No amount column detected (header mode).")
+
+        fx["_Amount"] = pd.to_numeric(fx[amt_col], errors="coerce").fillna(0.0)
+        fixed_total = float(fx["_Amount"].sum())
+
+        detail = fx.copy()
+        detail = detail[detail["_Amount"] != 0].copy()
+        detail = detail.drop(columns=[c for c in detail.columns if str(c).startswith("Unnamed")], errors="ignore")
+
+        cols = detail.columns.tolist()
+        if "_Amount" in cols:
+            cols = ["_Amount"] + [c for c in cols if c != "_Amount"]
+            detail = detail[cols].rename(columns={"_Amount": "Amount"})
+
+        return fixed_total, detail.reset_index(drop=True)
+
+    except Exception:
+        pass
+
+    # 2) raw fallback
+    fx_raw = pd.read_excel(BytesIO(excel_bytes), sheet_name=sheet_name, header=None)
+    fx_raw = fx_raw.dropna(how="all")
+    if fx_raw.empty:
+        return 0.0, fx_raw
+
+    idx_amount = 2 if fx_raw.shape[1] >= 3 else (fx_raw.shape[1] - 1)
+    fx_raw["_Amount"] = pd.to_numeric(fx_raw.iloc[:, idx_amount], errors="coerce").fillna(0.0)
+    fixed_total = float(fx_raw["_Amount"].sum())
+
+    detail = fx_raw.copy()
+    detail = detail[detail["_Amount"] != 0].copy()
+    detail = detail.rename(columns={"_Amount": "Amount"})
+    return fixed_total, detail.reset_index(drop=True)
 
 def _norm(s: str) -> str:
     s = "" if s is None else str(s)
@@ -181,12 +251,10 @@ def _norm(s: str) -> str:
 def find_col(df: pd.DataFrame, name: str):
     target = _norm(name)
 
-    # exact match (normalized)
     for c in df.columns:
         if _norm(c) == target:
             return c
 
-    # contains match (normalized)
     for c in df.columns:
         if target in _norm(c):
             return c
@@ -260,7 +328,6 @@ def build_month_fields(df: pd.DataFrame) -> pd.DataFrame:
 
 # ============================================================
 # FILTERS (Year + Month + Company + Province + Client + Project + Building)
-# NOTE: NO "Fixed Expenses" filter here (as requested)
 # ============================================================
 def add_filters(df: pd.DataFrame) -> pd.DataFrame:
     st.sidebar.header("Executive Filters")
@@ -507,7 +574,7 @@ with colA:
     if st.button("🔄 Refresh data"):
         st.session_state.pop("excel_bytes", None)
         read_real_master_from_bytes.clear()
-        load_fixed_total_from_bytes.clear()
+        load_fixed_detail_from_bytes.clear()
         st.rerun()
 
 with colB:
@@ -534,7 +601,6 @@ except Exception as e:
     st.stop()
 
 df_all = read_real_master_from_bytes(excel_bytes)
-fixed_total_full = load_fixed_total_from_bytes(excel_bytes)
 
 # Apply filters
 df = add_filters(df_all.copy())
@@ -612,13 +678,14 @@ if c_roy3:
 
 # ============================================================
 # ✅ FINAL BUSINESS RULES (UPDATED PER YOUR REQUEST)
-# 1) Fixed Expenses ONLY for Company = 12433087 Canada Inc
+# 1) Fixed Expenses for Company:
+#    - 12433087 Canada Inc  -> sheet "Gasto Fijo"
+#    - 9359-6633 Quebec Inc -> sheet "Gasto Fijo 9359"
 # 2) Royalty 3% BGIS INCLUDED when:
 #    - filtered Company is exactly 9359-6633 Quebec Inc
 #      OR
 #    - filtered Client is exactly BGIS
 # ============================================================
-COMPANY_FIXED = "12433087 Canada Inc"
 COMPANY_BG_QC = "9359-6633 Quebec Inc"
 CLIENT_BGIS   = "BGIS"
 
@@ -630,22 +697,31 @@ mgmt_fee_total   = float(df[c_mgmt].fillna(0).sum())
 royalty_5_total  = float(df[c_roy5].fillna(0).sum())
 royalty_3_total  = float(df[c_roy3].fillna(0).sum()) if c_roy3 else 0.0
 
-# --- Apply Fixed ONLY when filtered Company is exactly 12433087 Canada Inc
+# --- Apply Fixed when filtered Company matches one of the configured fixed sheets
 apply_fixed = False
+fixed_total = 0.0
+fixed_total_full = 0.0  # kept for PDF signature compatibility
+fixed_detail_df = pd.DataFrame()
+fixed_sheet_used = ""
+
+companies = []
 if c_company:
     companies = df[c_company].dropna().astype(str).unique().tolist()
-    apply_fixed = (len(companies) == 1 and companies[0] == COMPANY_FIXED)
 
-fixed_total = fixed_total_full if apply_fixed else 0.0
-net = gross - fixed_total
+if len(companies) == 1:
+    comp_selected = companies[0].strip()
+    if comp_selected in COMPANY_FIXED_SHEETS:
+        apply_fixed = True
+        fixed_sheet_used = COMPANY_FIXED_SHEETS[comp_selected]
+        fixed_total, fixed_detail_df = load_fixed_detail_from_bytes(excel_bytes, fixed_sheet_used)
+        fixed_total_full = fixed_total
+
+net = gross - (fixed_total if apply_fixed else 0.0)
 
 # --- Apply Royalty 3% when Company==9359-6633 Quebec Inc OR Client==BGIS (each ONLY if that filter results in a single value)
 apply_roy3 = False
-companies = []
 clients = []
 
-if c_company:
-    companies = df[c_company].dropna().astype(str).unique().tolist()
 if c_client:
     clients = df[c_client].dropna().astype(str).unique().tolist()
 
@@ -663,7 +739,7 @@ else:
 # % of revenue
 p_cost  = safe_pct(cost, income)
 p_gross = safe_pct(gross, income)
-p_fixed = safe_pct(fixed_total, income)
+p_fixed = safe_pct(fixed_total if apply_fixed else 0.0, income)
 p_net   = safe_pct(net, income)
 p_mgmt  = safe_pct(mgmt_fee_total, income)
 p_roy5  = safe_pct(royalty_5_total, income)
@@ -1055,6 +1131,48 @@ else:
     st.info("Month/Year columns were not found in the filtered dataframe.")
 
 # ============================================================
+# ✅ FIXED EXPENSES DETAIL (only when applied)
+# ============================================================
+if apply_fixed:
+    st.divider()
+    st.subheader("📌 Fixed Expenses Detail (Gasto Fijo)")
+
+    left, right = st.columns([1, 2])
+    with left:
+        st.metric("Fixed Expenses Total", f"${fixed_total:,.2f}")
+        if fixed_sheet_used:
+            st.caption(f"Source sheet: {fixed_sheet_used}")
+
+    with right:
+        if fixed_detail_df is None or fixed_detail_df.empty:
+            st.info("No fixed-expenses detail rows found (or the sheet is empty).")
+        else:
+            st.dataframe(sanitize_for_arrow(fixed_detail_df), use_container_width=True)
+
+            # Optional quick summary by a category-like column (if present)
+            possible_group_cols = ["Category", "Concept", "Account", "Type", "Descripción", "Descripcion", "Detalle"]
+            group_col = None
+            for gc in possible_group_cols:
+                if gc in fixed_detail_df.columns:
+                    group_col = gc
+                    break
+
+            if group_col and "Amount" in fixed_detail_df.columns:
+                try:
+                    gfx = fixed_detail_df.copy()
+                    gfx["Amount"] = pd.to_numeric(gfx["Amount"], errors="coerce").fillna(0.0)
+                    by_cat = (
+                        gfx.groupby(group_col, dropna=False)["Amount"]
+                           .sum()
+                           .reset_index()
+                           .sort_values("Amount", ascending=False)
+                    )
+                    st.caption(f"Summary by {group_col}")
+                    st.dataframe(sanitize_for_arrow(by_cat), use_container_width=True)
+                except Exception:
+                    pass
+
+# ============================================================
 # EXPORT PDF
 # ============================================================
 st.divider()
@@ -1062,7 +1180,7 @@ st.subheader("📄 Export Executive Report (PDF)")
 
 pdf_bytes = build_pdf_report(
     income=income, cost=cost, gross=gross,
-    fixed_total_applied=fixed_total,
+    fixed_total_applied=(fixed_total if apply_fixed else 0.0),
     fixed_total_full=fixed_total_full,
     net=net,
     mgmt_fee_total=mgmt_fee_total,
