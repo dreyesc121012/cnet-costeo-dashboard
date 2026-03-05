@@ -195,54 +195,44 @@ def _pick_amount_column(df: pd.DataFrame):
 
 def _pick_name_column(df: pd.DataFrame, amount_col):
     """
-    Find the best 'name/description' column (text-like), excluding amount column.
+    Pick the best text column to use as Name:
+    - Excludes amount column
+    - Prefers columns with MOST non-empty text values (not numeric)
     """
-    preferred = [
-        "name", "concept", "description", "detail", "detalle",
-        "descripcion", "descripción", "account", "cuenta", "vendor", "proveedor"
-    ]
     cols = [c for c in df.columns if c != amount_col]
-
-    for key in preferred:
-        for c in cols:
-            if key in str(c).strip().lower():
-                return c
+    if not cols:
+        return None
 
     best_col = None
     best_score = -1
+
     for c in cols:
         s = df[c]
+
         sn = pd.to_numeric(s, errors="coerce")
         numeric_ratio = sn.notna().mean() if len(s) else 1.0
-        if numeric_ratio > 0.6:
+        if numeric_ratio > 0.60:
             continue
 
-        score = s.astype(str).str.strip().replace("nan", "").ne("").sum()
+        txt = s.astype(str).str.strip()
+        txt = txt.replace({"nan": "", "None": "", "NaT": ""})
+        score = int(txt.ne("").sum())
+
         if score > best_score:
-            best_score = int(score)
+            best_score = score
             best_col = c
+
     return best_col
-
-def _pick_category_column(df: pd.DataFrame, amount_col, name_col):
-    """
-    Optional: find a category/account column different from name/amount.
-    """
-    preferred = ["category", "account", "type", "cuenta", "categoria", "categoría"]
-    cols = [c for c in df.columns if c not in (amount_col, name_col)]
-
-    for key in preferred:
-        for c in cols:
-            if key in str(c).strip().lower():
-                return c
-    return None
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_fixed_detail_from_bytes(excel_bytes: bytes, sheet_name: str) -> tuple[float, pd.DataFrame]:
     """
-    Returns (fixed_total, fixed_detail_df) for a given sheet.
-    Always tries to return a detail with at least: Name + Amount.
+    Returns (fixed_total, fixed_detail_df) for a given fixed-expense sheet.
+    Output table: Category (optional) + Name + Amount
     """
-    # 1) header mode
+    # -------------------------------------------------
+    # 1) TRY WITH HEADERS
+    # -------------------------------------------------
     try:
         fx = pd.read_excel(BytesIO(excel_bytes), sheet_name=sheet_name)
         fx = fx.dropna(how="all")
@@ -251,74 +241,152 @@ def load_fixed_detail_from_bytes(excel_bytes: bytes, sheet_name: str) -> tuple[f
 
         amt_col = _pick_amount_column(fx)
         if amt_col is None:
-            raise ValueError("No amount column detected (header mode).")
+            raise ValueError("No amount column detected.")
 
         fx["_Amount"] = pd.to_numeric(fx[amt_col], errors="coerce").fillna(0.0)
         fixed_total = float(fx["_Amount"].sum())
 
-        name_col = _pick_name_column(fx, amt_col)
-        cat_col = _pick_category_column(fx, amt_col, name_col)
+        detail = fx[fx["_Amount"] != 0].copy()
+        if detail.empty:
+            return fixed_total, pd.DataFrame(columns=["Name", "Amount"])
 
-        detail = fx.copy()
-        detail = detail[detail["_Amount"] != 0].copy()
+        # Build candidate text columns
+        text_cols = []
+        for c in detail.columns:
+            if c in (amt_col, "_Amount"):
+                continue
+            s = detail[c]
+            sn = pd.to_numeric(s, errors="coerce")
+            if (sn.notna().mean() if len(s) else 1.0) <= 0.60:
+                text_cols.append(c)
 
-        out_cols = []
-        if cat_col is not None:
-            out_cols.append(cat_col)
-        if name_col is not None:
-            out_cols.append(name_col)
+        def clean_text(series):
+            t = series.astype(str).str.strip()
+            t = t.replace({"nan": "", "None": "", "NaT": ""})
+            return t
+
+        # Pick best name column
+        name_col = _pick_name_column(detail, amt_col)
 
         out = pd.DataFrame()
-        if out_cols:
-            out = detail[out_cols].copy()
+
+        if name_col is not None:
+            nm = clean_text(detail[name_col])
+            empty_ratio = (nm.eq("")).mean()
+
+            # If too empty, combine first 2 text cols
+            if empty_ratio > 0.50 and len(text_cols) >= 2:
+                a = clean_text(detail[text_cols[0]])
+                b = clean_text(detail[text_cols[1]])
+                nm2 = (a + " - " + b).str.strip(" -")
+                nm = nm.mask(nm.eq(""), nm2)
+            elif empty_ratio > 0.50 and len(text_cols) >= 1:
+                a = clean_text(detail[text_cols[0]])
+                nm = nm.mask(nm.eq(""), a)
+
+            out["Name"] = nm
         else:
-            out["Name"] = ["(Unnamed)"] * len(detail)
+            if len(text_cols) >= 2:
+                a = clean_text(detail[text_cols[0]])
+                b = clean_text(detail[text_cols[1]])
+                out["Name"] = (a + " - " + b).str.strip(" -")
+            elif len(text_cols) == 1:
+                out["Name"] = clean_text(detail[text_cols[0]])
+            else:
+                out["Name"] = ["(Unnamed)"] * len(detail)
+
+        # Optional Category: first other text col with enough non-empty values
+        cat_col = None
+        for c in text_cols:
+            if name_col is not None and c == name_col:
+                continue
+            ct = clean_text(detail[c])
+            if ct.ne("").sum() >= max(3, int(0.20 * len(ct))):
+                cat_col = c
+                break
+
+        if cat_col is not None:
+            out.insert(0, "Category", clean_text(detail[cat_col]))
 
         out["Amount"] = detail["_Amount"].values
 
-        rename_map = {}
-        if cat_col is not None:
-            rename_map[cat_col] = "Category"
-        if name_col is not None:
-            rename_map[name_col] = "Name"
-        out = out.rename(columns=rename_map)
+        # Final cleanup
+        out["Name"] = out["Name"].astype(str).replace({"nan": "", "None": ""}).str.strip()
+        out = out[out["Name"].ne("")].copy()
 
-        for c in out.columns:
-            if c != "Amount":
-                out[c] = out[c].astype(str)
+        out["Amount"] = pd.to_numeric(out["Amount"], errors="coerce").fillna(0.0)
+        out = out.sort_values("Amount", ascending=False).reset_index(drop=True)
 
-        out = out.reset_index(drop=True)
         return fixed_total, out
 
     except Exception:
         pass
 
-    # 2) raw fallback
+    # -------------------------------------------------
+    # 2) FALLBACK RAW (header=None)
+    # -------------------------------------------------
     fx_raw = pd.read_excel(BytesIO(excel_bytes), sheet_name=sheet_name, header=None)
     fx_raw = fx_raw.dropna(how="all")
     if fx_raw.empty:
         return 0.0, fx_raw
 
+    # Amount col: prefer index 2
     idx_amount = 2 if fx_raw.shape[1] >= 3 else (fx_raw.shape[1] - 1)
     fx_raw["_Amount"] = pd.to_numeric(fx_raw.iloc[:, idx_amount], errors="coerce").fillna(0.0)
     fixed_total = float(fx_raw["_Amount"].sum())
 
     detail = fx_raw[fx_raw["_Amount"] != 0].copy()
+    if detail.empty:
+        return fixed_total, pd.DataFrame(columns=["Name", "Amount"])
 
     candidate_idxs = [i for i in range(detail.shape[1]) if i != idx_amount]
-    name_idx = candidate_idxs[0] if candidate_idxs else None
-    cat_idx = candidate_idxs[1] if len(candidate_idxs) >= 2 else None
+
+    def score_text_col(idx):
+        s = detail.iloc[:, idx].astype(str).str.strip()
+        s = s.replace({"nan": "", "None": "", "NaT": ""})
+        sn = pd.to_numeric(s, errors="coerce")
+        numeric_ratio = sn.notna().mean() if len(s) else 1.0
+        if numeric_ratio > 0.60:
+            return -1
+        return int(s.ne("").sum())
+
+    best_name_idx = None
+    best_score = -1
+    for idx in candidate_idxs:
+        sc = score_text_col(idx)
+        if sc > best_score:
+            best_score = sc
+            best_name_idx = idx
+
+    def clean_series(idx):
+        s = detail.iloc[:, idx].astype(str).str.strip()
+        s = s.replace({"nan": "", "None": "", "NaT": ""})
+        return s
 
     out = pd.DataFrame()
-    if cat_idx is not None:
-        out["Category"] = detail.iloc[:, cat_idx].astype(str)
-    if name_idx is not None:
-        out["Name"] = detail.iloc[:, name_idx].astype(str)
+
+    if best_name_idx is not None and best_score > 0:
+        nm = clean_series(best_name_idx)
+        empty_ratio = (nm.eq("")).mean()
+
+        # If too empty, fill blanks using second best text column
+        if empty_ratio > 0.50 and len(candidate_idxs) >= 2:
+            scores = [(idx, score_text_col(idx)) for idx in candidate_idxs if idx != best_name_idx]
+            scores = sorted(scores, key=lambda x: x[1], reverse=True)
+            if scores and scores[0][1] > 0:
+                nm2 = clean_series(scores[0][0])
+                nm = nm.mask(nm.eq(""), nm2)
+
+        out["Name"] = nm
     else:
         out["Name"] = ["(Unnamed)"] * len(detail)
 
     out["Amount"] = detail["_Amount"].values
-    out = out.reset_index(drop=True)
+    out["Name"] = out["Name"].astype(str).replace({"nan": "", "None": ""}).str.strip()
+    out = out[out["Name"].ne("")].copy()
+
+    out["Amount"] = pd.to_numeric(out["Amount"], errors="coerce").fillna(0.0)
+    out = out.sort_values("Amount", ascending=False).reset_index(drop=True)
 
     return fixed_total, out
 
@@ -487,7 +555,6 @@ def build_pdf_report(
     c = canvas.Canvas(buf, pagesize=letter)
     width, height = letter
 
-    # --- Header with logo (if exists)
     y_top = height - 40
     lp = _logo_path()
     if lp:
@@ -566,7 +633,7 @@ def build_pdf_report(
         if fig is None:
             return y_top_local
         try:
-            img_bytes = fig.to_image(format="png")  # requires kaleido
+            img_bytes = fig.to_image(format="png")
             img = ImageReader(BytesIO(img_bytes))
             c.setFont("Helvetica-Bold", 11)
             c.drawString(40, y_top_local, title)
@@ -645,7 +712,6 @@ if "access_token" not in token_result:
 
 st.success("✅ Connected to OneDrive/SharePoint (active token)")
 
-# Optional: small warning if logo file missing
 if not _logo_path():
     st.warning("⚠️ Logo file not found. Please ensure 'cnet_logo.png' is in the repo root.")
 
@@ -681,51 +747,18 @@ except Exception as e:
     st.stop()
 
 df_all = read_real_master_from_bytes(excel_bytes)
-
-# Apply filters
 df = add_filters(df_all.copy())
 
 # ============================================================
-# KPI base (UPDATED: cost uses Total Cost Real)
+# KPI base
 # ============================================================
 COL_INCOME = "Total to Bill"
 COL_COST_REAL   = "Total Cost Real"
 COL_COST_BUDGET = "Total Cost Budget"
-COL_COST_VAR    = "Variation Total Cost (Budget vs Real)"  # Budget - Real
+COL_COST_VAR    = "Variation Total Cost (Budget vs Real)"
 COL_MGMT   = "Total Management Fee"
 COL_ROY_5  = "Royalty CNET Group Inc 5%"
-COL_ROY_3  = "Royalty CNET Master 3% BGIS"  # ✅ exact name
-
-# ============================================================
-# CATEGORY SPECS
-# ============================================================
-CATEGORY_SPECS = {
-    "Labor": {
-        "real": "Total Labor Real",
-        "budget": "Total Labor Budget",
-        "var": "Variation Labor  (Budget vs Real)",
-    },
-    "PW": {
-        "real": "Total PW Real",
-        "budget": "Total PW Budget",
-        "var": "Variation PW  (Budget vs Real)",
-    },
-    "Supplies": {
-        "real": "Total Supplies Real",
-        "budget": "Total Supplies Budget",
-        "var": "Variation Supplies  (Budget vs Real)",
-    },
-    "Equipment": {
-        "real": "Total Equipment Real",
-        "budget": "Total Equipment Budget",
-        "var": "Variation Equipment (Budget vs Real)",
-    },
-    "Total Cost": {
-        "real": "Total Cost Real",
-        "budget": "Total Cost Budget",
-        "var": "Variation Total Cost (Budget vs Real)",
-    },
-}
+COL_ROY_3  = "Royalty CNET Master 3% BGIS"
 
 # Resolve columns
 c_income = find_col(df, COL_INCOME)
@@ -750,22 +783,11 @@ if missing:
         st.write(df.columns.tolist())
     st.stop()
 
-# Numeric conversion
 for c in [c_income, c_cost, c_mgmt, c_roy5]:
     df[c] = pd.to_numeric(df[c], errors="coerce")
 if c_roy3:
     df[c_roy3] = pd.to_numeric(df[c_roy3], errors="coerce")
 
-# ============================================================
-# ✅ FINAL BUSINESS RULES
-# 1) Fixed Expenses for Company:
-#    - 12433087 Canada Inc  -> sheet "Gasto Fijo"
-#    - 9359-6633 Quebec Inc -> sheet "Gasto Fijo 9359"
-# 2) Royalty 3% BGIS INCLUDED when:
-#    - filtered Company is exactly 9359-6633 Quebec Inc
-#      OR
-#    - filtered Client is exactly BGIS
-# ============================================================
 COMPANY_BG_QC = "9359-6633 Quebec Inc"
 CLIENT_BGIS   = "BGIS"
 
@@ -777,10 +799,10 @@ mgmt_fee_total   = float(df[c_mgmt].fillna(0).sum())
 royalty_5_total  = float(df[c_roy5].fillna(0).sum())
 royalty_3_total  = float(df[c_roy3].fillna(0).sum()) if c_roy3 else 0.0
 
-# --- Apply Fixed when filtered Company matches one of the configured fixed sheets
+# Fixed expenses logic
 apply_fixed = False
 fixed_total = 0.0
-fixed_total_full = 0.0  # kept for PDF signature compatibility
+fixed_total_full = 0.0
 fixed_detail_df = pd.DataFrame()
 fixed_sheet_used = ""
 
@@ -798,25 +820,21 @@ if len(companies) == 1:
 
 net = gross - (fixed_total if apply_fixed else 0.0)
 
-# --- Apply Royalty 3% when Company==9359-6633 Quebec Inc OR Client==BGIS
+# Royalty 3% logic
 apply_roy3 = False
 clients = []
-
 if c_client:
     clients = df[c_client].dropna().astype(str).unique().tolist()
 
 only_company_bg_qc = (len(companies) == 1 and companies[0] == COMPANY_BG_QC)
 only_client_bgis   = (len(clients) == 1 and clients[0].strip().lower() == CLIENT_BGIS.lower())
-
 apply_roy3 = (only_company_bg_qc or only_client_bgis)
 
-# --- New Total includes Roy3 only when apply_roy3
 if apply_roy3:
     new_total = net + mgmt_fee_total + royalty_5_total + royalty_3_total
 else:
     new_total = net + mgmt_fee_total + royalty_5_total
 
-# % of revenue
 p_cost  = safe_pct(cost, income)
 p_gross = safe_pct(gross, income)
 p_fixed = safe_pct(fixed_total if apply_fixed else 0.0, income)
@@ -827,7 +845,7 @@ p_roy3  = safe_pct(royalty_3_total, income) if apply_roy3 else 0.0
 p_new   = safe_pct(new_total, income)
 
 # ============================================================
-# Traffic Light + Gauge
+# Executive Margin
 # ============================================================
 st.subheader("📌 Executive Margin (KPIs + Traffic Light)")
 
@@ -869,7 +887,7 @@ fig_gauge = go.Figure(go.Indicator(
 st.plotly_chart(fig_gauge, use_container_width=True)
 
 # ============================================================
-# KPI CARDS (Fixed shown ONLY when applies)
+# KPIs (Executive)
 # ============================================================
 st.subheader("📊 KPIs (Executive)")
 
@@ -893,38 +911,6 @@ f1, f2, f3 = st.columns(3)
 f1.metric("Royalty (5%)", f"${royalty_5_total:,.2f}", f"{p_roy5*100:,.2f}%")
 f2.metric("Royalty (3%) BGIS", f"${royalty_3_total:,.2f}" if apply_roy3 else "$0.00", f"{p_roy3*100:,.2f}%")
 f3.metric("New Total", f"${new_total:,.2f}", f"{p_new*100:,.2f}%")
-
-# ============================================================
-# OPTIONAL KPI: Total Cost Budget vs Real + % used / variance
-# ============================================================
-tc_r = find_col(df, COL_COST_REAL)
-tc_b = find_col(df, COL_COST_BUDGET)
-tc_v = find_col(df, COL_COST_VAR)
-
-if tc_r and tc_b and tc_v:
-    df[tc_r] = pd.to_numeric(df[tc_r], errors="coerce")
-    df[tc_b] = pd.to_numeric(df[tc_b], errors="coerce")
-    df[tc_v] = pd.to_numeric(df[tc_v], errors="coerce")
-
-    total_cost_real = float(df[tc_r].fillna(0).sum())
-    total_cost_budget = float(df[tc_b].fillna(0).sum())
-    total_cost_var = float(df[tc_v].fillna(0).sum())
-
-    pct_used = safe_pct(total_cost_real, total_cost_budget)
-    pct_under = safe_pct(max(0.0, total_cost_var), total_cost_budget)
-    pct_over = safe_pct(max(0.0, total_cost_real - total_cost_budget), total_cost_budget)
-
-    status_tc = "🟢 On track"
-    if total_cost_var < 0:
-        status_tc = "🔴 Over budget"
-    elif total_cost_var > 0:
-        status_tc = "🟢 Under budget"
-
-    t1, t2, t3, t4 = st.columns(4)
-    t1.metric("Total Cost Real", f"${total_cost_real:,.2f}")
-    t2.metric("Total Cost Budget", f"${total_cost_budget:,.2f}")
-    t3.metric("Variation (Budget - Real)", f"${total_cost_var:,.2f}", status_tc)
-    t4.metric("% Budget Used", f"{pct_used*100:,.1f}%", f"Over: {pct_over*100:,.1f}% | Under: {pct_under*100:,.1f}%")
 
 # ============================================================
 # WATERFALL
@@ -961,252 +947,6 @@ fig_waterfall = go.Figure(go.Waterfall(
 ))
 fig_waterfall.update_layout(title="Waterfall: Revenue → Costs → (Fixed) → Fees → New Total", showlegend=False)
 st.plotly_chart(fig_waterfall, use_container_width=True)
-
-# ============================================================
-# ✅ CATEGORY BUDGET vs REAL BREAKDOWN (FILTERED)
-# ============================================================
-st.subheader("🧩 Budget vs Real Breakdown (Categories)")
-
-cat = st.selectbox("Select category", list(CATEGORY_SPECS.keys()), index=0)
-spec = CATEGORY_SPECS[cat]
-
-c_real = find_col(df, spec["real"])
-c_budget = find_col(df, spec["budget"])
-c_var = find_col(df, spec["var"])
-
-missing_cat = [k for k, v in {
-    spec["real"]: c_real,
-    spec["budget"]: c_budget,
-    spec["var"]: c_var,
-}.items() if v is None]
-
-if missing_cat:
-    st.error(f"Missing columns for '{cat}': {missing_cat}")
-    with st.expander("Show detected columns"):
-        st.write(df.columns.tolist())
-else:
-    df[c_real] = pd.to_numeric(df[c_real], errors="coerce")
-    df[c_budget] = pd.to_numeric(df[c_budget], errors="coerce")
-    df[c_var] = pd.to_numeric(df[c_var], errors="coerce")
-
-    real_total = float(df[c_real].fillna(0).sum())
-    budget_total = float(df[c_budget].fillna(0).sum())
-    var_total = float(df[c_var].fillna(0).sum())  # Budget - Real
-
-    is_over = var_total < 0
-    is_under = var_total > 0
-
-    over_amt = max(0.0, real_total - budget_total)
-    under_amt = max(0.0, budget_total - real_total)
-
-    pct_of_budget = safe_pct(real_total, budget_total)
-    pct_under_vs_budget = safe_pct(under_amt, budget_total)
-    pct_over_vs_budget = safe_pct(over_amt, budget_total)
-
-    color_red = "#d93025"
-    color_green = "#188038"
-    color_gray = "#5f6368"
-
-    if is_over:
-        status_html = f"<span style='color:{color_red}; font-weight:700;'>🔴 Over budget</span>"
-        var_color = color_red
-    elif is_under:
-        status_html = f"<span style='color:{color_green}; font-weight:700;'>🟢 Under budget</span>"
-        var_color = color_green
-    else:
-        status_html = f"<span style='color:{color_gray}; font-weight:700;'>⚪ On budget</span>"
-        var_color = color_gray
-
-    a1, a2, a3, a4 = st.columns(4)
-    a1.metric(f"{cat} - Real", f"${real_total:,.2f}")
-    a2.metric(f"{cat} - Budget", f"${budget_total:,.2f}")
-
-    a3.markdown(
-        f"""
-        <div style="font-size:14px;">Variation (Budget - Real)</div>
-        <div style="font-size:28px; font-weight:700; color:{var_color};">
-            ${var_total:,.2f}
-        </div>
-        {status_html}
-        """,
-        unsafe_allow_html=True
-    )
-
-    a4.markdown(
-        f"""
-        <div style="font-size:14px;">% of Budget Used</div>
-        <div style="font-size:28px; font-weight:700;">
-            {pct_of_budget*100:,.1f}%
-        </div>
-        <div>
-            <span style="color:{color_red}; font-weight:700;">
-                Over: {pct_over_vs_budget*100:,.1f}%
-            </span>
-            &nbsp;&nbsp;|&nbsp;&nbsp;
-            <span style="color:{color_green}; font-weight:700;">
-                Under: {pct_under_vs_budget*100:,.1f}%
-            </span>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    fig_cat = go.Figure()
-    fig_cat.add_trace(go.Bar(name="Budget", x=["Budget"], y=[budget_total]))
-    fig_cat.add_trace(go.Bar(name="Real", x=["Real"], y=[real_total]))
-    fig_cat.update_layout(
-        title=f"{cat}: Budget vs Real (Filtered)",
-        barmode="group",
-        xaxis_title="",
-        yaxis_title="Amount",
-    )
-    st.plotly_chart(fig_cat, use_container_width=True)
-
-# ============================================================
-# ✅ PROJECT PROFIT / LOSS (Filtered)
-# ============================================================
-st.subheader("🧾 Project Profit / Loss (Filtered)")
-
-pcol = find_col(df, "Project Name")
-c_income2 = find_col(df, COL_INCOME)
-c_total_cost_real = find_col(df, COL_COST_REAL)
-
-if not pcol:
-    st.info("Project column (Project Name) not found.")
-elif not c_income2:
-    st.info("Revenue column (Total to Bill) not found.")
-elif not c_total_cost_real:
-    st.info("Total Cost Real column not found (needed for Project P/L).")
-else:
-    df[c_income2] = pd.to_numeric(df[c_income2], errors="coerce")
-    df[c_total_cost_real] = pd.to_numeric(df[c_total_cost_real], errors="coerce")
-
-    p = (
-        df.groupby(pcol, dropna=False)
-          .agg(
-              Revenue=(c_income2, "sum"),
-              TotalCostReal=(c_total_cost_real, "sum"),
-          )
-          .reset_index()
-    )
-    p[pcol] = p[pcol].astype(str).replace({"nan": "None"})
-    p["Profit/Loss"] = p["Revenue"] - p["TotalCostReal"]
-    p["Margin %"] = p.apply(lambda r: safe_pct(r["Profit/Loss"], r["Revenue"]), axis=1)
-    p = p.sort_values("Profit/Loss")
-
-    def _color_pl(v):
-        try:
-            v = float(v)
-        except Exception:
-            return ""
-        return "color: red; font-weight: 700;" if v < 0 else "color: green; font-weight: 700;"
-
-    p_show = p.copy()
-    p_show["Revenue"] = p_show["Revenue"].map(lambda x: f"${float(x):,.2f}")
-    p_show["TotalCostReal"] = p_show["TotalCostReal"].map(lambda x: f"${float(x):,.2f}")
-
-    sty = (
-        p_show.style
-        .format({"Profit/Loss": "${:,.2f}", "Margin %": "{:.1%}"})
-        .applymap(_color_pl, subset=["Profit/Loss"])
-        .applymap(lambda v: "color: red; font-weight: 700;" if float(v) < 0 else "color: green; font-weight: 700;",
-                  subset=["Margin %"])
-    )
-    st.dataframe(sty, use_container_width=True)
-
-# ============================================================
-# ✅ MONTHLY BREAKDOWN (FILTERED) — NO TIME AXIS
-# ============================================================
-st.subheader("🗓️ Monthly Breakdown (Filtered)")
-
-if MONTH_COL in df.columns and YEAR_COL in df.columns:
-    if "_MonthKey" not in df.columns or "_MonthText" not in df.columns:
-        df = build_month_fields(df)
-
-    selected_years = sorted([int(y) for y in df["_YearInt"].dropna().unique().tolist()])
-    title_year_part = (
-        f"Years {', '.join(map(str, selected_years))}"
-        if len(selected_years) != 1
-        else f"Year {selected_years[0]}"
-    )
-
-    df_m = df.copy()
-
-    for col in [COL_INCOME, COL_COST_REAL, COL_MGMT, COL_ROY_5, COL_ROY_3]:
-        c = find_col(df_m, col)
-        if c:
-            df_m[c] = pd.to_numeric(df_m[c], errors="coerce")
-
-    mi = find_col(df_m, COL_INCOME)
-    mc = find_col(df_m, COL_COST_REAL)
-    mm = find_col(df_m, COL_MGMT)
-    mr5 = find_col(df_m, COL_ROY_5)
-    mr3 = find_col(df_m, COL_ROY_3)
-
-    ok = df_m["_MonthKey"].notna() & df_m["_MonthText"].notna()
-    if ok.any() and all([mi, mc, mm, mr5]):
-        g = (
-            df_m[ok]
-            .groupby(["_MonthKey", "_MonthText"], dropna=True)
-            .agg(
-                Income=(mi, "sum"),
-                Cost=(mc, "sum"),
-                MgmtFee=(mm, "sum"),
-                Royalty5=(mr5, "sum"),
-                Royalty3=(mr3, "sum") if (mr3 and apply_roy3) else (mr5, lambda s: 0.0),
-            )
-            .reset_index()
-            .sort_values("_MonthKey")
-        )
-
-        g["Gross"] = g["Income"] - g["Cost"]
-
-        if apply_fixed:
-            g["Fixed"] = fixed_total
-            g["Net"] = g["Gross"] - g["Fixed"]
-        else:
-            g["Net"] = g["Gross"]
-
-        if apply_roy3:
-            g["New Total"] = g["Net"] + g["MgmtFee"] + g["Royalty5"] + g["Royalty3"]
-        else:
-            g["New Total"] = g["Net"] + g["MgmtFee"] + g["Royalty5"]
-
-        cols_show = ["Month", "Income", "Cost", "Gross"]
-        if apply_fixed:
-            cols_show += ["Fixed", "Net"]
-        else:
-            cols_show += ["Net"]
-        cols_show += ["MgmtFee", "Royalty5"]
-        if apply_roy3:
-            cols_show += ["Royalty3"]
-        cols_show += ["New Total"]
-
-        g_show = g.rename(columns={"_MonthText": "Month"}).copy()
-        for c in [c for c in cols_show if c != "Month"]:
-            g_show[c] = g_show[c].map(lambda x: f"${float(x):,.2f}")
-
-        st.dataframe(g_show[cols_show], use_container_width=True)
-
-        x_text = g["_MonthText"].tolist()
-
-        fig_month = go.Figure()
-        fig_month.add_trace(go.Bar(name="Income", x=x_text, y=g["Income"]))
-        fig_month.add_trace(go.Bar(name="Cost", x=x_text, y=g["Cost"]))
-        fig_month.add_trace(go.Scatter(name="New Total", x=x_text, y=g["New Total"], mode="lines+markers"))
-        fig_month.update_layout(
-            title=f"Month-to-Month (Filtered) - {title_year_part}: Income vs Cost + New Total",
-            barmode="group",
-            xaxis_title="Month",
-            yaxis_title="Amount",
-        )
-        fig_month.update_xaxes(type="category", categoryorder="array", categoryarray=x_text)
-
-        st.plotly_chart(fig_month, use_container_width=True)
-    else:
-        st.info("Could not build the monthly breakdown. Please verify Month/Year values and KPI columns.")
-else:
-    st.info("Month/Year columns were not found in the filtered dataframe.")
 
 # ============================================================
 # ✅ FIXED EXPENSES DETAIL (only when applied) — SHOW NAME + AMOUNT
@@ -1261,7 +1001,7 @@ st.download_button(
 )
 
 # ============================================================
-# TABLES (Fixed shown only when applied; Roy3 shown only when applied)
+# SUMMARY TABLE
 # ============================================================
 st.subheader("Summary")
 
@@ -1270,7 +1010,6 @@ summary_rows = [
     ["Costs", cost, p_cost],
     ["Gross", gross, p_gross],
 ]
-
 if apply_fixed:
     summary_rows += [["Fixed Expenses (Gasto Fijo)", fixed_total, p_fixed]]
 
@@ -1279,10 +1018,8 @@ summary_rows += [
     ["Total Management Fee", mgmt_fee_total, p_mgmt],
     ["Royalty (5%)", royalty_5_total, p_roy5],
 ]
-
 if apply_roy3:
     summary_rows += [["Royalty (3%) BGIS", royalty_3_total, p_roy3]]
-
 summary_rows += [["New Total", new_total, p_new]]
 
 summary = pd.DataFrame(summary_rows, columns=["Concept", "Amount", "% of Revenue"])
