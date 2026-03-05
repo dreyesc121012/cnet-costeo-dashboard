@@ -891,27 +891,36 @@ st.plotly_chart(fig_gauge, use_container_width=True)
 # ============================================================
 st.subheader("📊 KPIs (Executive)")
 
-k1, k2, k3 = st.columns(3)
-k1.metric("Revenue (Total to Bill)", f"${income:,.2f}")
-k2.metric("Costs (Total Cost Real)", f"${cost:,.2f}", f"{p_cost*100:,.2f}%")
-k3.metric("Gross (Revenue - Cost)", f"${gross:,.2f}", f"{p_gross*100:,.2f}%")
+left, right = st.columns([2, 1], gap="large")
 
-if apply_fixed:
-    k4, k5, k6 = st.columns(3)
-    k4.metric("Fixed Expenses (Gasto Fijo)", f"${fixed_total:,.2f}", f"{p_fixed*100:,.2f}%")
-    k5.metric("Net (Gross - Fixed)", f"${net:,.2f}", f"{p_net*100:,.2f}%")
-    k6.metric("Total Management Fee", f"${mgmt_fee_total:,.2f}", f"{p_mgmt*100:,.2f}%")
-else:
-    k5, k6, k7 = st.columns(3)
-    k5.metric("Net", f"${net:,.2f}", f"{p_net*100:,.2f}%")
-    k6.metric("Total Management Fee", f"${mgmt_fee_total:,.2f}", f"{p_mgmt*100:,.2f}%")
-    k7.metric("", "", "")
+# --- LEFT SIDE KPIs ---
+with left:
+    # 1) Revenue
+    st.metric("Revenue (Total to Bill)", f"${income:,.2f}")
 
-f1, f2, f3 = st.columns(3)
-f1.metric("Royalty (5%)", f"${royalty_5_total:,.2f}", f"{p_roy5*100:,.2f}%")
-f2.metric("Royalty (3%) BGIS", f"${royalty_3_total:,.2f}" if apply_roy3 else "$0.00", f"{p_roy3*100:,.2f}%")
-f3.metric("New Total", f"${new_total:,.2f}", f"{p_new*100:,.2f}%")
+    # 2) Costs
+    st.metric("Costs (Total Cost Real)", f"${cost:,.2f}", f"{p_cost*100:,.2f}%")
 
+    # 3) Gross
+    st.metric("Gross (Revenue - Cost)", f"${gross:,.2f}", f"{p_gross*100:,.2f}%")
+
+    # 4) Fixed (only if applied)
+    if apply_fixed:
+        st.metric("Fixed Expenses (Gasto Fijo)", f"${fixed_total:,.2f}", f"{p_fixed*100:,.2f}%")
+
+    # 5) Net (always)
+    net_label = "Net (Gross - Fixed)" if apply_fixed else "Net"
+    st.metric(net_label, f"${net:,.2f}", f"{p_net*100:,.2f}%")
+
+# --- RIGHT SIDE KPIs ---
+with right:
+    st.metric("Total Management Fee", f"${mgmt_fee_total:,.2f}", f"{p_mgmt*100:,.2f}%")
+    st.metric("Royalty (5%)", f"${royalty_5_total:,.2f}", f"{p_roy5*100:,.2f}%")
+
+    # Royalty 3% only if applies (else show $0.00)
+    roy3_value = royalty_3_total if apply_roy3 else 0.0
+    roy3_delta = (p_roy3 * 100) if apply_roy3 else 0.0
+    st.metric("Royalty (3%) BGIS", f"${roy3_value:,.2f}", f"{roy3_delta:,.2f}%")
 # ============================================================
 # WATERFALL
 # ============================================================
