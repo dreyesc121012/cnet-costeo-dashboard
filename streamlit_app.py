@@ -854,7 +854,7 @@ yellow_zone = 0.05
 
 gross_margin = gross / income if income else 0
 net_margin   = net / income if income else 0
-final_margin = new_total / income if income else 0
+# final_margin = new_total / income if income else 0  # <- ya no se usa aquí
 
 def traffic_light(m, tgt):
     if m >= tgt + yellow_zone:
@@ -863,16 +863,18 @@ def traffic_light(m, tgt):
         return "🟡"
     return "🔴"
 
-c1, c2, c3 = st.columns(3)
+# ✅ SOLO 2 KPIs
+c1, c2 = st.columns(2)
 c1.metric("Gross Margin", f"{gross_margin:.1%}", f"{traffic_light(gross_margin, target)} vs {target:.0%}")
 c2.metric("Net Margin", f"{net_margin:.1%}", f"{traffic_light(net_margin, target)} vs {target:.0%}")
-c3.metric("Final Margin (after fees)", f"{final_margin:.1%}", f"{traffic_light(final_margin, target)} vs {target:.0%}")
 
-st.caption("Gauge: Final margin (after fees)")
+# ✅ Gauge ahora basado en NET MARGIN
+st.caption("Gauge: Net margin")
 gauge_max = 60
+
 fig_gauge = go.Figure(go.Indicator(
     mode="gauge+number",
-    value=float(final_margin * 100),
+    value=float(net_margin * 100),
     number={"suffix": "%"},
     gauge={
         "axis": {"range": [0, gauge_max]},
