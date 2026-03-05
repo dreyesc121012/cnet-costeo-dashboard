@@ -175,8 +175,8 @@ def read_real_master_from_bytes(excel_bytes: bytes) -> pd.DataFrame:
 
 def _pick_amount_column(df: pd.DataFrame):
     """
-    Try to find a numeric 'amount' column in a fixed-expenses sheet.
-    Falls back to the column with most numeric values.
+    Find an amount/cost column. Prefer columns whose name suggests 'amount',
+    otherwise pick the column with most numeric values.
     """
     for c in df.columns:
         cname = str(c).strip().lower()
@@ -193,11 +193,54 @@ def _pick_amount_column(df: pd.DataFrame):
             best_col = c
     return best_col
 
+def _pick_name_column(df: pd.DataFrame, amount_col):
+    """
+    Find the best 'name/description' column (text-like), excluding amount column.
+    """
+    preferred = [
+        "name", "concept", "description", "detail", "detalle",
+        "descripcion", "descripción", "account", "cuenta", "vendor", "proveedor"
+    ]
+    cols = [c for c in df.columns if c != amount_col]
+
+    for key in preferred:
+        for c in cols:
+            if key in str(c).strip().lower():
+                return c
+
+    best_col = None
+    best_score = -1
+    for c in cols:
+        s = df[c]
+        sn = pd.to_numeric(s, errors="coerce")
+        numeric_ratio = sn.notna().mean() if len(s) else 1.0
+        if numeric_ratio > 0.6:
+            continue
+
+        score = s.astype(str).str.strip().replace("nan", "").ne("").sum()
+        if score > best_score:
+            best_score = int(score)
+            best_col = c
+    return best_col
+
+def _pick_category_column(df: pd.DataFrame, amount_col, name_col):
+    """
+    Optional: find a category/account column different from name/amount.
+    """
+    preferred = ["category", "account", "type", "cuenta", "categoria", "categoría"]
+    cols = [c for c in df.columns if c not in (amount_col, name_col)]
+
+    for key in preferred:
+        for c in cols:
+            if key in str(c).strip().lower():
+                return c
+    return None
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_fixed_detail_from_bytes(excel_bytes: bytes, sheet_name: str) -> tuple[float, pd.DataFrame]:
     """
     Returns (fixed_total, fixed_detail_df) for a given sheet.
-    Attempts to read with headers; if that fails, reads raw and uses col index 2 as amount.
+    Always tries to return a detail with at least: Name + Amount.
     """
     # 1) header mode
     try:
@@ -213,16 +256,39 @@ def load_fixed_detail_from_bytes(excel_bytes: bytes, sheet_name: str) -> tuple[f
         fx["_Amount"] = pd.to_numeric(fx[amt_col], errors="coerce").fillna(0.0)
         fixed_total = float(fx["_Amount"].sum())
 
+        name_col = _pick_name_column(fx, amt_col)
+        cat_col = _pick_category_column(fx, amt_col, name_col)
+
         detail = fx.copy()
         detail = detail[detail["_Amount"] != 0].copy()
-        detail = detail.drop(columns=[c for c in detail.columns if str(c).startswith("Unnamed")], errors="ignore")
 
-        cols = detail.columns.tolist()
-        if "_Amount" in cols:
-            cols = ["_Amount"] + [c for c in cols if c != "_Amount"]
-            detail = detail[cols].rename(columns={"_Amount": "Amount"})
+        out_cols = []
+        if cat_col is not None:
+            out_cols.append(cat_col)
+        if name_col is not None:
+            out_cols.append(name_col)
 
-        return fixed_total, detail.reset_index(drop=True)
+        out = pd.DataFrame()
+        if out_cols:
+            out = detail[out_cols].copy()
+        else:
+            out["Name"] = ["(Unnamed)"] * len(detail)
+
+        out["Amount"] = detail["_Amount"].values
+
+        rename_map = {}
+        if cat_col is not None:
+            rename_map[cat_col] = "Category"
+        if name_col is not None:
+            rename_map[name_col] = "Name"
+        out = out.rename(columns=rename_map)
+
+        for c in out.columns:
+            if c != "Amount":
+                out[c] = out[c].astype(str)
+
+        out = out.reset_index(drop=True)
+        return fixed_total, out
 
     except Exception:
         pass
@@ -237,10 +303,24 @@ def load_fixed_detail_from_bytes(excel_bytes: bytes, sheet_name: str) -> tuple[f
     fx_raw["_Amount"] = pd.to_numeric(fx_raw.iloc[:, idx_amount], errors="coerce").fillna(0.0)
     fixed_total = float(fx_raw["_Amount"].sum())
 
-    detail = fx_raw.copy()
-    detail = detail[detail["_Amount"] != 0].copy()
-    detail = detail.rename(columns={"_Amount": "Amount"})
-    return fixed_total, detail.reset_index(drop=True)
+    detail = fx_raw[fx_raw["_Amount"] != 0].copy()
+
+    candidate_idxs = [i for i in range(detail.shape[1]) if i != idx_amount]
+    name_idx = candidate_idxs[0] if candidate_idxs else None
+    cat_idx = candidate_idxs[1] if len(candidate_idxs) >= 2 else None
+
+    out = pd.DataFrame()
+    if cat_idx is not None:
+        out["Category"] = detail.iloc[:, cat_idx].astype(str)
+    if name_idx is not None:
+        out["Name"] = detail.iloc[:, name_idx].astype(str)
+    else:
+        out["Name"] = ["(Unnamed)"] * len(detail)
+
+    out["Amount"] = detail["_Amount"].values
+    out = out.reset_index(drop=True)
+
+    return fixed_total, out
 
 def _norm(s: str) -> str:
     s = "" if s is None else str(s)
@@ -677,7 +757,7 @@ if c_roy3:
     df[c_roy3] = pd.to_numeric(df[c_roy3], errors="coerce")
 
 # ============================================================
-# ✅ FINAL BUSINESS RULES (UPDATED PER YOUR REQUEST)
+# ✅ FINAL BUSINESS RULES
 # 1) Fixed Expenses for Company:
 #    - 12433087 Canada Inc  -> sheet "Gasto Fijo"
 #    - 9359-6633 Quebec Inc -> sheet "Gasto Fijo 9359"
@@ -718,7 +798,7 @@ if len(companies) == 1:
 
 net = gross - (fixed_total if apply_fixed else 0.0)
 
-# --- Apply Royalty 3% when Company==9359-6633 Quebec Inc OR Client==BGIS (each ONLY if that filter results in a single value)
+# --- Apply Royalty 3% when Company==9359-6633 Quebec Inc OR Client==BGIS
 apply_roy3 = False
 clients = []
 
@@ -798,7 +878,6 @@ k1.metric("Revenue (Total to Bill)", f"${income:,.2f}")
 k2.metric("Costs (Total Cost Real)", f"${cost:,.2f}", f"{p_cost*100:,.2f}%")
 k3.metric("Gross (Revenue - Cost)", f"${gross:,.2f}", f"{p_gross*100:,.2f}%")
 
-# Row with Fixed/Net and Mgmt (NO Royalty here to avoid duplicates)
 if apply_fixed:
     k4, k5, k6 = st.columns(3)
     k4.metric("Fixed Expenses (Gasto Fijo)", f"${fixed_total:,.2f}", f"{p_fixed*100:,.2f}%")
@@ -808,9 +887,8 @@ else:
     k5, k6, k7 = st.columns(3)
     k5.metric("Net", f"${net:,.2f}", f"{p_net*100:,.2f}%")
     k6.metric("Total Management Fee", f"${mgmt_fee_total:,.2f}", f"{p_mgmt*100:,.2f}%")
-    k7.metric("", "", "")  # spacer
+    k7.metric("", "", "")
 
-# Fees row (Royalty 5% ONLY here; Royalty 3% only when applies)
 f1, f2, f3 = st.columns(3)
 f1.metric("Royalty (5%)", f"${royalty_5_total:,.2f}", f"{p_roy5*100:,.2f}%")
 f2.metric("Royalty (3%) BGIS", f"${royalty_3_total:,.2f}" if apply_roy3 else "$0.00", f"{p_roy3*100:,.2f}%")
@@ -849,7 +927,7 @@ if tc_r and tc_b and tc_v:
     t4.metric("% Budget Used", f"{pct_used*100:,.1f}%", f"Over: {pct_over*100:,.1f}% | Under: {pct_under*100:,.1f}%")
 
 # ============================================================
-# WATERFALL (hide Fixed step when not applied; include Roy3 when applied)
+# WATERFALL
 # ============================================================
 st.subheader("📉 Executive Waterfall")
 
@@ -1131,7 +1209,7 @@ else:
     st.info("Month/Year columns were not found in the filtered dataframe.")
 
 # ============================================================
-# ✅ FIXED EXPENSES DETAIL (only when applied)
+# ✅ FIXED EXPENSES DETAIL (only when applied) — SHOW NAME + AMOUNT
 # ============================================================
 if apply_fixed:
     st.divider()
@@ -1147,30 +1225,11 @@ if apply_fixed:
         if fixed_detail_df is None or fixed_detail_df.empty:
             st.info("No fixed-expenses detail rows found (or the sheet is empty).")
         else:
-            st.dataframe(sanitize_for_arrow(fixed_detail_df), use_container_width=True)
-
-            # Optional quick summary by a category-like column (if present)
-            possible_group_cols = ["Category", "Concept", "Account", "Type", "Descripción", "Descripcion", "Detalle"]
-            group_col = None
-            for gc in possible_group_cols:
-                if gc in fixed_detail_df.columns:
-                    group_col = gc
-                    break
-
-            if group_col and "Amount" in fixed_detail_df.columns:
-                try:
-                    gfx = fixed_detail_df.copy()
-                    gfx["Amount"] = pd.to_numeric(gfx["Amount"], errors="coerce").fillna(0.0)
-                    by_cat = (
-                        gfx.groupby(group_col, dropna=False)["Amount"]
-                           .sum()
-                           .reset_index()
-                           .sort_values("Amount", ascending=False)
-                    )
-                    st.caption(f"Summary by {group_col}")
-                    st.dataframe(sanitize_for_arrow(by_cat), use_container_width=True)
-                except Exception:
-                    pass
+            show_fx = fixed_detail_df.copy()
+            if "Amount" in show_fx.columns:
+                show_fx["Amount"] = pd.to_numeric(show_fx["Amount"], errors="coerce").fillna(0.0)
+                show_fx = show_fx.sort_values("Amount", ascending=False)
+            st.dataframe(sanitize_for_arrow(show_fx), use_container_width=True)
 
 # ============================================================
 # EXPORT PDF
