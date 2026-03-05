@@ -16,7 +16,9 @@ CLIENT_SECRET = st.secrets["CLIENT_SECRET"]
 TENANT_ID = st.secrets["TENANT_ID"]
 REDIRECT_URI = str(st.secrets["REDIRECT_URI"]).strip().rstrip("/")
 
-# Optional default Excel link
+# IMPORTANT:
+# - This can be EITHER a SharePoint/OneDrive *FOLDER* share link (recommended)
+#   OR a *FILE* share link (still works).
 DEFAULT_SHARED_URL = str(st.secrets.get("ONEDRIVE_SHARED_URL", "")).strip()
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
@@ -28,7 +30,6 @@ SHEET_INVOICING = "Invoicing"
 st.set_page_config(page_title="Invoices Control", layout="wide")
 st.title("📑 Invoice Category Control Dashboard")
 
-
 # ============================================================
 # HELPERS (URL params) - needed for MSAL redirect (?code=...)
 # ============================================================
@@ -38,20 +39,17 @@ def _get_query_params() -> dict:
         out = {}
         for k in qp.keys():
             v = qp.get(k)
-            # st.query_params values may already be strings
             if isinstance(v, list):
                 out[k] = v[0] if v else ""
             else:
                 out[k] = str(v) if v is not None else ""
         return out
     except Exception:
-        # compatibility
         try:
             qp = st.experimental_get_query_params()
             return {k: (v[0] if isinstance(v, list) and v else str(v)) for k, v in qp.items()}
         except Exception:
             return {}
-
 
 def _clear_query_params():
     try:
@@ -61,7 +59,6 @@ def _clear_query_params():
             st.experimental_set_query_params()
         except Exception:
             pass
-
 
 # ============================================================
 # MSAL APP
@@ -74,42 +71,55 @@ def get_msal_app():
         token_cache=None,
     )
 
-
 # ============================================================
-# OneDrive shared-link -> bytes (Graph)
+# Graph helpers
 # ============================================================
 def make_share_id(shared_url: str) -> str:
     b = base64.b64encode(shared_url.encode("utf-8")).decode("utf-8")
     b = b.rstrip("=").replace("/", "_").replace("+", "-")
     return "u!" + b
 
-
 def graph_get(url: str, access_token: str) -> requests.Response:
     return requests.get(url, headers={"Authorization": f"Bearer {access_token}"}, timeout=60)
 
+def graph_get_json(url: str, access_token: str) -> dict:
+    r = graph_get(url, access_token)
+    if r.status_code != 200:
+        raise RuntimeError(f"Graph error {r.status_code}\n{r.text}")
+    return r.json()
 
-def download_excel_bytes_from_shared_link(access_token: str, shared_url: str) -> bytes:
+def resolve_shared_link(access_token: str, shared_url: str) -> dict:
+    """
+    Returns driveItem metadata for a shared link (file OR folder).
+    """
     share_id = make_share_id(shared_url)
-
     meta_url = f"https://graph.microsoft.com/v1.0/shares/{share_id}/driveItem"
     meta = graph_get(meta_url, access_token)
     if meta.status_code != 200:
         raise RuntimeError(
             f"Error resolving shared link: {meta.status_code}\n{meta.text}\n\n"
-            "TIP: Make sure the link was created from Share -> Copy link and is accessible in your tenant."
+            "TIP: Use SharePoint/OneDrive → Share → Copy link (within your organization)."
         )
+    return meta.json()
 
-    meta_json = meta.json()
-    item_id = meta_json["id"]
-    drive_id = meta_json["parentReference"]["driveId"]
-
+def download_item_bytes(access_token: str, drive_id: str, item_id: str) -> bytes:
     content_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
-    file_r = graph_get(content_url, access_token)
-    if file_r.status_code != 200:
-        raise RuntimeError(f"Error downloading file: {file_r.status_code}\n{file_r.text}")
+    r = graph_get(content_url, access_token)
+    if r.status_code != 200:
+        raise RuntimeError(f"Error downloading file: {r.status_code}\n{r.text}")
+    return r.content
 
-    return file_r.content
+def list_children(access_token: str, drive_id: str, folder_item_id: str) -> list[dict]:
+    """
+    Lists children of a folder. (One page; if you have many files, we can add paging.)
+    """
+    url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{folder_item_id}/children?$top=999"
+    data = graph_get_json(url, access_token)
+    return data.get("value", [])
 
+def is_excel_name(name: str) -> bool:
+    n = (name or "").lower()
+    return n.endswith(".xlsx") or n.endswith(".xlsm") or n.endswith(".xls")
 
 # ============================================================
 # Utilities
@@ -120,33 +130,23 @@ def _norm(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip().lower()
     return s
 
-
 def find_col(df: pd.DataFrame, name: str):
     t = _norm(name)
-    # exact
     for c in df.columns:
         if _norm(c) == t:
             return c
-    # contains
     for c in df.columns:
         if t in _norm(c):
             return c
     return None
 
-
 def safe_num(s):
     return pd.to_numeric(s, errors="coerce").fillna(0)
 
-
 def get_excel_col_by_letter(df: pd.DataFrame, letter: str):
-    """
-    Excel column letter (A=1) -> 0-based pandas index.
-    F=6 => index 5, G=7 => 6, H=8 => 7
-    """
     letter = letter.strip().upper()
     if not re.fullmatch(r"[A-Z]+", letter):
         return None
-    # convert base-26 letters to number
     n = 0
     for ch in letter:
         n = n * 26 + (ord(ch) - ord("A") + 1)
@@ -154,7 +154,6 @@ def get_excel_col_by_letter(df: pd.DataFrame, letter: str):
     if idx < 0 or idx >= df.shape[1]:
         return None
     return df.columns[idx]
-
 
 # ============================================================
 # Read Excel (bytes -> dataframes)
@@ -164,11 +163,9 @@ def load_sheets_from_bytes(excel_bytes: bytes) -> tuple[pd.DataFrame, pd.DataFra
     xls = pd.ExcelFile(BytesIO(excel_bytes))
     payments = pd.read_excel(xls, sheet_name=SHEET_PAYMENTS)
     invoicing = pd.read_excel(xls, sheet_name=SHEET_INVOICING)
-
     payments.columns = [str(c).strip() for c in payments.columns]
     invoicing.columns = [str(c).strip() for c in invoicing.columns]
     return payments, invoicing
-
 
 # ============================================================
 # LOGIN FLOW
@@ -177,7 +174,6 @@ app = get_msal_app()
 qp = _get_query_params()
 
 if "token_result" not in st.session_state:
-    # Coming back from Microsoft with ?code=...
     if qp.get("code"):
         result = app.acquire_token_by_authorization_code(
             code=qp["code"],
@@ -193,7 +189,6 @@ if "token_result" not in st.session_state:
             st.code(result)
             st.stop()
 
-    # Not logged in yet
     st.warning("You are not signed in to OneDrive/SharePoint.")
     auth_url = app.get_authorization_request_url(scopes=SCOPES, redirect_uri=REDIRECT_URI)
     st.link_button("🔐 Sign in to OneDrive", auth_url)
@@ -208,37 +203,100 @@ if not access_token:
 
 st.success("✅ Connected to OneDrive/SharePoint")
 
-
 # ============================================================
-# SIDEBAR: Excel Source
+# SIDEBAR: Folder/File Source
 # ============================================================
-st.sidebar.header("📁 Excel Source")
+st.sidebar.header("📁 SharePoint Source")
 
 shared_url = st.sidebar.text_input(
-    "Paste OneDrive/SharePoint Excel share link",
+    "Paste SharePoint/OneDrive share link (FOLDER recommended)",
     value=DEFAULT_SHARED_URL,
-    help="From SharePoint/OneDrive: Share → Copy link (within your organization).",
+    help="SharePoint/OneDrive: Share → Copy link (within your organization). Use a FOLDER link to pick any Excel inside.",
 ).strip()
 
 col_sb1, col_sb2 = st.sidebar.columns(2)
 with col_sb1:
-    load_btn = st.button("📥 Load / Update", use_container_width=True)
+    refresh_btn = st.sidebar.button("🔄 Refresh list", use_container_width=True)
 with col_sb2:
-    if st.button("🔄 Reset cache", use_container_width=True):
+    if st.sidebar.button("🧹 Clear cache", use_container_width=True):
         st.session_state.pop("excel_bytes", None)
+        st.session_state.pop("selected_item_id", None)
         st.cache_data.clear()
         st.rerun()
 
 if not shared_url:
-    st.info("👈 Paste a OneDrive/SharePoint Excel share link in the sidebar to load data.")
+    st.info("👈 Paste a SharePoint/OneDrive share link in the sidebar.")
     st.stop()
 
-if load_btn or ("excel_bytes" not in st.session_state):
+# Resolve link (file or folder)
+try:
+    meta = resolve_shared_link(access_token, shared_url)
+except Exception as e:
+    st.error("Could not resolve the SharePoint link.")
+    st.code(str(e))
+    st.stop()
+
+drive_id = meta["parentReference"]["driveId"]
+root_item_id = meta["id"]
+is_folder = "folder" in meta  # Graph sets this when item is a folder
+
+# If folder: list excel files and allow selection
+selected_item_id = None
+selected_name = None
+
+if is_folder:
+    st.sidebar.subheader("📄 Excel files in folder")
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def cached_folder_excel_list(_drive_id: str, _folder_id: str, _shared_url: str, _access_token_marker: str):
+        # access_token_marker prevents weird caching across sessions; we do NOT store the token itself
+        children = list_children(access_token, _drive_id, _folder_id)
+        excels = [c for c in children if c.get("id") and is_excel_name(c.get("name", ""))]
+        excels.sort(key=lambda x: (x.get("name") or "").lower())
+        return excels
+
+    # marker avoids caching between users; do not expose token
+    marker = str(len(access_token))
+
+    excels = cached_folder_excel_list(drive_id, root_item_id, shared_url, marker)
+
+    if not excels:
+        st.warning("No Excel files found in this folder.")
+        st.stop()
+
+    names = [f["name"] for f in excels]
+    default_ix = 0
+    prev = st.session_state.get("selected_item_id")
+    if prev:
+        for i, f in enumerate(excels):
+            if f["id"] == prev:
+                default_ix = i
+                break
+
+    selected_name = st.sidebar.selectbox("Choose an Excel file", names, index=default_ix)
+    chosen = next(f for f in excels if f["name"] == selected_name)
+    selected_item_id = chosen["id"]
+
+else:
+    # Link points directly to a file
+    selected_item_id = root_item_id
+    selected_name = meta.get("name", "Selected file")
+    st.sidebar.caption(f"Using file: {selected_name}")
+
+# Download bytes if changed or not present
+needs_download = (
+    ("excel_bytes" not in st.session_state)
+    or (st.session_state.get("selected_item_id") != selected_item_id)
+    or refresh_btn
+)
+
+if needs_download:
     try:
-        st.info("📥 Downloading Excel from OneDrive/SharePoint…")
-        st.session_state.excel_bytes = download_excel_bytes_from_shared_link(access_token, shared_url)
+        st.info("📥 Downloading Excel from SharePoint/OneDrive…")
+        st.session_state.excel_bytes = download_item_bytes(access_token, drive_id, selected_item_id)
+        st.session_state.selected_item_id = selected_item_id
     except Exception as e:
-        st.error("Could not download the Excel from OneDrive/SharePoint.")
+        st.error("Could not download the selected Excel file.")
         st.code(str(e))
         st.stop()
 
@@ -280,30 +338,26 @@ actuals = (
 
 # ============================================================
 # BUILD BUDGETS (INVOICING)
-# - match by Building Address
-# - budget lines:
-#   A) "Labor Budget" column (by name, if exists)
-#   B) columns F, G, H (by letter) — used as additional budgets to compare (same building)
 # ============================================================
 inv_addr = find_col(invoicing_df, "Building Address")
 if not inv_addr:
-    # fallback: sometimes called Address / Building / Location
-    inv_addr = find_col(invoicing_df, "Address") or find_col(invoicing_df, "Building") or find_col(invoicing_df, "Location")
+    inv_addr = (
+        find_col(invoicing_df, "Address")
+        or find_col(invoicing_df, "Building")
+        or find_col(invoicing_df, "Location")
+    )
 
 labor_budget_col = find_col(invoicing_df, "Labor Budget")
-
 col_F = get_excel_col_by_letter(invoicing_df, "F")
 col_G = get_excel_col_by_letter(invoicing_df, "G")
 col_H = get_excel_col_by_letter(invoicing_df, "H")
 
-# Build a budgets dataframe in "long" format: Building Address, Category, Budget
 budgets_long = []
 
 if inv_addr:
     inv_base = invoicing_df.copy()
     inv_base[inv_addr] = inv_base[inv_addr].astype(str).str.strip()
 
-    # A) Labor Budget -> category "Labor"
     if labor_budget_col:
         b = inv_base[[inv_addr, labor_budget_col]].copy()
         b.columns = ["Building Address", "Budget"]
@@ -311,7 +365,6 @@ if inv_addr:
         b["Budget"] = safe_num(b["Budget"])
         budgets_long.append(b[["Building Address", "Category", "Budget"]])
 
-    # B) F/G/H -> categories "Budget F", "Budget G", "Budget H"
     for letter, colname in [("F", col_F), ("G", col_G), ("H", col_H)]:
         if colname:
             b = inv_base[[inv_addr, colname]].copy()
@@ -327,14 +380,11 @@ else:
     budgets = pd.DataFrame(columns=["Building Address", "Category", "Budget"])
 
 # ============================================================
-# COMPARE: Actual vs Budget
-# Rules:
-# - Compare Labor actuals vs Labor Budget (Category match "Labor")
-# - For other categories, you can still view actuals; budgets F/G/H shown separately
+# COMPARE
 # ============================================================
 compare = actuals.merge(budgets, on=["Building Address", "Category"], how="left")
 compare["Budget"] = compare["Budget"].fillna(0)
-compare["Variance"] = compare["Budget"] - compare["Actual"]  # positive = under spend, negative = over
+compare["Variance"] = compare["Budget"] - compare["Actual"]
 compare["% Used"] = compare.apply(lambda r: (r["Actual"] / r["Budget"]) if r["Budget"] else 0.0, axis=1)
 
 # ============================================================
@@ -383,7 +433,6 @@ st.dataframe(
 # ============================================================
 st.subheader("📊 Charts")
 
-# Top categories by actual
 top = view.groupby("Category", as_index=False).agg(Actual=("Actual", "sum"), Budget=("Budget", "sum"))
 top = top.sort_values("Actual", ascending=False).head(20)
 
@@ -395,10 +444,14 @@ fig1 = px.bar(
 )
 st.plotly_chart(fig1, use_container_width=True)
 
-# Actual vs Budget by category (only where budget exists)
 top2 = top[top["Budget"] > 0].copy()
 if not top2.empty:
-    top2_m = top2.melt(id_vars=["Category"], value_vars=["Actual", "Budget"], var_name="Type", value_name="Amount")
+    top2_m = top2.melt(
+        id_vars=["Category"],
+        value_vars=["Actual", "Budget"],
+        var_name="Type",
+        value_name="Amount",
+    )
     fig2 = px.bar(
         top2_m,
         x="Category",
@@ -412,9 +465,11 @@ else:
     st.info("No budget columns detected/matched yet (Labor Budget or F/G/H). Budgets are currently 0.")
 
 # ============================================================
-# DIAGNOSTICS (optional)
+# DIAGNOSTICS
 # ============================================================
-with st.expander("🛠 Diagnostics (detected columns)"):
+with st.expander("🛠 Diagnostics"):
+    st.write("Selected Excel:", selected_name)
+    st.write("Link type:", "FOLDER" if is_folder else "FILE")
     st.write("Payments columns:", list(payments_df.columns))
     st.write("Invoicing columns:", list(invoicing_df.columns))
     st.write("Detected in Payments:", {"Building Address": c_addr, "Category": c_cat, "Amount without taxes": c_amt})
