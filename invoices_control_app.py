@@ -1,6 +1,7 @@
 import base64
 from io import BytesIO
 import re
+from typing import List, Dict, Optional
 
 import pandas as pd
 import streamlit as st
@@ -11,15 +12,21 @@ import plotly.express as px
 # ============================================================
 # CONFIG (Secrets)
 # ============================================================
-CLIENT_ID = st.secrets["CLIENT_ID"]
-CLIENT_SECRET = st.secrets["CLIENT_SECRET"]
-TENANT_ID = st.secrets["TENANT_ID"]
+CLIENT_ID = str(st.secrets["CLIENT_ID"]).strip()
+CLIENT_SECRET = str(st.secrets["CLIENT_SECRET"]).strip()
+TENANT_ID = str(st.secrets["TENANT_ID"]).strip()
+
+# MUST match Azure App Registration Redirect URI EXACTLY (same URL)
 REDIRECT_URI = str(st.secrets["REDIRECT_URI"]).strip().rstrip("/")
 
-# IMPORTANT:
-# - This can be EITHER a SharePoint/OneDrive *FOLDER* share link (recommended)
-#   OR a *FILE* share link (still works).
+# Optional: default SharePoint/OneDrive *FOLDER* (recommended) OR *FILE* share link
 DEFAULT_SHARED_URL = str(st.secrets.get("ONEDRIVE_SHARED_URL", "")).strip()
+
+# Optional: force tenant-domain experience (recommended)
+# Example: "groupcastillo.com" or "groupcastillo.onmicrosoft.com"
+DOMAIN_HINT = str(st.secrets.get("DOMAIN_HINT", "")).strip()
+# Optional: pre-fill login email, e.g. "reports@groupcastillo.com"
+LOGIN_HINT = str(st.secrets.get("LOGIN_HINT", "")).strip()
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 SCOPES = ["User.Read", "Files.Read.All"]
@@ -31,7 +38,7 @@ st.set_page_config(page_title="Invoices Control", layout="wide")
 st.title("📑 Invoice Category Control Dashboard")
 
 # ============================================================
-# HELPERS (URL params) - needed for MSAL redirect (?code=...)
+# HELPERS (URL params) - MSAL redirect (?code=...)
 # ============================================================
 def _get_query_params() -> dict:
     try:
@@ -109,13 +116,17 @@ def download_item_bytes(access_token: str, drive_id: str, item_id: str) -> bytes
         raise RuntimeError(f"Error downloading file: {r.status_code}\n{r.text}")
     return r.content
 
-def list_children(access_token: str, drive_id: str, folder_item_id: str) -> list[dict]:
+def list_children_all(access_token: str, drive_id: str, folder_item_id: str) -> List[Dict]:
     """
-    Lists children of a folder. (One page; if you have many files, we can add paging.)
+    Lists ALL children of a folder (handles paging).
     """
-    url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{folder_item_id}/children?$top=999"
-    data = graph_get_json(url, access_token)
-    return data.get("value", [])
+    url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{folder_item_id}/children?$top=200"
+    all_items = []
+    while url:
+        data = graph_get_json(url, access_token)
+        all_items.extend(data.get("value", []))
+        url = data.get("@odata.nextLink")
+    return all_items
 
 def is_excel_name(name: str) -> bool:
     n = (name or "").lower()
@@ -174,6 +185,7 @@ app = get_msal_app()
 qp = _get_query_params()
 
 if "token_result" not in st.session_state:
+    # Coming back from Microsoft with ?code=...
     if qp.get("code"):
         result = app.acquire_token_by_authorization_code(
             code=qp["code"],
@@ -190,8 +202,23 @@ if "token_result" not in st.session_state:
             st.stop()
 
     st.warning("You are not signed in to OneDrive/SharePoint.")
-    auth_url = app.get_authorization_request_url(scopes=SCOPES, redirect_uri=REDIRECT_URI)
-    st.link_button("🔐 Sign in to OneDrive", auth_url)
+
+    # Force tenant + nudge domain/login
+    extra_qp = {
+        "prompt": "select_account",  # forces account picker (helps avoid personal cache)
+    }
+    if DOMAIN_HINT:
+        extra_qp["domain_hint"] = DOMAIN_HINT
+    if LOGIN_HINT:
+        extra_qp["login_hint"] = LOGIN_HINT
+
+    auth_url = app.get_authorization_request_url(
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI,
+        extra_query_parameters=extra_qp,
+    )
+    st.link_button("🔐 Sign in to OneDrive (Company)", auth_url)
+    st.caption(f"Redirect URI used: {REDIRECT_URI}")
     st.stop()
 
 token_result = st.session_state.token_result
@@ -201,7 +228,7 @@ if not access_token:
     st.session_state.pop("token_result", None)
     st.stop()
 
-st.success("✅ Connected to OneDrive/SharePoint")
+st.success("✅ Connected to OneDrive/SharePoint (Company Tenant)")
 
 # ============================================================
 # SIDEBAR: Folder/File Source
@@ -240,24 +267,21 @@ drive_id = meta["parentReference"]["driveId"]
 root_item_id = meta["id"]
 is_folder = "folder" in meta  # Graph sets this when item is a folder
 
-# If folder: list excel files and allow selection
-selected_item_id = None
-selected_name = None
+selected_item_id: Optional[str] = None
+selected_name: Optional[str] = None
 
 if is_folder:
     st.sidebar.subheader("📄 Excel files in folder")
 
     @st.cache_data(ttl=300, show_spinner=False)
-    def cached_folder_excel_list(_drive_id: str, _folder_id: str, _shared_url: str, _access_token_marker: str):
-        # access_token_marker prevents weird caching across sessions; we do NOT store the token itself
-        children = list_children(access_token, _drive_id, _folder_id)
+    def cached_folder_excel_list(_drive_id: str, _folder_id: str, _shared_url: str, _marker: str):
+        children = list_children_all(access_token, _drive_id, _folder_id)
         excels = [c for c in children if c.get("id") and is_excel_name(c.get("name", ""))]
         excels.sort(key=lambda x: (x.get("name") or "").lower())
         return excels
 
-    # marker avoids caching between users; do not expose token
-    marker = str(len(access_token))
-
+    # marker prevents cross-user caching without storing token
+    marker = f"{len(access_token)}-{TENANT_ID[-6:]}"
     excels = cached_folder_excel_list(drive_id, root_item_id, shared_url, marker)
 
     if not excels:
@@ -278,12 +302,10 @@ if is_folder:
     selected_item_id = chosen["id"]
 
 else:
-    # Link points directly to a file
     selected_item_id = root_item_id
     selected_name = meta.get("name", "Selected file")
     st.sidebar.caption(f"Using file: {selected_name}")
 
-# Download bytes if changed or not present
 needs_download = (
     ("excel_bytes" not in st.session_state)
     or (st.session_state.get("selected_item_id") != selected_item_id)
@@ -468,6 +490,7 @@ else:
 # DIAGNOSTICS
 # ============================================================
 with st.expander("🛠 Diagnostics"):
+    st.write("Redirect URI used:", REDIRECT_URI)
     st.write("Selected Excel:", selected_name)
     st.write("Link type:", "FOLDER" if is_folder else "FILE")
     st.write("Payments columns:", list(payments_df.columns))
