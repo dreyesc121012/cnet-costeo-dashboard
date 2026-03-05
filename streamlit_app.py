@@ -854,7 +854,7 @@ yellow_zone = 0.05
 
 gross_margin = gross / income if income else 0
 net_margin   = net / income if income else 0
-# final_margin = new_total / income if income else 0  # <- ya no se usa aquí
+final_margin = new_total / income if income else 0   # ✅ NECESARIO para el PDF
 
 def traffic_light(m, tgt):
     if m >= tgt + yellow_zone:
@@ -863,12 +863,12 @@ def traffic_light(m, tgt):
         return "🟡"
     return "🔴"
 
-# ✅ SOLO 2 KPIs
+# ✅ SOLO 2 KPIs EN PANTALLA
 c1, c2 = st.columns(2)
 c1.metric("Gross Margin", f"{gross_margin:.1%}", f"{traffic_light(gross_margin, target)} vs {target:.0%}")
 c2.metric("Net Margin", f"{net_margin:.1%}", f"{traffic_light(net_margin, target)} vs {target:.0%}")
 
-# ✅ Gauge ahora basado en NET MARGIN
+# ✅ Gauge basado en Net Margin
 st.caption("Gauge: Net margin")
 gauge_max = 60
 
@@ -887,7 +887,6 @@ fig_gauge = go.Figure(go.Indicator(
     }
 ))
 st.plotly_chart(fig_gauge, use_container_width=True)
-
 # ============================================================
 # KPIs (Executive)
 # ============================================================
