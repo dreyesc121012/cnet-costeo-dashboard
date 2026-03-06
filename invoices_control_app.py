@@ -232,17 +232,19 @@ qp = _get_query_params()
 
 if "token_result" not in st.session_state:
     # Returning from Microsoft with ?code=...
-    if qp.get("code"):
+ code = qp.get("code")
+
+if code:
         result = app.acquire_token_by_authorization_code(
-            code=qp["code"],
+            code=code,
             scopes=SCOPES,
             redirect_uri=REDIRECT_URI,
         )
 
         if "access_token" in result:
-            st.session_state.token_result = result
-            _clear_query_params()
-            st.rerun()
+          st.session_state.token_result = result
+st.query_params.clear()
+st.rerun()
         else:
             st.error("Could not obtain access token.")
             st.code(str(result))
@@ -259,12 +261,13 @@ if "token_result" not in st.session_state:
     if LOGIN_HINT:
         extra_qp["login_hint"] = LOGIN_HINT
 
-    auth_url = app.get_authorization_request_url(
-        scopes=SCOPES,
-        redirect_uri=REDIRECT_URI,
-        extra_query_parameters=extra_qp,
-    )
-
+   auth_url = app.get_authorization_request_url(
+    scopes=SCOPES,
+    redirect_uri=REDIRECT_URI,
+    prompt="login",
+    response_mode="query",
+    extra_query_parameters=extra_qp,
+)
     st.link_button("🔐 Sign in with Microsoft (Company)", auth_url)
     st.caption(f"Redirect URI used: {REDIRECT_URI}")
     st.stop()
