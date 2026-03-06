@@ -94,6 +94,15 @@ def status_semaphore(pct_used: float, budget: float, real: float) -> str:
         return "🟢 On Track"
     return "🔴 Over Budget"
 
+STATUS_COLOR_MAP = {
+    "🔴 No Real": "#E53935",
+    "🟡 Below 80%": "#FBC02D",
+    "🟢 On Track": "#43A047",
+    "🔴 Over Budget": "#B71C1C",
+    "⚪ No Budget": "#9E9E9E",
+    "⚪ N/A": "#BDBDBD",
+}
+
 # ============================================================
 # MSAL APP
 # ============================================================
@@ -247,6 +256,7 @@ def load_sheets_from_bytes(excel_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFra
     ]
     invoicing_expected = [
         "Building Address",
+        "Company",
         "Labor Budget",
         "Supplies Budget",
         "Equipment Budget",
@@ -479,6 +489,8 @@ if not inv_addr:
         or find_col(invoicing_df, "Location")
     )
 
+inv_company = find_col(invoicing_df, "Company")
+
 labor_budget_col = find_col(invoicing_df, "Labor Budget")
 supplies_budget_col = find_col(invoicing_df, "Supplies Budget")
 equipment_budget_col = find_col(invoicing_df, "Equipment Budget")
@@ -502,6 +514,12 @@ if not inv_addr:
 inv_base = invoicing_df.copy()
 inv_base[inv_addr] = inv_base[inv_addr].astype(str).str.strip()
 
+if inv_company:
+    inv_base[inv_company] = inv_base[inv_company].astype(str).str.strip()
+else:
+    inv_base["__Company__"] = "Unassigned"
+    inv_company = "__Company__"
+
 budget_rows = []
 
 category_budget_map = [
@@ -513,17 +531,17 @@ category_budget_map = [
 
 for category_name, budget_col in category_budget_map:
     if budget_col:
-        b = inv_base[[inv_addr, budget_col]].copy()
-        b.columns = ["Building Address", "Budget"]
+        b = inv_base[[inv_addr, inv_company, budget_col]].copy()
+        b.columns = ["Building Address", "Company", "Budget"]
         b["Category"] = category_name
         b["Budget"] = safe_num(b["Budget"])
-        budget_rows.append(b[["Building Address", "Category", "Budget"]])
+        budget_rows.append(b[["Building Address", "Company", "Category", "Budget"]])
 
 if budget_rows:
     budgets = pd.concat(budget_rows, ignore_index=True)
-    budgets = budgets.groupby(["Building Address", "Category"], as_index=False)["Budget"].sum()
+    budgets = budgets.groupby(["Building Address", "Company", "Category"], as_index=False)["Budget"].sum()
 else:
-    budgets = pd.DataFrame(columns=["Building Address", "Category", "Budget"])
+    budgets = pd.DataFrame(columns=["Building Address", "Company", "Category", "Budget"])
 
 # ============================================================
 # PAYMENTS: ONLY ROWS WITH CATEGORY
@@ -580,7 +598,7 @@ compare["Status"] = compare.apply(
 # BUILDING SUMMARY
 # ============================================================
 building_summary = (
-    compare.groupby("Building Address", as_index=False)
+    compare.groupby(["Building Address", "Company"], as_index=False)
     .agg(
         Real=("Real", "sum"),
         Budget=("Budget", "sum"),
@@ -603,6 +621,9 @@ building_summary["Status"] = building_summary.apply(
 # ============================================================
 st.sidebar.header("🔎 Filters")
 
+all_companies = sorted(compare["Company"].dropna().unique().tolist())
+sel_companies = st.sidebar.multiselect("Company", all_companies, default=[])
+
 all_buildings = sorted(compare["Building Address"].dropna().unique().tolist())
 sel_buildings = st.sidebar.multiselect("Building Address", all_buildings, default=[])
 
@@ -613,6 +634,8 @@ all_statuses = sorted(compare["Status"].dropna().unique().tolist())
 sel_statuses = st.sidebar.multiselect("Status", all_statuses, default=[])
 
 view = compare.copy()
+if sel_companies:
+    view = view[view["Company"].isin(sel_companies)]
 if sel_buildings:
     view = view[view["Building Address"].isin(sel_buildings)]
 if sel_categories:
@@ -621,6 +644,8 @@ if sel_statuses:
     view = view[view["Status"].isin(sel_statuses)]
 
 building_view = building_summary.copy()
+if sel_companies:
+    building_view = building_view[building_view["Company"].isin(sel_companies)]
 if sel_buildings:
     building_view = building_view[building_view["Building Address"].isin(sel_buildings)]
 if sel_statuses:
@@ -640,21 +665,26 @@ missing_real = building_view[
     (building_view["Budget"] > 0) & (building_view["Real"] <= 0)
 ].copy()
 
-# top row: KPIs
+# highest budgets first
+missing_real = missing_real.sort_values(
+    ["Budget", "Pending_to_Reach_Budget"],
+    ascending=[False, False]
+)
+
+# KPI row
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Total Real", fmt_currency(total_real))
 k2.metric("Total Budget", fmt_currency(total_budget))
 k3.metric("Budget Utilization", fmt_percent_ratio(overall_used))
 k4.metric("Pending to Reach Budget", fmt_currency(pending_total))
 
-# right-side breakdown style using columns
 left_col, right_col = st.columns([2.2, 1])
 
 with left_col:
     st.markdown("### 🚨 Priority Addresses with No Real Yet")
     if not missing_real.empty:
         missing_real_display = missing_real[
-            ["Status", "Building Address", "Real", "Budget", "Pending_to_Reach_Budget", "% Used"]
+            ["Status", "Company", "Building Address", "Real", "Budget", "Pending_to_Reach_Budget", "% Used"]
         ].copy()
 
         st.dataframe(
@@ -676,6 +706,7 @@ with right_col:
         view.groupby("Status", as_index=False)
         .agg(
             Buildings=("Building Address", "nunique"),
+            Companies=("Company", "nunique"),
             Real=("Real", "sum"),
             Budget=("Budget", "sum"),
             Pending=("Pending to Reach Budget", "sum"),
@@ -699,10 +730,44 @@ with right_col:
             names="Status",
             values="Budget",
             title="Budget by Status",
+            color="Status",
+            color_discrete_map=STATUS_COLOR_MAP,
         )
         st.plotly_chart(fig_status, use_container_width=True)
     else:
         st.info("No data available for selected statuses.")
+
+# ============================================================
+# COMPANY BREAKDOWN
+# ============================================================
+st.subheader("🏢 Company Breakdown")
+
+company_breakdown = (
+    view.groupby("Company", as_index=False)
+    .agg(
+        Real=("Real", "sum"),
+        Budget=("Budget", "sum"),
+        Pending=("Pending to Reach Budget", "sum"),
+        Buildings=("Building Address", "nunique"),
+    )
+    .sort_values("Budget", ascending=False)
+)
+
+company_breakdown["% Used"] = company_breakdown.apply(
+    lambda r: (r["Real"] / r["Budget"]) if r["Budget"] else 0.0,
+    axis=1,
+)
+
+st.dataframe(
+    company_breakdown.style.format({
+        "Real": fmt_currency,
+        "Budget": fmt_currency,
+        "Pending": fmt_currency,
+        "% Used": fmt_percent_ratio,
+    }),
+    use_container_width=True,
+    hide_index=True,
+)
 
 # ============================================================
 # CATEGORY DETAIL TABLE
@@ -710,7 +775,7 @@ with right_col:
 st.subheader("📋 Real vs Budget (by Building & Category)")
 
 detail_view_display = view[
-    ["Status", "Building Address", "Category", "Real", "Budget", "Variance", "% Used", "Pending to Reach Budget"]
+    ["Status", "Company", "Building Address", "Category", "Real", "Budget", "Variance", "% Used", "Pending to Reach Budget"]
 ].copy()
 
 st.dataframe(
@@ -737,7 +802,7 @@ building_view = building_view.sort_values(
 
 st.dataframe(
     building_view[
-        ["Status", "Building Address", "Real", "Budget", "Variance", "Pending_to_Reach_Budget", "% Used"]
+        ["Status", "Company", "Building Address", "Real", "Budget", "Variance", "Pending_to_Reach_Budget", "% Used"]
     ].style.format({
         "Real": fmt_currency,
         "Budget": fmt_currency,
@@ -819,6 +884,7 @@ with st.expander("🛠 Diagnostics"):
         "Detected in Invoicing:",
         {
             "Building Address": inv_addr,
+            "Company": inv_company,
             "Labor Budget": labor_budget_col,
             "Supplies Budget": supplies_budget_col,
             "Equipment Budget": equipment_budget_col,
