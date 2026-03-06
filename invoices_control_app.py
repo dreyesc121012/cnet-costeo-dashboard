@@ -57,7 +57,6 @@ def get_query_params_compat() -> dict:
         except Exception:
             return {}
 
-
 def clear_query_params_compat():
     try:
         st.query_params.clear()
@@ -67,6 +66,20 @@ def clear_query_params_compat():
         except Exception:
             pass
 
+# ============================================================
+# FORMATTERS
+# ============================================================
+def fmt_currency(x) -> str:
+    try:
+        return f"${float(x):,.2f}"
+    except Exception:
+        return "$0.00"
+
+def fmt_percent_ratio(x) -> str:
+    try:
+        return f"{float(x) * 100:,.2f}%"
+    except Exception:
+        return "0.00%"
 
 # ============================================================
 # MSAL APP
@@ -79,7 +92,6 @@ def get_msal_app():
         token_cache=None,
     )
 
-
 # ============================================================
 # GRAPH HELPERS
 # ============================================================
@@ -90,13 +102,11 @@ def graph_get(url: str, access_token: str) -> requests.Response:
         timeout=60,
     )
 
-
 def graph_get_json(url: str, access_token: str) -> dict:
     r = graph_get(url, access_token)
     if r.status_code != 200:
         raise RuntimeError(f"Graph error {r.status_code}\n{r.text}")
     return r.json()
-
 
 def get_me(access_token: str) -> dict:
     r = requests.get(
@@ -108,10 +118,8 @@ def get_me(access_token: str) -> dict:
         raise RuntimeError(f"Graph /me error {r.status_code}\n{r.text}")
     return r.json()
 
-
 def get_user_email(me: dict) -> str:
     return (me.get("mail") or me.get("userPrincipalName") or "").strip().lower()
-
 
 def is_allowed_user(me: dict) -> bool:
     email = get_user_email(me)
@@ -119,12 +127,10 @@ def is_allowed_user(me: dict) -> bool:
         return False
     return email.endswith(f"@{ALLOWED_DOMAIN}")
 
-
 def make_share_id(shared_url: str) -> str:
     b = base64.b64encode(shared_url.encode("utf-8")).decode("utf-8")
     b = b.rstrip("=").replace("/", "_").replace("+", "-")
     return "u!" + b
-
 
 def resolve_shared_link(access_token: str, shared_url: str) -> dict:
     share_id = make_share_id(shared_url)
@@ -137,14 +143,12 @@ def resolve_shared_link(access_token: str, shared_url: str) -> dict:
         )
     return meta.json()
 
-
 def download_item_bytes(access_token: str, drive_id: str, item_id: str) -> bytes:
     content_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
     r = graph_get(content_url, access_token)
     if r.status_code != 200:
         raise RuntimeError(f"Error downloading file: {r.status_code}\n{r.text}")
     return r.content
-
 
 def list_children_all(access_token: str, drive_id: str, folder_item_id: str) -> List[Dict]:
     url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{folder_item_id}/children?$top=200"
@@ -155,11 +159,9 @@ def list_children_all(access_token: str, drive_id: str, folder_item_id: str) -> 
         url = data.get("@odata.nextLink")
     return all_items
 
-
 def is_excel_name(name: str) -> bool:
     n = (name or "").lower()
     return n.endswith(".xlsx") or n.endswith(".xlsm") or n.endswith(".xls")
-
 
 # ============================================================
 # UTILITIES
@@ -169,7 +171,6 @@ def _norm(s: str) -> str:
     s = s.replace("\u00A0", " ")
     s = re.sub(r"\s+", " ", s).strip().lower()
     return s
-
 
 def find_col(df: pd.DataFrame, name: str):
     t = _norm(name)
@@ -181,10 +182,8 @@ def find_col(df: pd.DataFrame, name: str):
             return c
     return None
 
-
 def safe_num(s):
     return pd.to_numeric(s, errors="coerce").fillna(0)
-
 
 def get_excel_col_by_letter(df: pd.DataFrame, letter: str):
     letter = letter.strip().upper()
@@ -198,7 +197,6 @@ def get_excel_col_by_letter(df: pd.DataFrame, letter: str):
         return None
     return df.columns[idx]
 
-
 def _score_header_row(row_values: List[str], expected_keywords: List[str]) -> int:
     normalized = [_norm(v) for v in row_values]
     score = 0
@@ -208,11 +206,9 @@ def _score_header_row(row_values: List[str], expected_keywords: List[str]) -> in
             score += 1
     return score
 
-
 def detect_header_row(raw_df: pd.DataFrame, expected_keywords: List[str], max_rows: int = 15) -> int:
     best_row = 0
     best_score = -1
-
     rows_to_check = min(max_rows, len(raw_df))
     for i in range(rows_to_check):
         row_values = raw_df.iloc[i].fillna("").astype(str).tolist()
@@ -220,9 +216,7 @@ def detect_header_row(raw_df: pd.DataFrame, expected_keywords: List[str], max_ro
         if score > best_score:
             best_score = score
             best_row = i
-
     return best_row
-
 
 def read_sheet_with_detected_header(
     xls: pd.ExcelFile,
@@ -235,7 +229,6 @@ def read_sheet_with_detected_header(
     df = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
     df.columns = [str(c).strip() for c in df.columns]
     return df, header_row
-
 
 # ============================================================
 # READ EXCEL
@@ -268,7 +261,6 @@ def load_sheets_from_bytes(excel_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFra
 
     return payments, invoicing, payments_header_row, invoicing_header_row
 
-
 @st.cache_data(ttl=300, show_spinner=False)
 def cached_folder_excel_list(
     access_token: str,
@@ -282,7 +274,6 @@ def cached_folder_excel_list(
     excels = [c for c in children if c.get("id") and is_excel_name(c.get("name", ""))]
     excels.sort(key=lambda x: (x.get("name") or "").lower())
     return excels
-
 
 # ============================================================
 # AUTHENTICATION FLOW
@@ -356,6 +347,9 @@ if not is_allowed_user(me):
     st.session_state.pop("token_result", None)
     st.stop()
 
+st.sidebar.header("📁 SharePoint Source")
+st.sidebar.success(f"Logged in as {signed_in_email}")
+
 st.success(f"✅ Signed in as {signed_in_email}")
 
 if st.button("🚪 Sign out"):
@@ -369,9 +363,6 @@ if st.button("🚪 Sign out"):
 # ============================================================
 # SIDEBAR: Folder/File Source
 # ============================================================
-st.sidebar.header("📁 SharePoint Source")
-st.sidebar.success(f"Logged in as {signed_in_email}")
-
 shared_url = st.sidebar.text_input(
     "Paste SharePoint/OneDrive share link (FOLDER recommended)",
     value=DEFAULT_SHARED_URL,
@@ -565,64 +556,182 @@ if sel_categories:
     view = view[view["Category"].isin(sel_categories)]
 
 # ============================================================
-# KPIs
+# EXECUTIVE SUMMARY
 # ============================================================
-st.subheader("📌 KPIs")
+st.subheader("📌 Executive Summary")
+
+building_summary = (
+    compare.groupby("Building Address", as_index=False)
+    .agg(
+        Actual=("Actual", "sum"),
+        Budget=("Budget", "sum"),
+    )
+)
+
+building_summary["Variance"] = building_summary["Budget"] - building_summary["Actual"]
+building_summary["% Used"] = building_summary.apply(
+    lambda r: (r["Actual"] / r["Budget"]) if r["Budget"] else 0.0,
+    axis=1,
+)
+building_summary["Pending to Reach Budget"] = (building_summary["Budget"] - building_summary["Actual"]).clip(lower=0)
+
+missing_actual = building_summary[
+    (building_summary["Budget"] > 0) & (building_summary["Actual"] <= 0)
+].copy()
+
+under_billed = building_summary[
+    (building_summary["Budget"] > 0) & (building_summary["Actual"] < building_summary["Budget"])
+].copy()
+
+under_billed = under_billed.sort_values(
+    ["Pending to Reach Budget", "Budget"],
+    ascending=[False, False]
+)
 
 total_actual = float(view["Actual"].sum())
 total_budget = float(view["Budget"].sum())
 total_var = total_budget - total_actual
+overall_used = (total_actual / total_budget) if total_budget else 0.0
+pending_total = max(total_budget - total_actual, 0)
 
-k1, k2, k3 = st.columns(3)
-k1.metric("Total Actual (no taxes)", f"${total_actual:,.2f}")
-k2.metric("Total Budget (matched categories)", f"${total_budget:,.2f}")
-status = "🟢 Under budget" if total_var > 0 else ("🔴 Over budget" if total_var < 0 else "⚪ On budget")
-k3.metric("Variance (Budget - Actual)", f"${total_var:,.2f}", status)
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Total Actual", fmt_currency(total_actual))
+k2.metric("Total Budget", fmt_currency(total_budget))
+k3.metric("Budget Utilization", fmt_percent_ratio(overall_used))
+k4.metric("Pending to Reach Budget", fmt_currency(pending_total))
+
+st.markdown("### 🎯 Priority Addresses with **No Actual Yet**")
+if not missing_actual.empty:
+    missing_actual_display = missing_actual[
+        ["Building Address", "Actual", "Budget", "Pending to Reach Budget", "% Used"]
+    ].copy()
+
+    st.dataframe(
+        missing_actual_display.style.format({
+            "Actual": fmt_currency,
+            "Budget": fmt_currency,
+            "Pending to Reach Budget": fmt_currency,
+            "% Used": fmt_percent_ratio,
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+else:
+    st.success("All budgeted addresses already have some Actual recorded.")
+
+st.markdown("### 📍 Top Addresses Under Budget (Need More Invoices to Reach 100%)")
+top_under_billed = under_billed.head(15).copy()
+if not top_under_billed.empty:
+    st.dataframe(
+        top_under_billed[
+            ["Building Address", "Actual", "Budget", "Pending to Reach Budget", "% Used"]
+        ].style.format({
+            "Actual": fmt_currency,
+            "Budget": fmt_currency,
+            "Pending to Reach Budget": fmt_currency,
+            "% Used": fmt_percent_ratio,
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+else:
+    st.success("No under-budget addresses found.")
 
 # ============================================================
-# TABLE
+# DETAIL TABLE
 # ============================================================
 st.subheader("📋 Actual vs Budget (by Building & Category)")
+
+detail_view = view.copy()
+detail_view_display = detail_view[
+    ["Building Address", "Category", "Actual", "Budget", "Variance", "% Used"]
+].copy()
+
 st.dataframe(
-    view.sort_values(["Building Address", "Category"]),
-    use_container_width=True
+    detail_view_display.style.format({
+        "Actual": fmt_currency,
+        "Budget": fmt_currency,
+        "Variance": fmt_currency,
+        "% Used": fmt_percent_ratio,
+    }),
+    use_container_width=True,
+    hide_index=True,
+)
+
+# ============================================================
+# BUILDING SUMMARY TABLE
+# ============================================================
+st.subheader("🏢 Building-Level Budget Tracking")
+
+building_view = building_summary.copy()
+if sel_buildings:
+    building_view = building_view[building_view["Building Address"].isin(sel_buildings)]
+
+building_view = building_view.sort_values(
+    ["Pending to Reach Budget", "Budget"],
+    ascending=[False, False]
+)
+
+st.dataframe(
+    building_view[
+        ["Building Address", "Actual", "Budget", "Variance", "Pending to Reach Budget", "% Used"]
+    ].style.format({
+        "Actual": fmt_currency,
+        "Budget": fmt_currency,
+        "Variance": fmt_currency,
+        "Pending to Reach Budget": fmt_currency,
+        "% Used": fmt_percent_ratio,
+    }),
+    use_container_width=True,
+    hide_index=True,
 )
 
 # ============================================================
 # CHARTS
 # ============================================================
-st.subheader("📊 Charts")
+st.subheader("📊 Executive Charts")
 
-top = view.groupby("Category", as_index=False).agg(Actual=("Actual", "sum"), Budget=("Budget", "sum"))
-top = top.sort_values("Actual", ascending=False).head(20)
+chart_building = building_view.head(15).copy()
+if not chart_building.empty:
+    chart_building_m = chart_building.melt(
+        id_vars=["Building Address"],
+        value_vars=["Actual", "Budget"],
+        var_name="Type",
+        value_name="Amount",
+    )
+    fig_building = px.bar(
+        chart_building_m,
+        x="Building Address",
+        y="Amount",
+        color="Type",
+        barmode="group",
+        title="Top 15 Buildings: Actual vs Budget",
+    )
+    fig_building.update_layout(xaxis_tickangle=-45)
+    st.plotly_chart(fig_building, use_container_width=True)
 
-fig1 = px.bar(
-    top,
-    x="Category",
-    y="Actual",
-    title="Top Categories by Actual (No Taxes)",
+top_cat = view.groupby("Category", as_index=False).agg(
+    Actual=("Actual", "sum"),
+    Budget=("Budget", "sum"),
 )
-st.plotly_chart(fig1, use_container_width=True)
+top_cat = top_cat.sort_values("Actual", ascending=False).head(20)
 
-top2 = top[top["Budget"] > 0].copy()
-if not top2.empty:
-    top2_m = top2.melt(
+if not top_cat.empty:
+    top_cat_m = top_cat.melt(
         id_vars=["Category"],
         value_vars=["Actual", "Budget"],
         var_name="Type",
         value_name="Amount",
     )
-    fig2 = px.bar(
-        top2_m,
+    fig_cat = px.bar(
+        top_cat_m,
         x="Category",
         y="Amount",
         color="Type",
         barmode="group",
-        title="Actual vs Budget by Category (where budget exists)",
+        title="Actual vs Budget by Category",
     )
-    st.plotly_chart(fig2, use_container_width=True)
-else:
-    st.info("No budget columns detected/matched yet (Labor Budget or F/G/H). Budgets are currently 0.")
+    st.plotly_chart(fig_cat, use_container_width=True)
 
 # ============================================================
 # DIAGNOSTICS
