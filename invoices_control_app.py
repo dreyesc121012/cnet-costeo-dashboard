@@ -204,6 +204,13 @@ def find_col(df: pd.DataFrame, name: str):
             return c
     return None
 
+def find_first_existing_col(df: pd.DataFrame, candidates: List[str]):
+    for cand in candidates:
+        col = find_col(df, cand)
+        if col:
+            return col
+    return None
+
 def safe_num(s):
     return pd.to_numeric(s, errors="coerce").fillna(0)
 
@@ -257,6 +264,9 @@ def load_sheets_from_bytes(excel_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFra
     invoicing_expected = [
         "Building Address",
         "Company",
+        "Company Name",
+        "Client",
+        "Customer",
         "Labor Budget",
         "Supplies Budget",
         "Equipment Budget",
@@ -489,7 +499,10 @@ if not inv_addr:
         or find_col(invoicing_df, "Location")
     )
 
-inv_company = find_col(invoicing_df, "Company")
+inv_company = find_first_existing_col(
+    invoicing_df,
+    ["Company", "Company Name", "Client", "Customer", "Customer Name", "Account"]
+)
 
 labor_budget_col = find_col(invoicing_df, "Labor Budget")
 supplies_budget_col = find_col(invoicing_df, "Supplies Budget")
@@ -516,6 +529,9 @@ inv_base[inv_addr] = inv_base[inv_addr].astype(str).str.strip()
 
 if inv_company:
     inv_base[inv_company] = inv_base[inv_company].astype(str).str.strip()
+    inv_base[inv_company] = inv_base[inv_company].replace({"nan": "", "None": ""})
+    inv_base[inv_company] = inv_base[inv_company].fillna("")
+    inv_base.loc[inv_base[inv_company].astype(str).str.strip() == "", inv_company] = "Unassigned"
 else:
     inv_base["__Company__"] = "Unassigned"
     inv_company = "__Company__"
@@ -573,7 +589,7 @@ actuals = (
 )
 
 # ============================================================
-# COMPARE - START FROM INVOICING/BUDGETS
+# COMPARE
 # ============================================================
 compare = budgets.merge(
     actuals,
@@ -665,13 +681,11 @@ missing_real = building_view[
     (building_view["Budget"] > 0) & (building_view["Real"] <= 0)
 ].copy()
 
-# highest budgets first
 missing_real = missing_real.sort_values(
     ["Budget", "Pending_to_Reach_Budget"],
     ascending=[False, False]
 )
 
-# KPI row
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Total Real", fmt_currency(total_real))
 k2.metric("Total Budget", fmt_currency(total_budget))
@@ -770,7 +784,7 @@ st.dataframe(
 )
 
 # ============================================================
-# CATEGORY DETAIL TABLE
+# DETAIL TABLE
 # ============================================================
 st.subheader("📋 Real vs Budget (by Building & Category)")
 
@@ -884,7 +898,7 @@ with st.expander("🛠 Diagnostics"):
         "Detected in Invoicing:",
         {
             "Building Address": inv_addr,
-            "Company": inv_company,
+            "Company detected as": inv_company,
             "Labor Budget": labor_budget_col,
             "Supplies Budget": supplies_budget_col,
             "Equipment Budget": equipment_budget_col,
