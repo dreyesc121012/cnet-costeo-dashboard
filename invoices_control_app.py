@@ -81,6 +81,19 @@ def fmt_percent_ratio(x) -> str:
     except Exception:
         return "0.00%"
 
+def status_semaphore(pct_used: float, budget: float, actual: float) -> str:
+    if budget <= 0:
+        if actual > 0:
+            return "⚪ No Budget"
+        return "⚪ N/A"
+    if actual <= 0:
+        return "🔴 No Actual"
+    if pct_used < 0.80:
+        return "🟡 Below 80%"
+    if pct_used <= 1.00:
+        return "🟢 On Track"
+    return "🔴 Over Budget"
+
 # ============================================================
 # MSAL APP
 # ============================================================
@@ -185,18 +198,6 @@ def find_col(df: pd.DataFrame, name: str):
 def safe_num(s):
     return pd.to_numeric(s, errors="coerce").fillna(0)
 
-def get_excel_col_by_letter(df: pd.DataFrame, letter: str):
-    letter = letter.strip().upper()
-    if not re.fullmatch(r"[A-Z]+", letter):
-        return None
-    n = 0
-    for ch in letter:
-        n = n * 26 + (ord(ch) - ord("A") + 1)
-    idx = n - 1
-    if idx < 0 or idx >= df.shape[1]:
-        return None
-    return df.columns[idx]
-
 def _score_header_row(row_values: List[str], expected_keywords: List[str]) -> int:
     normalized = [_norm(v) for v in row_values]
     score = 0
@@ -247,6 +248,9 @@ def load_sheets_from_bytes(excel_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFra
     invoicing_expected = [
         "Building Address",
         "Labor Budget",
+        "Supplies Budget",
+        "Equipment Budget",
+        "PW Budget",
         "Address",
         "Building",
         "Location",
@@ -349,7 +353,6 @@ if not is_allowed_user(me):
 
 st.sidebar.header("📁 SharePoint Source")
 st.sidebar.success(f"Logged in as {signed_in_email}")
-
 st.success(f"✅ Signed in as {signed_in_email}")
 
 if st.button("🚪 Sign out"):
@@ -460,36 +463,14 @@ except Exception as e:
     st.stop()
 
 # ============================================================
-# BUILD ACTUALS (PAYMENTS)
+# REQUIRED COLUMNS
 # ============================================================
-c_addr = find_col(payments_df, "Building Address")
-c_cat = find_col(payments_df, "Category")
-c_amt = find_col(payments_df, "Amount without taxes")
+pay_addr = find_col(payments_df, "Building Address")
+pay_cat = find_col(payments_df, "Category")
+pay_amt = find_col(payments_df, "Amount without taxes")
+if not pay_amt:
+    pay_amt = find_col(payments_df, "Amount")
 
-if not c_amt:
-    c_amt = find_col(payments_df, "Amount")
-
-if not (c_addr and c_cat and c_amt):
-    st.error("Missing required columns in '2025 Summary PAYMENTS'.")
-    st.write("Detected columns:", list(payments_df.columns))
-    st.write("Detected header row in PAYMENTS sheet (0-based):", payments_header_row)
-    st.stop()
-
-tmp = payments_df[[c_addr, c_cat, c_amt]].copy()
-tmp.columns = ["Building Address", "Category", "Actual"]
-tmp["Building Address"] = tmp["Building Address"].astype(str).str.strip()
-tmp["Category"] = tmp["Category"].astype(str).str.strip()
-tmp["Actual"] = safe_num(tmp["Actual"])
-
-actuals = (
-    tmp.groupby(["Building Address", "Category"], as_index=False)["Actual"]
-    .sum()
-    .sort_values("Actual", ascending=False)
-)
-
-# ============================================================
-# BUILD BUDGETS (INVOICING)
-# ============================================================
 inv_addr = find_col(invoicing_df, "Building Address")
 if not inv_addr:
     inv_addr = (
@@ -499,44 +480,127 @@ if not inv_addr:
     )
 
 labor_budget_col = find_col(invoicing_df, "Labor Budget")
-col_F = get_excel_col_by_letter(invoicing_df, "F")
-col_G = get_excel_col_by_letter(invoicing_df, "G")
-col_H = get_excel_col_by_letter(invoicing_df, "H")
+supplies_budget_col = find_col(invoicing_df, "Supplies Budget")
+equipment_budget_col = find_col(invoicing_df, "Equipment Budget")
+pw_budget_col = find_col(invoicing_df, "PW Budget")
 
-budgets_long = []
+if not (pay_addr and pay_cat and pay_amt):
+    st.error("Missing required columns in '2025 Summary PAYMENTS'.")
+    st.write("Detected columns:", list(payments_df.columns))
+    st.write("Detected header row in PAYMENTS sheet (0-based):", payments_header_row)
+    st.stop()
 
-if inv_addr:
-    inv_base = invoicing_df.copy()
-    inv_base[inv_addr] = inv_base[inv_addr].astype(str).str.strip()
+if not inv_addr:
+    st.error("Missing 'Building Address' (or equivalent) in 'Invoicing'.")
+    st.write("Detected columns:", list(invoicing_df.columns))
+    st.write("Detected header row in INVOICING sheet (0-based):", invoicing_header_row)
+    st.stop()
 
-    if labor_budget_col:
-        b = inv_base[[inv_addr, labor_budget_col]].copy()
+# ============================================================
+# BASE: INVOICING FIRST
+# ============================================================
+inv_base = invoicing_df.copy()
+inv_base[inv_addr] = inv_base[inv_addr].astype(str).str.strip()
+
+# create category-based budget rows from Invoicing
+budget_rows = []
+
+category_budget_map = [
+    ("Labor", labor_budget_col),
+    ("Supplies", supplies_budget_col),
+    ("Equipment", equipment_budget_col),
+    ("PW", pw_budget_col),
+]
+
+for category_name, budget_col in category_budget_map:
+    if budget_col:
+        b = inv_base[[inv_addr, budget_col]].copy()
         b.columns = ["Building Address", "Budget"]
-        b["Category"] = "Labor"
+        b["Category"] = category_name
         b["Budget"] = safe_num(b["Budget"])
-        budgets_long.append(b[["Building Address", "Category", "Budget"]])
+        budget_rows.append(b[["Building Address", "Category", "Budget"]])
 
-    for letter, colname in [("F", col_F), ("G", col_G), ("H", col_H)]:
-        if colname:
-            b = inv_base[[inv_addr, colname]].copy()
-            b.columns = ["Building Address", "Budget"]
-            b["Category"] = f"Budget {letter}"
-            b["Budget"] = safe_num(b["Budget"])
-            budgets_long.append(b[["Building Address", "Category", "Budget"]])
-
-if budgets_long:
-    budgets = pd.concat(budgets_long, ignore_index=True)
+if budget_rows:
+    budgets = pd.concat(budget_rows, ignore_index=True)
     budgets = budgets.groupby(["Building Address", "Category"], as_index=False)["Budget"].sum()
 else:
     budgets = pd.DataFrame(columns=["Building Address", "Category", "Budget"])
 
 # ============================================================
-# COMPARE
+# PAYMENTS: ONLY ROWS WITH CATEGORY
 # ============================================================
-compare = actuals.merge(budgets, on=["Building Address", "Category"], how="left")
+pay_base = payments_df[[pay_addr, pay_cat, pay_amt]].copy()
+pay_base.columns = ["Building Address", "Category", "Actual"]
+pay_base["Building Address"] = pay_base["Building Address"].astype(str).str.strip()
+pay_base["Category"] = pay_base["Category"].astype(str).str.strip()
+pay_base["Actual"] = safe_num(pay_base["Actual"])
+
+# only keep rows where Category has value
+pay_base = pay_base[
+    pay_base["Category"].notna()
+    & (pay_base["Category"].astype(str).str.strip() != "")
+    & (_norm(pay_base["Category"].astype(str)) != "nan")
+]
+
+# normalize allowed categories
+pay_base["Category"] = pay_base["Category"].replace({
+    "labour": "Labor",
+    "labor": "Labor",
+    "supplies": "Supplies",
+    "equipment": "Equipment",
+    "pw": "PW",
+    "Power Washing": "PW",
+})
+
+# aggregate actuals by Building Address + Category
+actuals = (
+    pay_base.groupby(["Building Address", "Category"], as_index=False)["Actual"]
+    .sum()
+)
+
+# ============================================================
+# COMPARE - START FROM INVOICING/BUDGETS
+# ============================================================
+compare = budgets.merge(
+    actuals,
+    on=["Building Address", "Category"],
+    how="left"
+)
+
+compare["Actual"] = compare["Actual"].fillna(0)
 compare["Budget"] = compare["Budget"].fillna(0)
 compare["Variance"] = compare["Budget"] - compare["Actual"]
-compare["% Used"] = compare.apply(lambda r: (r["Actual"] / r["Budget"]) if r["Budget"] else 0.0, axis=1)
+compare["% Used"] = compare.apply(
+    lambda r: (r["Actual"] / r["Budget"]) if r["Budget"] else 0.0,
+    axis=1,
+)
+compare["Pending to Reach Budget"] = (compare["Budget"] - compare["Actual"]).clip(lower=0)
+compare["Status"] = compare.apply(
+    lambda r: status_semaphore(r["% Used"], r["Budget"], r["Actual"]),
+    axis=1,
+)
+
+# ============================================================
+# BUILDING SUMMARY
+# ============================================================
+building_summary = (
+    compare.groupby("Building Address", as_index=False)
+    .agg(
+        Actual=("Actual", "sum"),
+        Budget=("Budget", "sum"),
+        Pending_to_Reach_Budget=("Pending to Reach Budget", "sum"),
+    )
+)
+
+building_summary["Variance"] = building_summary["Budget"] - building_summary["Actual"]
+building_summary["% Used"] = building_summary.apply(
+    lambda r: (r["Actual"] / r["Budget"]) if r["Budget"] else 0.0,
+    axis=1,
+)
+building_summary["Status"] = building_summary.apply(
+    lambda r: status_semaphore(r["% Used"], r["Budget"], r["Actual"]),
+    axis=1,
+)
 
 # ============================================================
 # FILTERS
@@ -555,38 +619,14 @@ if sel_buildings:
 if sel_categories:
     view = view[view["Category"].isin(sel_categories)]
 
+building_view = building_summary.copy()
+if sel_buildings:
+    building_view = building_view[building_view["Building Address"].isin(sel_buildings)]
+
 # ============================================================
 # EXECUTIVE SUMMARY
 # ============================================================
 st.subheader("📌 Executive Summary")
-
-building_summary = (
-    compare.groupby("Building Address", as_index=False)
-    .agg(
-        Actual=("Actual", "sum"),
-        Budget=("Budget", "sum"),
-    )
-)
-
-building_summary["Variance"] = building_summary["Budget"] - building_summary["Actual"]
-building_summary["% Used"] = building_summary.apply(
-    lambda r: (r["Actual"] / r["Budget"]) if r["Budget"] else 0.0,
-    axis=1,
-)
-building_summary["Pending to Reach Budget"] = (building_summary["Budget"] - building_summary["Actual"]).clip(lower=0)
-
-missing_actual = building_summary[
-    (building_summary["Budget"] > 0) & (building_summary["Actual"] <= 0)
-].copy()
-
-under_billed = building_summary[
-    (building_summary["Budget"] > 0) & (building_summary["Actual"] < building_summary["Budget"])
-].copy()
-
-under_billed = under_billed.sort_values(
-    ["Pending to Reach Budget", "Budget"],
-    ascending=[False, False]
-)
 
 total_actual = float(view["Actual"].sum())
 total_budget = float(view["Budget"].sum())
@@ -594,23 +634,36 @@ total_var = total_budget - total_actual
 overall_used = (total_actual / total_budget) if total_budget else 0.0
 pending_total = max(total_budget - total_actual, 0)
 
+missing_actual = building_view[
+    (building_view["Budget"] > 0) & (building_view["Actual"] <= 0)
+].copy()
+
+under_billed = building_view[
+    (building_view["Budget"] > 0) & (building_view["Actual"] < building_view["Budget"])
+].copy()
+
+under_billed = under_billed.sort_values(
+    ["Pending_to_Reach_Budget", "Budget"],
+    ascending=[False, False]
+)
+
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Total Actual", fmt_currency(total_actual))
 k2.metric("Total Budget", fmt_currency(total_budget))
 k3.metric("Budget Utilization", fmt_percent_ratio(overall_used))
 k4.metric("Pending to Reach Budget", fmt_currency(pending_total))
 
-st.markdown("### 🎯 Priority Addresses with **No Actual Yet**")
+st.markdown("### 🚨 Priority Addresses with No Actual Yet")
 if not missing_actual.empty:
     missing_actual_display = missing_actual[
-        ["Building Address", "Actual", "Budget", "Pending to Reach Budget", "% Used"]
+        ["Status", "Building Address", "Actual", "Budget", "Pending_to_Reach_Budget", "% Used"]
     ].copy()
 
     st.dataframe(
         missing_actual_display.style.format({
             "Actual": fmt_currency,
             "Budget": fmt_currency,
-            "Pending to Reach Budget": fmt_currency,
+            "Pending_to_Reach_Budget": fmt_currency,
             "% Used": fmt_percent_ratio,
         }),
         use_container_width=True,
@@ -619,16 +672,16 @@ if not missing_actual.empty:
 else:
     st.success("All budgeted addresses already have some Actual recorded.")
 
-st.markdown("### 📍 Top Addresses Under Budget (Need More Invoices to Reach 100%)")
+st.markdown("### 🎯 Top Addresses Under Budget (Need More Invoices)")
 top_under_billed = under_billed.head(15).copy()
 if not top_under_billed.empty:
     st.dataframe(
         top_under_billed[
-            ["Building Address", "Actual", "Budget", "Pending to Reach Budget", "% Used"]
+            ["Status", "Building Address", "Actual", "Budget", "Pending_to_Reach_Budget", "% Used"]
         ].style.format({
             "Actual": fmt_currency,
             "Budget": fmt_currency,
-            "Pending to Reach Budget": fmt_currency,
+            "Pending_to_Reach_Budget": fmt_currency,
             "% Used": fmt_percent_ratio,
         }),
         use_container_width=True,
@@ -638,13 +691,12 @@ else:
     st.success("No under-budget addresses found.")
 
 # ============================================================
-# DETAIL TABLE
+# CATEGORY DETAIL TABLE
 # ============================================================
 st.subheader("📋 Actual vs Budget (by Building & Category)")
 
-detail_view = view.copy()
-detail_view_display = detail_view[
-    ["Building Address", "Category", "Actual", "Budget", "Variance", "% Used"]
+detail_view_display = view[
+    ["Status", "Building Address", "Category", "Actual", "Budget", "Variance", "% Used", "Pending to Reach Budget"]
 ].copy()
 
 st.dataframe(
@@ -652,6 +704,7 @@ st.dataframe(
         "Actual": fmt_currency,
         "Budget": fmt_currency,
         "Variance": fmt_currency,
+        "Pending to Reach Budget": fmt_currency,
         "% Used": fmt_percent_ratio,
     }),
     use_container_width=True,
@@ -663,23 +716,19 @@ st.dataframe(
 # ============================================================
 st.subheader("🏢 Building-Level Budget Tracking")
 
-building_view = building_summary.copy()
-if sel_buildings:
-    building_view = building_view[building_view["Building Address"].isin(sel_buildings)]
-
 building_view = building_view.sort_values(
-    ["Pending to Reach Budget", "Budget"],
+    ["Pending_to_Reach_Budget", "Budget"],
     ascending=[False, False]
 )
 
 st.dataframe(
     building_view[
-        ["Building Address", "Actual", "Budget", "Variance", "Pending to Reach Budget", "% Used"]
+        ["Status", "Building Address", "Actual", "Budget", "Variance", "Pending_to_Reach_Budget", "% Used"]
     ].style.format({
         "Actual": fmt_currency,
         "Budget": fmt_currency,
         "Variance": fmt_currency,
-        "Pending to Reach Budget": fmt_currency,
+        "Pending_to_Reach_Budget": fmt_currency,
         "% Used": fmt_percent_ratio,
     }),
     use_container_width=True,
@@ -710,21 +759,19 @@ if not chart_building.empty:
     fig_building.update_layout(xaxis_tickangle=-45)
     st.plotly_chart(fig_building, use_container_width=True)
 
-top_cat = view.groupby("Category", as_index=False).agg(
+cat_summary = view.groupby("Category", as_index=False).agg(
     Actual=("Actual", "sum"),
     Budget=("Budget", "sum"),
 )
-top_cat = top_cat.sort_values("Actual", ascending=False).head(20)
-
-if not top_cat.empty:
-    top_cat_m = top_cat.melt(
+if not cat_summary.empty:
+    cat_summary_m = cat_summary.melt(
         id_vars=["Category"],
         value_vars=["Actual", "Budget"],
         var_name="Type",
         value_name="Amount",
     )
     fig_cat = px.bar(
-        top_cat_m,
+        cat_summary_m,
         x="Category",
         y="Amount",
         color="Type",
@@ -749,9 +796,9 @@ with st.expander("🛠 Diagnostics"):
     st.write(
         "Detected in Payments:",
         {
-            "Building Address": c_addr,
-            "Category": c_cat,
-            "Amount without taxes / Amount": c_amt,
+            "Building Address": pay_addr,
+            "Category": pay_cat,
+            "Amount without taxes / Amount": pay_amt,
         },
     )
     st.write(
@@ -759,8 +806,8 @@ with st.expander("🛠 Diagnostics"):
         {
             "Building Address": inv_addr,
             "Labor Budget": labor_budget_col,
-            "F": col_F,
-            "G": col_G,
-            "H": col_H,
+            "Supplies Budget": supplies_budget_col,
+            "Equipment Budget": equipment_budget_col,
+            "PW Budget": pw_budget_col,
         },
     )
