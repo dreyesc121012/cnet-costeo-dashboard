@@ -15,18 +15,10 @@ import plotly.express as px
 CLIENT_ID = str(st.secrets["CLIENT_ID"]).strip()
 CLIENT_SECRET = str(st.secrets["CLIENT_SECRET"]).strip()
 TENANT_ID = str(st.secrets["TENANT_ID"]).strip()
-
-# MUST match Azure App Registration Redirect URI EXACTLY
 REDIRECT_URI = str(st.secrets["REDIRECT_URI"]).strip().rstrip("/")
-
-# Optional: default SharePoint/OneDrive *FOLDER* (recommended) OR *FILE* share link
 DEFAULT_SHARED_URL = str(st.secrets.get("ONEDRIVE_SHARED_URL", "")).strip()
-
-# Optional login experience hints
 DOMAIN_HINT = str(st.secrets.get("DOMAIN_HINT", "")).strip()
 LOGIN_HINT = str(st.secrets.get("LOGIN_HINT", "")).strip()
-
-# Required: allowed corporate domain
 ALLOWED_DOMAIN = str(st.secrets.get("ALLOWED_DOMAIN", "")).strip().lower()
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
@@ -42,10 +34,6 @@ st.title("📑 Invoice Category Control Dashboard")
 # HELPERS (URL params)
 # ============================================================
 def get_query_params_compat() -> dict:
-    """
-    Compatible query param reader for newer and older Streamlit versions.
-    Returns a plain dict[str, str].
-    """
     try:
         qp = st.query_params
         out = {}
@@ -130,9 +118,6 @@ def make_share_id(shared_url: str) -> str:
     return "u!" + b
 
 def resolve_shared_link(access_token: str, shared_url: str) -> dict:
-    """
-    Returns driveItem metadata for a shared link (file OR folder).
-    """
     share_id = make_share_id(shared_url)
     meta_url = f"https://graph.microsoft.com/v1.0/shares/{share_id}/driveItem"
     meta = graph_get(meta_url, access_token)
@@ -151,9 +136,6 @@ def download_item_bytes(access_token: str, drive_id: str, item_id: str) -> bytes
     return r.content
 
 def list_children_all(access_token: str, drive_id: str, folder_item_id: str) -> List[Dict]:
-    """
-    Lists ALL children of a folder (handles paging).
-    """
     url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{folder_item_id}/children?$top=200"
     all_items = []
     while url:
@@ -271,23 +253,7 @@ if "token_result" not in st.session_state:
         extra_query_parameters=extra_qp,
     )
 
-    st.markdown(
-        f"""
-        <a href="{auth_url}" target="_self">
-            <button style="
-                background-color:#ffffff;
-                border:1px solid #d0d0d0;
-                border-radius:8px;
-                padding:10px 16px;
-                font-size:16px;
-                cursor:pointer;">
-                🔐 Sign in with Microsoft (Company)
-            </button>
-        </a>
-        """,
-        unsafe_allow_html=True,
-    )
-
+    st.link_button("🔐 Sign in with Microsoft (Company)", auth_url)
     st.caption(f"Redirect URI used: {REDIRECT_URI}")
     st.stop()
 
@@ -351,7 +317,7 @@ if not shared_url:
     st.stop()
 
 # ============================================================
-# Resolve link (file or folder)
+# RESOLVE LINK
 # ============================================================
 try:
     meta = resolve_shared_link(access_token, shared_url)
@@ -589,5 +555,21 @@ with st.expander("🛠 Diagnostics"):
     st.write("Link type:", "FOLDER" if is_folder else "FILE")
     st.write("Payments columns:", list(payments_df.columns))
     st.write("Invoicing columns:", list(invoicing_df.columns))
-    st.write("Detected in Payments:", {"Building Address": c_addr, "Category": c_cat, "Amount without taxes": c_amt})
-    st.write("Detected in Invoicing:", {"Building Address": inv_addr, "Labor Budget": labor_budget_col, "F": col_F, "G": col_G, "H": col_H})
+    st.write(
+        "Detected in Payments:",
+        {
+            "Building Address": c_addr,
+            "Category": c_cat,
+            "Amount without taxes": c_amt,
+        },
+    )
+    st.write(
+        "Detected in Invoicing:",
+        {
+            "Building Address": inv_addr,
+            "Labor Budget": labor_budget_col,
+            "F": col_F,
+            "G": col_G,
+            "H": col_H,
+        },
+    )
