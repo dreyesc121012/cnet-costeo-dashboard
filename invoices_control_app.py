@@ -214,6 +214,18 @@ def find_first_existing_col(df: pd.DataFrame, candidates: List[str]):
 def safe_num(s):
     return pd.to_numeric(s, errors="coerce").fillna(0)
 
+def get_excel_col_by_letter(df: pd.DataFrame, letter: str):
+    letter = letter.strip().upper()
+    if not re.fullmatch(r"[A-Z]+", letter):
+        return None
+    n = 0
+    for ch in letter:
+        n = n * 26 + (ord(ch) - ord("A") + 1)
+    idx = n - 1
+    if idx < 0 or idx >= df.shape[1]:
+        return None
+    return df.columns[idx]
+
 def _score_header_row(row_values: List[str], expected_keywords: List[str]) -> int:
     normalized = [_norm(v) for v in row_values]
     score = 0
@@ -504,6 +516,10 @@ inv_company = find_first_existing_col(
     ["Company", "Company Name", "Client", "Customer", "Customer Name", "Account"]
 )
 
+# Fallback: if not found by name, use column B from Invoicing
+if not inv_company:
+    inv_company = get_excel_col_by_letter(invoicing_df, "B")
+
 labor_budget_col = find_col(invoicing_df, "Labor Budget")
 supplies_budget_col = find_col(invoicing_df, "Supplies Budget")
 equipment_budget_col = find_col(invoicing_df, "Equipment Budget")
@@ -529,7 +545,12 @@ inv_base[inv_addr] = inv_base[inv_addr].astype(str).str.strip()
 
 if inv_company:
     inv_base[inv_company] = inv_base[inv_company].astype(str).str.strip()
-    inv_base[inv_company] = inv_base[inv_company].replace({"nan": "", "None": ""})
+    inv_base[inv_company] = inv_base[inv_company].replace({
+        "nan": "",
+        "None": "",
+        "NaN": "",
+        "<NA>": "",
+    })
     inv_base[inv_company] = inv_base[inv_company].fillna("")
     inv_base.loc[inv_base[inv_company].astype(str).str.strip() == "", inv_company] = "Unassigned"
 else:
@@ -899,6 +920,8 @@ with st.expander("🛠 Diagnostics"):
         {
             "Building Address": inv_addr,
             "Company detected as": inv_company,
+            "Company column used": inv_company,
+            "Column B fallback": get_excel_col_by_letter(invoicing_df, "B"),
             "Labor Budget": labor_budget_col,
             "Supplies Budget": supplies_budget_col,
             "Equipment Budget": equipment_budget_col,
