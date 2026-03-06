@@ -41,7 +41,35 @@ st.title("📑 Invoice Category Control Dashboard")
 # ============================================================
 # HELPERS (URL params)
 # ============================================================
-def _clear_query_params():
+def get_query_params_compat() -> dict:
+    """
+    Compatible query param reader for newer and older Streamlit versions.
+    Returns a plain dict[str, str].
+    """
+    try:
+        qp = st.query_params
+        out = {}
+        for k in qp.keys():
+            v = qp.get(k)
+            if isinstance(v, list):
+                out[k] = v[0] if v else ""
+            else:
+                out[k] = str(v) if v is not None else ""
+        return out
+    except Exception:
+        try:
+            qp = st.experimental_get_query_params()
+            out = {}
+            for k, v in qp.items():
+                if isinstance(v, list):
+                    out[k] = v[0] if v else ""
+                else:
+                    out[k] = str(v) if v is not None else ""
+            return out
+        except Exception:
+            return {}
+
+def clear_query_params_compat():
     try:
         st.query_params.clear()
     except Exception:
@@ -206,12 +234,10 @@ if not ALLOWED_DOMAIN:
     st.stop()
 
 app = get_msal_app()
-
-# Use experimental_get_query_params to read OAuth callback code
-params = st.experimental_get_query_params()
+params = get_query_params_compat()
 
 if "token_result" not in st.session_state:
-    code = params.get("code", [None])[0]
+    code = params.get("code")
 
     if code:
         result = app.acquire_token_by_authorization_code(
@@ -222,10 +248,7 @@ if "token_result" not in st.session_state:
 
         if "access_token" in result:
             st.session_state.token_result = result
-            try:
-                st.query_params.clear()
-            except Exception:
-                _clear_query_params()
+            clear_query_params_compat()
             st.rerun()
         else:
             st.error("Could not obtain access token.")
@@ -298,10 +321,7 @@ if st.button("🚪 Sign out"):
     st.session_state.pop("excel_bytes", None)
     st.session_state.pop("selected_item_id", None)
     st.cache_data.clear()
-    try:
-        st.query_params.clear()
-    except Exception:
-        _clear_query_params()
+    clear_query_params_compat()
     st.rerun()
 
 # ============================================================
