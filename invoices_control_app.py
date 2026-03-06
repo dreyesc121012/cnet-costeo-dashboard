@@ -22,11 +22,11 @@ REDIRECT_URI = str(st.secrets["REDIRECT_URI"]).strip().rstrip("/")
 # Optional: default SharePoint/OneDrive *FOLDER* (recommended) OR *FILE* share link
 DEFAULT_SHARED_URL = str(st.secrets.get("ONEDRIVE_SHARED_URL", "")).strip()
 
-# Optional: force tenant-domain experience
+# Optional login experience hints
 DOMAIN_HINT = str(st.secrets.get("DOMAIN_HINT", "")).strip()
 LOGIN_HINT = str(st.secrets.get("LOGIN_HINT", "")).strip()
 
-# Required: company domain allowed to access dashboard
+# Required: allowed corporate domain
 ALLOWED_DOMAIN = str(st.secrets.get("ALLOWED_DOMAIN", "")).strip().lower()
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
@@ -259,12 +259,28 @@ if "token_result" not in st.session_state:
     auth_url = app.get_authorization_request_url(
         scopes=SCOPES,
         redirect_uri=REDIRECT_URI,
-        prompt="login",
+        prompt="select_account",
         response_mode="query",
         extra_query_parameters=extra_qp,
     )
 
-    st.link_button("🔐 Sign in with Microsoft (Company)", auth_url)
+    st.markdown(
+        f"""
+        <a href="{auth_url}" target="_self">
+            <button style="
+                background-color:#ffffff;
+                border:1px solid #d0d0d0;
+                border-radius:8px;
+                padding:10px 16px;
+                font-size:16px;
+                cursor:pointer;">
+                🔐 Sign in with Microsoft (Company)
+            </button>
+        </a>
+        """,
+        unsafe_allow_html=True,
+    )
+
     st.caption(f"Redirect URI used: {REDIRECT_URI}")
     st.stop()
 
@@ -298,6 +314,10 @@ if st.button("🚪 Sign out"):
     st.session_state.pop("excel_bytes", None)
     st.session_state.pop("selected_item_id", None)
     st.cache_data.clear()
+    try:
+        st.query_params.clear()
+    except Exception:
+        _clear_query_params()
     st.rerun()
 
 # ============================================================
