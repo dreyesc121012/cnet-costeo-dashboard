@@ -57,6 +57,7 @@ def get_query_params_compat() -> dict:
         except Exception:
             return {}
 
+
 def clear_query_params_compat():
     try:
         st.query_params.clear()
@@ -65,6 +66,7 @@ def clear_query_params_compat():
             st.experimental_set_query_params()
         except Exception:
             pass
+
 
 # ============================================================
 # MSAL APP
@@ -77,6 +79,7 @@ def get_msal_app():
         token_cache=None,
     )
 
+
 # ============================================================
 # GRAPH HELPERS
 # ============================================================
@@ -87,11 +90,13 @@ def graph_get(url: str, access_token: str) -> requests.Response:
         timeout=60,
     )
 
+
 def graph_get_json(url: str, access_token: str) -> dict:
     r = graph_get(url, access_token)
     if r.status_code != 200:
         raise RuntimeError(f"Graph error {r.status_code}\n{r.text}")
     return r.json()
+
 
 def get_me(access_token: str) -> dict:
     r = requests.get(
@@ -103,8 +108,10 @@ def get_me(access_token: str) -> dict:
         raise RuntimeError(f"Graph /me error {r.status_code}\n{r.text}")
     return r.json()
 
+
 def get_user_email(me: dict) -> str:
     return (me.get("mail") or me.get("userPrincipalName") or "").strip().lower()
+
 
 def is_allowed_user(me: dict) -> bool:
     email = get_user_email(me)
@@ -112,10 +119,12 @@ def is_allowed_user(me: dict) -> bool:
         return False
     return email.endswith(f"@{ALLOWED_DOMAIN}")
 
+
 def make_share_id(shared_url: str) -> str:
     b = base64.b64encode(shared_url.encode("utf-8")).decode("utf-8")
     b = b.rstrip("=").replace("/", "_").replace("+", "-")
     return "u!" + b
+
 
 def resolve_shared_link(access_token: str, shared_url: str) -> dict:
     share_id = make_share_id(shared_url)
@@ -128,12 +137,14 @@ def resolve_shared_link(access_token: str, shared_url: str) -> dict:
         )
     return meta.json()
 
+
 def download_item_bytes(access_token: str, drive_id: str, item_id: str) -> bytes:
     content_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
     r = graph_get(content_url, access_token)
     if r.status_code != 200:
         raise RuntimeError(f"Error downloading file: {r.status_code}\n{r.text}")
     return r.content
+
 
 def list_children_all(access_token: str, drive_id: str, folder_item_id: str) -> List[Dict]:
     url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{folder_item_id}/children?$top=200"
@@ -144,9 +155,11 @@ def list_children_all(access_token: str, drive_id: str, folder_item_id: str) -> 
         url = data.get("@odata.nextLink")
     return all_items
 
+
 def is_excel_name(name: str) -> bool:
     n = (name or "").lower()
     return n.endswith(".xlsx") or n.endswith(".xlsm") or n.endswith(".xls")
+
 
 # ============================================================
 # UTILITIES
@@ -156,6 +169,7 @@ def _norm(s: str) -> str:
     s = s.replace("\u00A0", " ")
     s = re.sub(r"\s+", " ", s).strip().lower()
     return s
+
 
 def find_col(df: pd.DataFrame, name: str):
     t = _norm(name)
@@ -167,8 +181,10 @@ def find_col(df: pd.DataFrame, name: str):
             return c
     return None
 
+
 def safe_num(s):
     return pd.to_numeric(s, errors="coerce").fillna(0)
+
 
 def get_excel_col_by_letter(df: pd.DataFrame, letter: str):
     letter = letter.strip().upper()
@@ -182,17 +198,76 @@ def get_excel_col_by_letter(df: pd.DataFrame, letter: str):
         return None
     return df.columns[idx]
 
+
+def _score_header_row(row_values: List[str], expected_keywords: List[str]) -> int:
+    normalized = [_norm(v) for v in row_values]
+    score = 0
+    for kw in expected_keywords:
+        nkw = _norm(kw)
+        if any(nkw == cell or nkw in cell for cell in normalized):
+            score += 1
+    return score
+
+
+def detect_header_row(raw_df: pd.DataFrame, expected_keywords: List[str], max_rows: int = 15) -> int:
+    best_row = 0
+    best_score = -1
+
+    rows_to_check = min(max_rows, len(raw_df))
+    for i in range(rows_to_check):
+        row_values = raw_df.iloc[i].fillna("").astype(str).tolist()
+        score = _score_header_row(row_values, expected_keywords)
+        if score > best_score:
+            best_score = score
+            best_row = i
+
+    return best_row
+
+
+def read_sheet_with_detected_header(
+    xls: pd.ExcelFile,
+    sheet_name: str,
+    expected_keywords: List[str],
+    preview_rows: int = 15,
+) -> Tuple[pd.DataFrame, int]:
+    raw = pd.read_excel(xls, sheet_name=sheet_name, header=None, nrows=preview_rows)
+    header_row = detect_header_row(raw, expected_keywords, max_rows=preview_rows)
+    df = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df, header_row
+
+
 # ============================================================
 # READ EXCEL
 # ============================================================
 @st.cache_data(ttl=300, show_spinner=False)
-def load_sheets_from_bytes(excel_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def load_sheets_from_bytes(excel_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame, int, int]:
     xls = pd.ExcelFile(BytesIO(excel_bytes))
-    payments = pd.read_excel(xls, sheet_name=SHEET_PAYMENTS)
-    invoicing = pd.read_excel(xls, sheet_name=SHEET_INVOICING)
-    payments.columns = [str(c).strip() for c in payments.columns]
-    invoicing.columns = [str(c).strip() for c in invoicing.columns]
-    return payments, invoicing
+
+    payments_expected = [
+        "Building Address",
+        "Category",
+        "Amount without taxes",
+        "Amount",
+        "Address",
+    ]
+    invoicing_expected = [
+        "Building Address",
+        "Labor Budget",
+        "Address",
+        "Building",
+        "Location",
+    ]
+
+    payments, payments_header_row = read_sheet_with_detected_header(
+        xls, SHEET_PAYMENTS, payments_expected
+    )
+    invoicing, invoicing_header_row = read_sheet_with_detected_header(
+        xls, SHEET_INVOICING, invoicing_expected
+    )
+
+    return payments, invoicing, payments_header_row, invoicing_header_row
+
 
 @st.cache_data(ttl=300, show_spinner=False)
 def cached_folder_excel_list(
@@ -207,6 +282,7 @@ def cached_folder_excel_list(
     excels = [c for c in children if c.get("id") and is_excel_name(c.get("name", ""))]
     excels.sort(key=lambda x: (x.get("name") or "").lower())
     return excels
+
 
 # ============================================================
 # AUTHENTICATION FLOW
@@ -386,7 +462,7 @@ excel_bytes = st.session_state.excel_bytes
 # LOAD DATA
 # ============================================================
 try:
-    payments_df, invoicing_df = load_sheets_from_bytes(excel_bytes)
+    payments_df, invoicing_df, payments_header_row, invoicing_header_row = load_sheets_from_bytes(excel_bytes)
 except Exception as e:
     st.error("Could not read the required sheets from the Excel file.")
     st.code(str(e))
@@ -399,9 +475,13 @@ c_addr = find_col(payments_df, "Building Address")
 c_cat = find_col(payments_df, "Category")
 c_amt = find_col(payments_df, "Amount without taxes")
 
+if not c_amt:
+    c_amt = find_col(payments_df, "Amount")
+
 if not (c_addr and c_cat and c_amt):
     st.error("Missing required columns in '2025 Summary PAYMENTS'.")
     st.write("Detected columns:", list(payments_df.columns))
+    st.write("Detected header row in PAYMENTS sheet (0-based):", payments_header_row)
     st.stop()
 
 tmp = payments_df[[c_addr, c_cat, c_amt]].copy()
@@ -553,6 +633,8 @@ with st.expander("🛠 Diagnostics"):
     st.write("Signed in as:", signed_in_email)
     st.write("Selected Excel:", selected_name)
     st.write("Link type:", "FOLDER" if is_folder else "FILE")
+    st.write("Detected payments header row (0-based):", payments_header_row)
+    st.write("Detected invoicing header row (0-based):", invoicing_header_row)
     st.write("Payments columns:", list(payments_df.columns))
     st.write("Invoicing columns:", list(invoicing_df.columns))
     st.write(
@@ -560,7 +642,7 @@ with st.expander("🛠 Diagnostics"):
         {
             "Building Address": c_addr,
             "Category": c_cat,
-            "Amount without taxes": c_amt,
+            "Amount without taxes / Amount": c_amt,
         },
     )
     st.write(
