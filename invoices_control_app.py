@@ -81,13 +81,13 @@ def fmt_percent_ratio(x) -> str:
     except Exception:
         return "0.00%"
 
-def status_semaphore(pct_used: float, budget: float, actual: float) -> str:
+def status_semaphore(pct_used: float, budget: float, real: float) -> str:
     if budget <= 0:
-        if actual > 0:
+        if real > 0:
             return "⚪ No Budget"
         return "⚪ N/A"
-    if actual <= 0:
-        return "🔴 No Actual"
+    if real <= 0:
+        return "🔴 No Real"
     if pct_used < 0.80:
         return "🟡 Below 80%"
     if pct_used <= 1.00:
@@ -502,7 +502,6 @@ if not inv_addr:
 inv_base = invoicing_df.copy()
 inv_base[inv_addr] = inv_base[inv_addr].astype(str).str.strip()
 
-# create category-based budget rows from Invoicing
 budget_rows = []
 
 category_budget_map = [
@@ -530,19 +529,17 @@ else:
 # PAYMENTS: ONLY ROWS WITH CATEGORY
 # ============================================================
 pay_base = payments_df[[pay_addr, pay_cat, pay_amt]].copy()
-pay_base.columns = ["Building Address", "Category", "Actual"]
+pay_base.columns = ["Building Address", "Category", "Real"]
 pay_base["Building Address"] = pay_base["Building Address"].astype(str).str.strip()
 pay_base["Category"] = pay_base["Category"].astype(str).str.strip()
-pay_base["Actual"] = safe_num(pay_base["Actual"])
+pay_base["Real"] = safe_num(pay_base["Real"])
 
-# only keep rows where Category has value
 pay_base = pay_base[
     pay_base["Category"].notna()
     & (pay_base["Category"].astype(str).str.strip() != "")
     & (_norm(pay_base["Category"].astype(str)) != "nan")
 ]
 
-# normalize allowed categories
 pay_base["Category"] = pay_base["Category"].replace({
     "labour": "Labor",
     "labor": "Labor",
@@ -552,9 +549,8 @@ pay_base["Category"] = pay_base["Category"].replace({
     "Power Washing": "PW",
 })
 
-# aggregate actuals by Building Address + Category
 actuals = (
-    pay_base.groupby(["Building Address", "Category"], as_index=False)["Actual"]
+    pay_base.groupby(["Building Address", "Category"], as_index=False)["Real"]
     .sum()
 )
 
@@ -567,16 +563,16 @@ compare = budgets.merge(
     how="left"
 )
 
-compare["Actual"] = compare["Actual"].fillna(0)
+compare["Real"] = compare["Real"].fillna(0)
 compare["Budget"] = compare["Budget"].fillna(0)
-compare["Variance"] = compare["Budget"] - compare["Actual"]
+compare["Variance"] = compare["Budget"] - compare["Real"]
 compare["% Used"] = compare.apply(
-    lambda r: (r["Actual"] / r["Budget"]) if r["Budget"] else 0.0,
+    lambda r: (r["Real"] / r["Budget"]) if r["Budget"] else 0.0,
     axis=1,
 )
-compare["Pending to Reach Budget"] = (compare["Budget"] - compare["Actual"]).clip(lower=0)
+compare["Pending to Reach Budget"] = (compare["Budget"] - compare["Real"]).clip(lower=0)
 compare["Status"] = compare.apply(
-    lambda r: status_semaphore(r["% Used"], r["Budget"], r["Actual"]),
+    lambda r: status_semaphore(r["% Used"], r["Budget"], r["Real"]),
     axis=1,
 )
 
@@ -586,19 +582,19 @@ compare["Status"] = compare.apply(
 building_summary = (
     compare.groupby("Building Address", as_index=False)
     .agg(
-        Actual=("Actual", "sum"),
+        Real=("Real", "sum"),
         Budget=("Budget", "sum"),
         Pending_to_Reach_Budget=("Pending to Reach Budget", "sum"),
     )
 )
 
-building_summary["Variance"] = building_summary["Budget"] - building_summary["Actual"]
+building_summary["Variance"] = building_summary["Budget"] - building_summary["Real"]
 building_summary["% Used"] = building_summary.apply(
-    lambda r: (r["Actual"] / r["Budget"]) if r["Budget"] else 0.0,
+    lambda r: (r["Real"] / r["Budget"]) if r["Budget"] else 0.0,
     axis=1,
 )
 building_summary["Status"] = building_summary.apply(
-    lambda r: status_semaphore(r["% Used"], r["Budget"], r["Actual"]),
+    lambda r: status_semaphore(r["% Used"], r["Budget"], r["Real"]),
     axis=1,
 )
 
@@ -613,95 +609,113 @@ sel_buildings = st.sidebar.multiselect("Building Address", all_buildings, defaul
 all_categories = sorted(compare["Category"].dropna().unique().tolist())
 sel_categories = st.sidebar.multiselect("Category", all_categories, default=[])
 
+all_statuses = sorted(compare["Status"].dropna().unique().tolist())
+sel_statuses = st.sidebar.multiselect("Status", all_statuses, default=[])
+
 view = compare.copy()
 if sel_buildings:
     view = view[view["Building Address"].isin(sel_buildings)]
 if sel_categories:
     view = view[view["Category"].isin(sel_categories)]
+if sel_statuses:
+    view = view[view["Status"].isin(sel_statuses)]
 
 building_view = building_summary.copy()
 if sel_buildings:
     building_view = building_view[building_view["Building Address"].isin(sel_buildings)]
+if sel_statuses:
+    building_view = building_view[building_view["Status"].isin(sel_statuses)]
 
 # ============================================================
 # EXECUTIVE SUMMARY
 # ============================================================
 st.subheader("📌 Executive Summary")
 
-total_actual = float(view["Actual"].sum())
+total_real = float(view["Real"].sum())
 total_budget = float(view["Budget"].sum())
-total_var = total_budget - total_actual
-overall_used = (total_actual / total_budget) if total_budget else 0.0
-pending_total = max(total_budget - total_actual, 0)
+overall_used = (total_real / total_budget) if total_budget else 0.0
+pending_total = max(total_budget - total_real, 0)
 
-missing_actual = building_view[
-    (building_view["Budget"] > 0) & (building_view["Actual"] <= 0)
+missing_real = building_view[
+    (building_view["Budget"] > 0) & (building_view["Real"] <= 0)
 ].copy()
 
-under_billed = building_view[
-    (building_view["Budget"] > 0) & (building_view["Actual"] < building_view["Budget"])
-].copy()
-
-under_billed = under_billed.sort_values(
-    ["Pending_to_Reach_Budget", "Budget"],
-    ascending=[False, False]
-)
-
+# top row: KPIs
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("Total Actual", fmt_currency(total_actual))
+k1.metric("Total Real", fmt_currency(total_real))
 k2.metric("Total Budget", fmt_currency(total_budget))
 k3.metric("Budget Utilization", fmt_percent_ratio(overall_used))
 k4.metric("Pending to Reach Budget", fmt_currency(pending_total))
 
-st.markdown("### 🚨 Priority Addresses with No Actual Yet")
-if not missing_actual.empty:
-    missing_actual_display = missing_actual[
-        ["Status", "Building Address", "Actual", "Budget", "Pending_to_Reach_Budget", "% Used"]
-    ].copy()
+# right-side breakdown style using columns
+left_col, right_col = st.columns([2.2, 1])
 
-    st.dataframe(
-        missing_actual_display.style.format({
-            "Actual": fmt_currency,
-            "Budget": fmt_currency,
-            "Pending_to_Reach_Budget": fmt_currency,
-            "% Used": fmt_percent_ratio,
-        }),
-        use_container_width=True,
-        hide_index=True,
-    )
-else:
-    st.success("All budgeted addresses already have some Actual recorded.")
+with left_col:
+    st.markdown("### 🚨 Priority Addresses with No Real Yet")
+    if not missing_real.empty:
+        missing_real_display = missing_real[
+            ["Status", "Building Address", "Real", "Budget", "Pending_to_Reach_Budget", "% Used"]
+        ].copy()
 
-st.markdown("### 🎯 Top Addresses Under Budget (Need More Invoices)")
-top_under_billed = under_billed.head(15).copy()
-if not top_under_billed.empty:
-    st.dataframe(
-        top_under_billed[
-            ["Status", "Building Address", "Actual", "Budget", "Pending_to_Reach_Budget", "% Used"]
-        ].style.format({
-            "Actual": fmt_currency,
-            "Budget": fmt_currency,
-            "Pending_to_Reach_Budget": fmt_currency,
-            "% Used": fmt_percent_ratio,
-        }),
-        use_container_width=True,
-        hide_index=True,
+        st.dataframe(
+            missing_real_display.style.format({
+                "Real": fmt_currency,
+                "Budget": fmt_currency,
+                "Pending_to_Reach_Budget": fmt_currency,
+                "% Used": fmt_percent_ratio,
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.success("All budgeted addresses already have some Real recorded.")
+
+with right_col:
+    st.markdown("### 📊 Status Breakdown")
+    status_breakdown = (
+        view.groupby("Status", as_index=False)
+        .agg(
+            Buildings=("Building Address", "nunique"),
+            Real=("Real", "sum"),
+            Budget=("Budget", "sum"),
+            Pending=("Pending to Reach Budget", "sum"),
+        )
+        .sort_values("Budget", ascending=False)
     )
-else:
-    st.success("No under-budget addresses found.")
+
+    if not status_breakdown.empty:
+        st.dataframe(
+            status_breakdown.style.format({
+                "Real": fmt_currency,
+                "Budget": fmt_currency,
+                "Pending": fmt_currency,
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        fig_status = px.pie(
+            status_breakdown,
+            names="Status",
+            values="Budget",
+            title="Budget by Status",
+        )
+        st.plotly_chart(fig_status, use_container_width=True)
+    else:
+        st.info("No data available for selected statuses.")
 
 # ============================================================
 # CATEGORY DETAIL TABLE
 # ============================================================
-st.subheader("📋 Actual vs Budget (by Building & Category)")
+st.subheader("📋 Real vs Budget (by Building & Category)")
 
 detail_view_display = view[
-    ["Status", "Building Address", "Category", "Actual", "Budget", "Variance", "% Used", "Pending to Reach Budget"]
+    ["Status", "Building Address", "Category", "Real", "Budget", "Variance", "% Used", "Pending to Reach Budget"]
 ].copy()
 
 st.dataframe(
     detail_view_display.style.format({
-        "Actual": fmt_currency,
+        "Real": fmt_currency,
         "Budget": fmt_currency,
         "Variance": fmt_currency,
         "Pending to Reach Budget": fmt_currency,
@@ -723,9 +737,9 @@ building_view = building_view.sort_values(
 
 st.dataframe(
     building_view[
-        ["Status", "Building Address", "Actual", "Budget", "Variance", "Pending_to_Reach_Budget", "% Used"]
+        ["Status", "Building Address", "Real", "Budget", "Variance", "Pending_to_Reach_Budget", "% Used"]
     ].style.format({
-        "Actual": fmt_currency,
+        "Real": fmt_currency,
         "Budget": fmt_currency,
         "Variance": fmt_currency,
         "Pending_to_Reach_Budget": fmt_currency,
@@ -744,7 +758,7 @@ chart_building = building_view.head(15).copy()
 if not chart_building.empty:
     chart_building_m = chart_building.melt(
         id_vars=["Building Address"],
-        value_vars=["Actual", "Budget"],
+        value_vars=["Real", "Budget"],
         var_name="Type",
         value_name="Amount",
     )
@@ -754,19 +768,19 @@ if not chart_building.empty:
         y="Amount",
         color="Type",
         barmode="group",
-        title="Top 15 Buildings: Actual vs Budget",
+        title="Top 15 Buildings: Real vs Budget",
     )
     fig_building.update_layout(xaxis_tickangle=-45)
     st.plotly_chart(fig_building, use_container_width=True)
 
 cat_summary = view.groupby("Category", as_index=False).agg(
-    Actual=("Actual", "sum"),
+    Real=("Real", "sum"),
     Budget=("Budget", "sum"),
 )
 if not cat_summary.empty:
     cat_summary_m = cat_summary.melt(
         id_vars=["Category"],
-        value_vars=["Actual", "Budget"],
+        value_vars=["Real", "Budget"],
         var_name="Type",
         value_name="Amount",
     )
@@ -776,7 +790,7 @@ if not cat_summary.empty:
         y="Amount",
         color="Type",
         barmode="group",
-        title="Actual vs Budget by Category",
+        title="Real vs Budget by Category",
     )
     st.plotly_chart(fig_cat, use_container_width=True)
 
