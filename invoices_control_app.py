@@ -41,24 +41,6 @@ st.title("📑 Invoice Category Control Dashboard")
 # ============================================================
 # HELPERS (URL params)
 # ============================================================
-def _get_query_params() -> dict:
-    try:
-        qp = st.query_params
-        out = {}
-        for k in qp.keys():
-            v = qp.get(k)
-            if isinstance(v, list):
-                out[k] = v[0] if v else ""
-            else:
-                out[k] = str(v) if v is not None else ""
-        return out
-    except Exception:
-        try:
-            qp = st.experimental_get_query_params()
-            return {k: (v[0] if isinstance(v, list) and v else str(v)) for k, v in qp.items()}
-        except Exception:
-            return {}
-
 def _clear_query_params():
     try:
         st.query_params.clear()
@@ -224,10 +206,12 @@ if not ALLOWED_DOMAIN:
     st.stop()
 
 app = get_msal_app()
-qp = _get_query_params()
+
+# Use experimental_get_query_params to read OAuth callback code
+params = st.experimental_get_query_params()
 
 if "token_result" not in st.session_state:
-    code = qp.get("code")
+    code = params.get("code", [None])[0]
 
     if code:
         result = app.acquire_token_by_authorization_code(
