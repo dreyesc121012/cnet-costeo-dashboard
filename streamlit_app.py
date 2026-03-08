@@ -694,11 +694,11 @@ c2.metric(
     f"{traffic_light(net_margin, target)} vs {target:.0%}"
 )
 
-st.caption("Gauge: Final margin (after fees)")
+st.caption("Gauge: net margin")
 gauge_max = 60
 fig_gauge = go.Figure(go.Indicator(
     mode="gauge+number",
-    value=float(final_margin * 100),
+    value=float(net_margin * 100),
     number={"suffix": "%"},
     gauge={
         "axis": {"range": [0, gauge_max]},
