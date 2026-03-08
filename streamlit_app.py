@@ -680,10 +680,19 @@ def traffic_light(m, tgt):
         return "🟡"
     return "🔴"
 
-c1, c2, c3 = st.columns(3)
-c1.metric("Gross Margin", f"{gross_margin:.1%}", f"{traffic_light(gross_margin, target)} vs {target:.0%}")
-c2.metric("Net Margin", f"{net_margin:.1%}", f"{traffic_light(net_margin, target)} vs {target:.0%}")
-c3.metric("Final Margin (after fees)", f"{final_margin:.1%}", f"{traffic_light(final_margin, target)} vs {target:.0%}")
+c1, c2 = st.columns(2)
+
+c1.metric(
+    "Gross Margin",
+    f"{gross_margin:.1%}",
+    f"{traffic_light(gross_margin, target)} vs {target:.0%}"
+)
+
+c2.metric(
+    "Net Margin",
+    f"{net_margin:.1%}",
+    f"{traffic_light(net_margin, target)} vs {target:.0%}"
+)
 
 st.caption("Gauge: Final margin (after fees)")
 gauge_max = 60
