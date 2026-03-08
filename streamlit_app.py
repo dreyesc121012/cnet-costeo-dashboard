@@ -708,29 +708,34 @@ st.plotly_chart(fig_gauge, use_container_width=True)
 # ============================================================
 st.subheader("📊 KPIs (Executive)")
 
-k1, k2, k3 = st.columns(3)
-k1.metric("Revenue (Total to Bill)", f"${income:,.2f}")
-k2.metric("Costs (Total Cost Real)", f"${cost:,.2f}", f"{p_cost*100:,.2f}%")
-k3.metric("Gross (Revenue - Cost)", f"${gross:,.2f}", f"{p_gross*100:,.2f}%")
+left_col, right_col = st.columns([2, 1])
 
-# Row with Fixed/Net and Mgmt (NO Royalty here to avoid duplicates)
-if apply_fixed:
-    k4, k5, k6 = st.columns(3)
-    k4.metric("Fixed Expenses (Gasto Fijo)", f"${fixed_total:,.2f}", f"{p_fixed*100:,.2f}%")
-    k5.metric("Net (Gross - Fixed)", f"${net:,.2f}", f"{p_net*100:,.2f}%")
-    k6.metric("Total Management Fee", f"${mgmt_fee_total:,.2f}", f"{p_mgmt*100:,.2f}%")
-else:
-    k5, k6, k7 = st.columns(3)
-    k5.metric("Net", f"${net:,.2f}", f"{p_net*100:,.2f}%")
-    k6.metric("Total Management Fee", f"${mgmt_fee_total:,.2f}", f"{p_mgmt*100:,.2f}%")
-    k7.metric("", "", "")  # spacer to keep layout consistent
+with left_col:
+    l1, l2 = st.columns(2)
+    l1.metric("Revenue (Total to Bill)", f"${income:,.2f}")
+    l2.metric("Costs (Total Cost Real)", f"${cost:,.2f}", f"{p_cost*100:,.2f}%")
 
-# Fees row (Royalty 5% ONLY here; Royalty 3% only when applies)
-f1, f2, f3 = st.columns(3)
-f1.metric("Royalty (5%)", f"${royalty_5_total:,.2f}", f"{p_roy5*100:,.2f}%")
-f2.metric("Royalty (3%) BGIS", f"${royalty_3_total:,.2f}" if apply_roy3 else "$0.00", f"{p_roy3*100:,.2f}%")
-f3.metric("New Total", f"${new_total:,.2f}", f"{p_new*100:,.2f}%")
+    l3, l4 = st.columns(2)
+    l3.metric("Gross (Revenue - Cost)", f"${gross:,.2f}", f"{p_gross*100:,.2f}%")
 
+    if apply_fixed:
+        l4.metric("Fixed Expenses (Gasto Fijo)", f"${fixed_total:,.2f}", f"{p_fixed*100:,.2f}%")
+    else:
+        l4.metric("Net", f"${net:,.2f}", f"{p_net*100:,.2f}%")
+
+    if apply_fixed:
+        l5, l6 = st.columns(2)
+        l5.metric("Net (Gross - Fixed)", f"${net:,.2f}", f"{p_net*100:,.2f}%")
+        l6.empty()
+
+with right_col:
+    st.metric("Total Management Fee", f"${mgmt_fee_total:,.2f}", f"{p_mgmt*100:,.2f}%")
+    st.metric("Royalty (5%)", f"${royalty_5_total:,.2f}", f"{p_roy5*100:,.2f}%")
+    st.metric(
+        "Royalty (3%) BGIS",
+        f"${royalty_3_total:,.2f}" if apply_roy3 else "$0.00",
+        f"{p_roy3*100:,.2f}%"
+    )
 # ============================================================
 # OPTIONAL KPI: Total Cost Budget vs Real + % used / variance
 # ============================================================
