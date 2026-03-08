@@ -809,24 +809,27 @@ st.plotly_chart(fig_waterfall, use_container_width=True)
 # ============================================================
 st.subheader("🧩 Budget vs Real Breakdown (Categories)")
 
-cat = st.selectbox("Select category", list(CATEGORY_SPECS.keys()), index=0)
-spec = CATEGORY_SPECS[cat]
+color_red = "#d93025"
+color_green = "#188038"
+color_gray = "#5f6368"
 
-c_real = find_col(df, spec["real"])
-c_budget = find_col(df, spec["budget"])
-c_var = find_col(df, spec["var"])
+for cat, spec in CATEGORY_SPECS.items():
+    st.markdown(f"### {cat}")
 
-missing_cat = [k for k, v in {
-    spec["real"]: c_real,
-    spec["budget"]: c_budget,
-    spec["var"]: c_var,
-}.items() if v is None]
+    c_real = find_col(df, spec["real"])
+    c_budget = find_col(df, spec["budget"])
+    c_var = find_col(df, spec["var"])
 
-if missing_cat:
-    st.error(f"Missing columns for '{cat}': {missing_cat}")
-    with st.expander("Show detected columns"):
-        st.write(df.columns.tolist())
-else:
+    missing_cat = [k for k, v in {
+        spec["real"]: c_real,
+        spec["budget"]: c_budget,
+        spec["var"]: c_var,
+    }.items() if v is None]
+
+    if missing_cat:
+        st.warning(f"Missing columns for '{cat}': {missing_cat}")
+        continue
+
     df[c_real] = pd.to_numeric(df[c_real], errors="coerce")
     df[c_budget] = pd.to_numeric(df[c_budget], errors="coerce")
     df[c_var] = pd.to_numeric(df[c_var], errors="coerce")
@@ -835,9 +838,8 @@ else:
     budget_total = float(df[c_budget].fillna(0).sum())
     var_total = float(df[c_var].fillna(0).sum())  # Budget - Real
 
-    # Determine Over / Under
-    is_over = var_total < 0      # Budget - Real negative => OVER
-    is_under = var_total > 0     # Budget - Real positive => UNDER
+    is_over = var_total < 0
+    is_under = var_total > 0
 
     over_amt = max(0.0, real_total - budget_total)
     under_amt = max(0.0, budget_total - real_total)
@@ -845,11 +847,6 @@ else:
     pct_of_budget = safe_pct(real_total, budget_total)
     pct_under_vs_budget = safe_pct(under_amt, budget_total)
     pct_over_vs_budget = safe_pct(over_amt, budget_total)
-
-    # Color styles
-    color_red = "#d93025"
-    color_green = "#188038"
-    color_gray = "#5f6368"
 
     if is_over:
         status_html = f"<span style='color:{color_red}; font-weight:700;'>🔴 Over budget</span>"
@@ -861,13 +858,12 @@ else:
         status_html = f"<span style='color:{color_gray}; font-weight:700;'>⚪ On budget</span>"
         var_color = color_gray
 
-    # KPI Cards
+    # KPI cards
     a1, a2, a3, a4 = st.columns(4)
 
     a1.metric(f"{cat} - Real", f"${real_total:,.2f}")
     a2.metric(f"{cat} - Budget", f"${budget_total:,.2f}")
 
-    # Variation (colored number)
     a3.markdown(
         f"""
         <div style="font-size:14px;">Variation (Budget - Real)</div>
@@ -879,7 +875,6 @@ else:
         unsafe_allow_html=True
     )
 
-    # % Used
     a4.markdown(
         f"""
         <div style="font-size:14px;">% of Budget Used</div>
@@ -910,6 +905,8 @@ else:
         yaxis_title="Amount",
     )
     st.plotly_chart(fig_cat, use_container_width=True)
+
+    st.markdown("---")
 
 # ============================================================
 # ✅ ADDED: FIXED EXPENSES BREAKDOWN (Gasto Fijo) — BELOW CATEGORY SECTION
