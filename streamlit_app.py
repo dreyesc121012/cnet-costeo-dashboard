@@ -557,8 +557,8 @@ def render_financial_dashboard():
 
     with colB:
         if st.button("🔒 Sign out", key="signout_financial"):
-            for k in ["token_result_financial", "excel_bytes_financial"]:
-                st.session_state.pop(k, None)
+            for k in ["token_result", "excel_bytes_financial"]:
+    st.session_state.pop(k, None)
             _clear_query_params()
             st.rerun()
 
