@@ -73,6 +73,7 @@ def _clear_query_params():
         except Exception:
             pass
 
+
 # ============================================================
 # HELPERS (Graph download)
 # ============================================================
@@ -111,6 +112,7 @@ def download_excel_bytes_from_shared_link(access_token: str, shared_url: str) ->
         raise RuntimeError(f"Error downloading file: {file_r.status_code}\n{file_r.text}")
 
     return file_r.content
+
 
 # ============================================================
 # HELPERS (Excel parsing)
@@ -267,6 +269,7 @@ def pick_building_col(df: pd.DataFrame):
             return c
     return None
 
+
 # ============================================================
 # MONTH + YEAR -> TEXT LABELS (NO TIME AXIS)
 # ============================================================
@@ -311,6 +314,7 @@ def build_month_fields(df: pd.DataFrame) -> pd.DataFrame:
         + out.loc[ok, "_YearInt"].astype(int).astype(str)
     )
     return out
+
 
 # ============================================================
 # FILTERS
@@ -370,6 +374,7 @@ def add_filters(df: pd.DataFrame) -> pd.DataFrame:
             df = df[df[c_bld].astype(str).isin(sel)]
 
     return df
+
 
 # ============================================================
 # PDF REPORT
@@ -475,6 +480,7 @@ def build_pdf_report(
     buf.seek(0)
     return buf.getvalue()
 
+
 # ============================================================
 # MSAL APP
 # ============================================================
@@ -485,6 +491,7 @@ def get_msal_app():
         client_credential=CLIENT_SECRET,
         token_cache=None,
     )
+
 
 # ============================================================
 # UI + LOGIN
@@ -550,6 +557,7 @@ with colB:
         _clear_query_params()
         st.rerun()
 
+
 # ============================================================
 # Download + Load
 # ============================================================
@@ -571,6 +579,7 @@ fixed_data = load_fixed_data_from_bytes(excel_bytes)
 
 df = add_filters(df_all.copy())
 
+
 # ============================================================
 # KPI base
 # ============================================================
@@ -581,6 +590,7 @@ COL_COST_VAR = "Variation Total Cost (Budget vs Real)"
 COL_MGMT = "Total Management Fee"
 COL_ROY_5 = "Royalty CNET Group Inc 5%"
 COL_ROY_3 = "Royalty CNET Master 3% BGIS"
+
 
 # ============================================================
 # CATEGORY SPECS
@@ -641,6 +651,7 @@ for c in [c_income, c_cost, c_mgmt, c_roy5]:
     df[c] = pd.to_numeric(df[c], errors="coerce")
 if c_roy3:
     df[c_roy3] = pd.to_numeric(df[c_roy3], errors="coerce")
+
 
 # ============================================================
 # FINAL BUSINESS RULES
@@ -707,6 +718,7 @@ p_roy5 = safe_pct(royalty_5_total, income)
 p_roy3 = safe_pct(royalty_3_total, income) if apply_roy3 else 0.0
 p_new = safe_pct(new_total, income)
 
+
 # ============================================================
 # Traffic Light + Gauge
 # ============================================================
@@ -759,6 +771,7 @@ fig_gauge = go.Figure(go.Indicator(
 ))
 st.plotly_chart(fig_gauge, use_container_width=True)
 
+
 # ============================================================
 # KPI CARDS
 # ============================================================
@@ -793,6 +806,7 @@ with right_col:
         f"{p_roy3*100:,.2f}%"
     )
 
+
 # ============================================================
 # OPTIONAL KPI: Total Cost Budget vs Real + % used / variance
 # ============================================================
@@ -824,6 +838,7 @@ if tc_r and tc_b and tc_v:
     t2.metric("Total Cost Budget", f"${total_cost_budget:,.2f}")
     t3.metric("Variation (Budget - Real)", f"${total_cost_var:,.2f}", status_tc)
     t4.metric("% Budget Used", f"{pct_used*100:,.1f}%", f"Over: {pct_over*100:,.1f}% | Under: {pct_under*100:,.1f}%")
+
 
 # ============================================================
 # WATERFALL
@@ -860,6 +875,7 @@ fig_waterfall = go.Figure(go.Waterfall(
 ))
 fig_waterfall.update_layout(title="Waterfall: Revenue → Costs → (Fixed) → Fees → New Total", showlegend=False)
 st.plotly_chart(fig_waterfall, use_container_width=True)
+
 
 # ============================================================
 # CATEGORY BUDGET vs REAL BREAKDOWN
@@ -975,6 +991,7 @@ else:
     fig_cat_all.update_xaxes(type="category")
     st.plotly_chart(fig_cat_all, use_container_width=True)
 
+
 # ============================================================
 # FIXED EXPENSES BREAKDOWN
 # ============================================================
@@ -988,14 +1005,16 @@ if apply_fixed:
         total_fx = float(df_fixed_breakdown["Amount"].fillna(0).sum())
         st.metric(f"Total Fixed Expenses (from sheet: {fixed_sheet_name})", f"${total_fx:,.2f}")
 
-        st.dataframe(df_fixed_breakdown, use_container_width=True)
+        df_fixed_show = df_fixed_breakdown.copy()
+        df_fixed_show["Amount"] = df_fixed_show["Amount"].map(lambda v: f"{float(v):,.0f}")
+        st.dataframe(df_fixed_show, use_container_width=True)
 
         fig_fx = go.Figure()
         fig_fx.add_trace(
             go.Bar(
                 x=df_fixed_breakdown["Category"],
                 y=df_fixed_breakdown["Amount"],
-                text=df_fixed_breakdown["Amount"].map(lambda v: f"${float(v):,.0f}"),
+                text=df_fixed_breakdown["Amount"].map(lambda v: f"{float(v):,.0f}"),
                 textposition="outside",
             )
         )
@@ -1012,6 +1031,7 @@ else:
         "Fixed expenses breakdown is shown only when Company filter is exactly "
         "'12433087 Canada Inc' or '9359-6633 Quebec Inc'."
     )
+
 
 # ============================================================
 # PROJECT PROFIT / LOSS
@@ -1066,6 +1086,7 @@ else:
         )
     )
     st.dataframe(sty, use_container_width=True)
+
 
 # ============================================================
 # MONTHLY BREAKDOWN
@@ -1136,7 +1157,7 @@ if MONTH_COL in df.columns and YEAR_COL in df.columns:
         cols_show += ["New Total"]
 
         g_show = g.rename(columns={"_MonthText": "Month"}).copy()
-        for c in [c for c in cols_show if c != "Month"]:
+        for c in [col for col in cols_show if col != "Month"]:
             g_show[c] = g_show[c].map(lambda x: f"${float(x):,.2f}")
 
         st.dataframe(g_show[cols_show], use_container_width=True)
@@ -1160,6 +1181,7 @@ if MONTH_COL in df.columns and YEAR_COL in df.columns:
         st.info("Could not build the monthly breakdown. Please verify Month/Year values and KPI columns.")
 else:
     st.info("Month/Year columns were not found in the filtered dataframe.")
+
 
 # ============================================================
 # EXPORT PDF
@@ -1200,6 +1222,7 @@ st.download_button(
     file_name="CNET_Executive_Report.pdf",
     mime="application/pdf",
 )
+
 
 # ============================================================
 # TABLES
