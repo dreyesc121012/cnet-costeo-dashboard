@@ -30,7 +30,8 @@ SCOPES = ["User.Read", "Files.Read.All"]
 
 # Excel config
 SHEET_REAL = "Real Master"
-SHEET_FIXED = "Gasto Fijo"
+SHEET_FIXED_124 = "Gasto Fijo"
+SHEET_FIXED_9359 = "Gasto Fijo 9359"
 HEADER_IDX = 6
 
 # Exact column names
@@ -142,16 +143,34 @@ def read_real_master_from_bytes(excel_bytes: bytes) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def load_fixed_total_from_bytes(excel_bytes: bytes) -> float:
-    fx = pd.read_excel(BytesIO(excel_bytes), sheet_name=SHEET_FIXED, header=None)
-    amounts = pd.to_numeric(fx.iloc[:, 2], errors="coerce")
+def _load_fixed_total_by_sheet(excel_bytes: bytes, sheet_name: str) -> float:
+    try:
+        fx = pd.read_excel(BytesIO(excel_bytes), sheet_name=sheet_name, header=None)
+    except Exception:
+        return 0.0
+
+    best_col = None
+    best_count = -1
+
+    for j in range(fx.shape[1]):
+        s = pd.to_numeric(fx.iloc[:, j], errors="coerce")
+        cnt = int(s.notna().sum())
+        if cnt > best_count:
+            best_count = cnt
+            best_col = j
+
+    if best_col is None or best_count <= 0:
+        return 0.0
+
+    amounts = pd.to_numeric(fx.iloc[:, best_col], errors="coerce")
     return float(amounts.fillna(0).sum())
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def load_fixed_breakdown_from_bytes(excel_bytes: bytes) -> pd.DataFrame:
-    fx = pd.read_excel(BytesIO(excel_bytes), sheet_name=SHEET_FIXED, header=None)
+def _load_fixed_breakdown_by_sheet(excel_bytes: bytes, sheet_name: str) -> pd.DataFrame:
+    try:
+        fx = pd.read_excel(BytesIO(excel_bytes), sheet_name=sheet_name, header=None)
+    except Exception:
+        return pd.DataFrame(columns=["Category", "Amount"])
 
     best_col = None
     best_count = -1
@@ -176,7 +195,8 @@ def load_fixed_breakdown_from_bytes(excel_bytes: bytes) -> pd.DataFrame:
     df_fixed = df_fixed.dropna(subset=["Amount"])
     df_fixed = df_fixed[df_fixed["Category"].str.lower().ne("nan")]
     df_fixed = df_fixed[df_fixed["Category"] != ""]
-    df_fixed = df_fixed[~df_fixed["Category"].str.lower().str.contains("gastos", na=False)]
+    df_fixed = df_fixed[~df_fixed["Category"].str.lower().str.contains("gasto", na=False)]
+    df_fixed = df_fixed[~df_fixed["Category"].str.lower().str.contains("fixed", na=False)]
 
     df_fixed = (
         df_fixed.groupby("Category", as_index=False)["Amount"]
@@ -185,6 +205,22 @@ def load_fixed_breakdown_from_bytes(excel_bytes: bytes) -> pd.DataFrame:
         .reset_index(drop=True)
     )
     return df_fixed
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_fixed_data_from_bytes(excel_bytes: bytes):
+    return {
+        "12433087 Canada Inc": {
+            "sheet": SHEET_FIXED_124,
+            "total": _load_fixed_total_by_sheet(excel_bytes, SHEET_FIXED_124),
+            "breakdown": _load_fixed_breakdown_by_sheet(excel_bytes, SHEET_FIXED_124),
+        },
+        "9359-6633 Quebec Inc": {
+            "sheet": SHEET_FIXED_9359,
+            "total": _load_fixed_total_by_sheet(excel_bytes, SHEET_FIXED_9359),
+            "breakdown": _load_fixed_breakdown_by_sheet(excel_bytes, SHEET_FIXED_9359),
+        },
+    }
 
 
 def _norm(s: str) -> str:
@@ -341,7 +377,7 @@ def add_filters(df: pd.DataFrame) -> pd.DataFrame:
 def build_pdf_report(
     *,
     income, cost, gross,
-    fixed_total_applied, fixed_total_full,
+    fixed_total_applied, fixed_sheet_name,
     net, mgmt_fee_total, royalty_5_total, royalty_3_total, new_total,
     p_cost, p_gross, p_fixed, p_net, p_mgmt, p_roy5, p_roy3, p_new,
     target, gross_margin, net_margin, final_margin,
@@ -369,7 +405,7 @@ def build_pdf_report(
 
     if fixed_total_applied != 0.0:
         rows += [
-            ("Fixed Expenses (Gasto Fijo)", fixed_total_applied, p_fixed),
+            (f"Fixed Expenses ({fixed_sheet_name})", fixed_total_applied, p_fixed),
             ("Net (Gross - Fixed)", net, p_net),
         ]
     else:
@@ -504,8 +540,7 @@ with colA:
     if st.button("🔄 Refresh data"):
         st.session_state.pop("excel_bytes", None)
         read_real_master_from_bytes.clear()
-        load_fixed_total_from_bytes.clear()
-        load_fixed_breakdown_from_bytes.clear()
+        load_fixed_data_from_bytes.clear()
         st.rerun()
 
 with colB:
@@ -532,8 +567,7 @@ except Exception as e:
     st.stop()
 
 df_all = read_real_master_from_bytes(excel_bytes)
-fixed_total_full = load_fixed_total_from_bytes(excel_bytes)
-df_fixed_breakdown = load_fixed_breakdown_from_bytes(excel_bytes)
+fixed_data = load_fixed_data_from_bytes(excel_bytes)
 
 df = add_filters(df_all.copy())
 
@@ -610,16 +644,13 @@ if c_roy3:
 
 # ============================================================
 # FINAL BUSINESS RULES
-# 1) Fixed Expenses for:
-#    - 12433087 Canada Inc
-#    - 9359-6633 Quebec Inc
+# 1) Fixed Expenses from sheet:
+#    - 12433087 Canada Inc -> Gasto Fijo
+#    - 9359-6633 Quebec Inc -> Gasto Fijo 9359
 # 2) Royalty 3% ONLY for Company = 9359-6633 Quebec Inc AND Client = BGIS
 # ============================================================
-FIXED_EXPENSE_COMPANIES = {
-    "12433087 Canada Inc",
-    "9359-6633 Quebec Inc",
-}
-
+COMPANY_FIXED_124 = "12433087 Canada Inc"
+COMPANY_FIXED_9359 = "9359-6633 Quebec Inc"
 COMPANY_BG_QC = "9359-6633 Quebec Inc"
 CLIENT_BGIS = "BGIS"
 
@@ -631,16 +662,25 @@ mgmt_fee_total = float(df[c_mgmt].fillna(0).sum())
 royalty_5_total = float(df[c_roy5].fillna(0).sum())
 royalty_3_total = float(df[c_roy3].fillna(0).sum()) if c_roy3 else 0.0
 
-# Apply Fixed ONLY when filtered Company is exactly one of the allowed companies
-apply_fixed = False
+selected_company = None
 if c_company:
     companies = df[c_company].dropna().astype(str).str.strip().unique().tolist()
-    apply_fixed = (len(companies) == 1 and companies[0] in FIXED_EXPENSE_COMPANIES)
+    if len(companies) == 1:
+        selected_company = companies[0]
 
-fixed_total = fixed_total_full if apply_fixed else 0.0
+apply_fixed = selected_company in {COMPANY_FIXED_124, COMPANY_FIXED_9359}
+
+fixed_total = 0.0
+fixed_sheet_name = ""
+df_fixed_breakdown = pd.DataFrame(columns=["Category", "Amount"])
+
+if apply_fixed and selected_company in fixed_data:
+    fixed_total = float(fixed_data[selected_company]["total"])
+    fixed_sheet_name = str(fixed_data[selected_company]["sheet"])
+    df_fixed_breakdown = fixed_data[selected_company]["breakdown"].copy()
+
 net = gross - fixed_total
 
-# Apply Royalty 3% ONLY when filtered Company=9359-6633 Quebec Inc AND Client=BGIS
 apply_roy3 = False
 if c_company and c_client:
     companies = df[c_company].dropna().astype(str).str.strip().unique().tolist()
@@ -783,7 +823,7 @@ if tc_r and tc_b and tc_v:
     t1.metric("Total Cost Real", f"${total_cost_real:,.2f}")
     t2.metric("Total Cost Budget", f"${total_cost_budget:,.2f}")
     t3.metric("Variation (Budget - Real)", f"${total_cost_var:,.2f}", status_tc)
-    t4.metric(" % Budget Used", f"{pct_used*100:,.1f}%", f"Over: {pct_over*100:,.1f}% | Under: {pct_under*100:,.1f}%")
+    t4.metric("% Budget Used", f"{pct_used*100:,.1f}%", f"Over: {pct_over*100:,.1f}% | Under: {pct_under*100:,.1f}%")
 
 # ============================================================
 # WATERFALL
@@ -943,10 +983,10 @@ st.subheader("🏢 Fixed Expenses Breakdown (Gasto Fijo)")
 
 if apply_fixed:
     if df_fixed_breakdown is None or df_fixed_breakdown.empty:
-        st.warning("No fixed-expense breakdown found in sheet 'Gasto Fijo'.")
+        st.warning(f"No fixed-expense breakdown found in sheet '{fixed_sheet_name}'.")
     else:
         total_fx = float(df_fixed_breakdown["Amount"].fillna(0).sum())
-        st.metric("Total Fixed Expenses (from sheet)", f"${total_fx:,.2f}")
+        st.metric(f"Total Fixed Expenses (from sheet: {fixed_sheet_name})", f"${total_fx:,.2f}")
 
         st.dataframe(df_fixed_breakdown, use_container_width=True)
 
@@ -960,7 +1000,7 @@ if apply_fixed:
             )
         )
         fig_fx.update_layout(
-            title="Fixed Expenses (Gasto Fijo) — Breakdown",
+            title=f"Fixed Expenses Breakdown - {fixed_sheet_name}",
             xaxis_title="Category",
             yaxis_title="Amount ($)",
             height=520,
@@ -1128,17 +1168,28 @@ st.divider()
 st.subheader("📄 Export Executive Report (PDF)")
 
 pdf_bytes = build_pdf_report(
-    income=income, cost=cost, gross=gross,
+    income=income,
+    cost=cost,
+    gross=gross,
     fixed_total_applied=fixed_total,
-    fixed_total_full=fixed_total_full,
+    fixed_sheet_name=fixed_sheet_name if fixed_sheet_name else "N/A",
     net=net,
     mgmt_fee_total=mgmt_fee_total,
     royalty_5_total=royalty_5_total,
     royalty_3_total=(royalty_3_total if apply_roy3 else 0.0),
     new_total=new_total,
-    p_cost=p_cost, p_gross=p_gross, p_fixed=p_fixed, p_net=p_net,
-    p_mgmt=p_mgmt, p_roy5=p_roy5, p_roy3=p_roy3, p_new=p_new,
-    target=target, gross_margin=gross_margin, net_margin=net_margin, final_margin=final_margin,
+    p_cost=p_cost,
+    p_gross=p_gross,
+    p_fixed=p_fixed,
+    p_net=p_net,
+    p_mgmt=p_mgmt,
+    p_roy5=p_roy5,
+    p_roy3=p_roy3,
+    p_new=p_new,
+    target=target,
+    gross_margin=gross_margin,
+    net_margin=net_margin,
+    final_margin=final_margin,
     fig_waterfall=fig_waterfall,
     fig_gauge=fig_gauge,
 )
@@ -1162,7 +1213,7 @@ summary_rows = [
 ]
 
 if apply_fixed:
-    summary_rows += [["Fixed Expenses (Gasto Fijo)", fixed_total, p_fixed]]
+    summary_rows += [[f"Fixed Expenses ({fixed_sheet_name})", fixed_total, p_fixed]]
 
 summary_rows += [
     ["Net", net, p_net],
