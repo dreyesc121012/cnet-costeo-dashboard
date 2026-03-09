@@ -6,7 +6,6 @@ from typing import List, Dict, Optional, Tuple
 import pandas as pd
 import streamlit as st
 import requests
-import msal
 import plotly.express as px
 
 # ============================================================
@@ -104,18 +103,6 @@ def status_semaphore(pct_used: float, budget: float, real: float) -> str:
     if pct_used <= 1.00:
         return "🟢 On Track"
     return "🔴 Over Budget"
-
-
-# ============================================================
-# MSAL APP
-# ============================================================
-def get_msal_app():
-    return msal.ConfidentialClientApplication(
-        CLIENT_ID,
-        authority=AUTHORITY,
-        client_credential=CLIENT_SECRET,
-        token_cache=None,
-    )
 
 
 # ============================================================
@@ -335,53 +322,15 @@ def app():
         st.error("Missing ALLOWED_DOMAIN in Streamlit secrets.")
         st.stop()
 
-    msal_app = get_msal_app()
-    params = get_query_params_compat()
-
     if "token_result" not in st.session_state:
-        code = params.get("code")
-
-        if code:
-            result = msal_app.acquire_token_by_authorization_code(
-                code=code,
-                scopes=SCOPES,
-                redirect_uri=REDIRECT_URI,
-            )
-
-            if "access_token" in result:
-                st.session_state.token_result = result
-                clear_query_params_compat()
-                st.rerun()
-            else:
-                st.error("Could not obtain access token.")
-                st.code(str(result))
-                st.stop()
-
-        st.warning("You are not signed in to Microsoft 365 / SharePoint.")
-
-        extra_qp = {}
-        if DOMAIN_HINT:
-            extra_qp["domain_hint"] = DOMAIN_HINT
-        if LOGIN_HINT:
-            extra_qp["login_hint"] = LOGIN_HINT
-
-        auth_url = msal_app.get_authorization_request_url(
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI,
-            prompt="select_account",
-            response_mode="query",
-            extra_query_parameters=extra_qp,
-        )
-
-        st.link_button("🔐 Sign in with Microsoft (Company)", auth_url)
-        st.caption(f"Redirect URI used: {REDIRECT_URI}")
+        st.error("You must sign in from the main dashboard first.")
         st.stop()
 
     token_result = st.session_state.token_result
     access_token = token_result.get("access_token", "")
 
     if not access_token:
-        st.error("No access token found. Please sign in again.")
+        st.error("No access token found. Please sign in again from the main dashboard.")
         st.session_state.pop("token_result", None)
         st.stop()
 
@@ -404,10 +353,10 @@ def app():
     st.sidebar.success(f"Logged in as {signed_in_email}")
     st.success(f"✅ Signed in as {signed_in_email}")
 
-    if st.button("🚪 Sign out"):
+    if st.button("🚪 Sign out", key="signout_invoices_control"):
         st.session_state.pop("token_result", None)
-        st.session_state.pop("excel_bytes", None)
-        st.session_state.pop("selected_item_id", None)
+        st.session_state.pop("excel_bytes_invoices_control", None)
+        st.session_state.pop("selected_item_id_invoices_control", None)
         st.cache_data.clear()
         clear_query_params_compat()
         st.rerun()
@@ -423,11 +372,11 @@ def app():
 
     col_sb1, col_sb2 = st.sidebar.columns(2)
     with col_sb1:
-        refresh_btn = st.button("🔄 Refresh list", use_container_width=True)
+        refresh_btn = st.sidebar.button("🔄 Refresh list", use_container_width=True, key="refresh_invoices_control")
     with col_sb2:
-        if st.button("🧹 Clear cache", use_container_width=True):
-            st.session_state.pop("excel_bytes", None)
-            st.session_state.pop("selected_item_id", None)
+        if st.sidebar.button("🧹 Clear cache", use_container_width=True, key="clear_cache_invoices_control"):
+            st.session_state.pop("excel_bytes_invoices_control", None)
+            st.session_state.pop("selected_item_id_invoices_control", None)
             st.cache_data.clear()
             st.rerun()
 
@@ -464,14 +413,19 @@ def app():
 
         names = [f["name"] for f in excels]
         default_ix = 0
-        prev = st.session_state.get("selected_item_id")
+        prev = st.session_state.get("selected_item_id_invoices_control")
         if prev:
             for i, f in enumerate(excels):
                 if f["id"] == prev:
                     default_ix = i
                     break
 
-        selected_name = st.sidebar.selectbox("Choose an Excel file", names, index=default_ix)
+        selected_name = st.sidebar.selectbox(
+            "Choose an Excel file",
+            names,
+            index=default_ix,
+            key="select_excel_invoices_control",
+        )
         chosen = next(f for f in excels if f["name"] == selected_name)
         selected_item_id = chosen["id"]
     else:
@@ -483,22 +437,22 @@ def app():
     # DOWNLOAD FILE
     # ============================================================
     needs_download = (
-        ("excel_bytes" not in st.session_state)
-        or (st.session_state.get("selected_item_id") != selected_item_id)
+        ("excel_bytes_invoices_control" not in st.session_state)
+        or (st.session_state.get("selected_item_id_invoices_control") != selected_item_id)
         or refresh_btn
     )
 
     if needs_download:
         try:
             st.info("📥 Downloading Excel from SharePoint/OneDrive...")
-            st.session_state.excel_bytes = download_item_bytes(access_token, drive_id, selected_item_id)
-            st.session_state.selected_item_id = selected_item_id
+            st.session_state.excel_bytes_invoices_control = download_item_bytes(access_token, drive_id, selected_item_id)
+            st.session_state.selected_item_id_invoices_control = selected_item_id
         except Exception as e:
             st.error("Could not download the selected Excel file.")
             st.code(str(e))
             st.stop()
 
-    excel_bytes = st.session_state.excel_bytes
+    excel_bytes = st.session_state.excel_bytes_invoices_control
 
     # ============================================================
     # LOAD DATA
@@ -666,16 +620,16 @@ def app():
     st.sidebar.header("🔎 Filters")
 
     all_companies = sorted(compare["Company"].dropna().unique().tolist())
-    sel_companies = st.sidebar.multiselect("Company", all_companies, default=[])
+    sel_companies = st.sidebar.multiselect("Company", all_companies, default=[], key="filter_company_invoices_control")
 
     all_buildings = sorted(compare["Building Address"].dropna().unique().tolist())
-    sel_buildings = st.sidebar.multiselect("Building Address", all_buildings, default=[])
+    sel_buildings = st.sidebar.multiselect("Building Address", all_buildings, default=[], key="filter_building_invoices_control")
 
     all_categories = sorted(compare["Category"].dropna().unique().tolist())
-    sel_categories = st.sidebar.multiselect("Category", all_categories, default=[])
+    sel_categories = st.sidebar.multiselect("Category", all_categories, default=[], key="filter_category_invoices_control")
 
     all_statuses = sorted(compare["Status"].dropna().unique().tolist())
-    sel_statuses = st.sidebar.multiselect("Status", all_statuses, default=[])
+    sel_statuses = st.sidebar.multiselect("Status", all_statuses, default=[], key="filter_status_invoices_control")
 
     view = compare.copy()
     if sel_companies:
