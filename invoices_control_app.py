@@ -24,7 +24,7 @@ ALLOWED_DOMAIN = str(st.secrets.get("ALLOWED_DOMAIN", "")).strip().lower()
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 SCOPES = ["User.Read", "Files.Read.All"]
 
-SHEET_PAYMENTS = "2025 Summary PAYMENTS"
+SHEET_PAYMENTS = "Summary PAYMENTS"
 SHEET_INVOICING = "Invoicing"
 
 st.set_page_config(page_title="Invoices Control", layout="wide")
@@ -510,7 +510,7 @@ equipment_budget_col = find_col(invoicing_df, "Equipment Budget")
 pw_budget_col = find_col(invoicing_df, "PW Budget")
 
 if not (pay_addr and pay_cat and pay_amt):
-    st.error("Missing required columns in '2025 Summary PAYMENTS'.")
+    st.error("Missing required columns in 'Summary PAYMENTS'.")
     st.write("Detected columns:", list(payments_df.columns))
     st.write("Detected header row in PAYMENTS sheet (0-based):", payments_header_row)
     st.stop()
