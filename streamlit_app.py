@@ -319,14 +319,25 @@ def build_month_fields(df: pd.DataFrame) -> pd.DataFrame:
 # ============================================================
 # FILTERS
 # ============================================================
-def add_filters(df: pd.DataFrame) -> pd.DataFrame:
+def add_filters(df: pd.DataFrame):
     st.sidebar.header("Executive Filters")
+
+    filter_state = {
+        "years": [],
+        "months": [],
+        "companies": [],
+        "provinces": [],
+        "clients": [],
+        "projects": [],
+        "buildings": [],
+    }
 
     if MONTH_COL in df.columns and YEAR_COL in df.columns:
         df = build_month_fields(df)
 
         years = sorted([int(y) for y in df["_YearInt"].dropna().unique().tolist()])
         sel_years = st.sidebar.multiselect("Year", years, default=[])
+        filter_state["years"] = sel_years
         if sel_years:
             df = df[df["_YearInt"].isin(sel_years)]
 
@@ -337,6 +348,7 @@ def add_filters(df: pd.DataFrame) -> pd.DataFrame:
             .sort_values("_MonthKey")
         )
         sel_months = st.sidebar.multiselect("Month", month_table["_MonthText"].tolist(), default=[])
+        filter_state["months"] = sel_months
         if sel_months:
             df = df[df["_MonthText"].isin(sel_months)]
     else:
@@ -344,36 +356,41 @@ def add_filters(df: pd.DataFrame) -> pd.DataFrame:
 
     c_company = find_col(df, "Company")
     if c_company:
-        sel = st.sidebar.multiselect("Company", sorted(df[c_company].dropna().unique()))
+        sel = st.sidebar.multiselect("Company", sorted(df[c_company].dropna().astype(str).unique().tolist()))
+        filter_state["companies"] = sel
         if sel:
-            df = df[df[c_company].isin(sel)]
+            df = df[df[c_company].astype(str).isin(sel)]
 
     c_prov = find_col(df, "Province")
     if c_prov:
-        sel = st.sidebar.multiselect("Province", sorted(df[c_prov].dropna().unique()))
+        sel = st.sidebar.multiselect("Province", sorted(df[c_prov].dropna().astype(str).unique().tolist()))
+        filter_state["provinces"] = sel
         if sel:
-            df = df[df[c_prov].isin(sel)]
+            df = df[df[c_prov].astype(str).isin(sel)]
 
     c_client = find_col(df, "Client")
     if c_client:
-        sel = st.sidebar.multiselect("Client", sorted(df[c_client].dropna().unique()))
+        sel = st.sidebar.multiselect("Client", sorted(df[c_client].dropna().astype(str).unique().tolist()))
+        filter_state["clients"] = sel
         if sel:
-            df = df[df[c_client].isin(sel)]
+            df = df[df[c_client].astype(str).isin(sel)]
 
     c_proj = find_col(df, "Project Name")
     if c_proj:
-        sel = st.sidebar.multiselect("Project (Project Name)", sorted(df[c_proj].dropna().unique()))
+        sel = st.sidebar.multiselect("Project (Project Name)", sorted(df[c_proj].dropna().astype(str).unique().tolist()))
+        filter_state["projects"] = sel
         if sel:
-            df = df[df[c_proj].isin(sel)]
+            df = df[df[c_proj].astype(str).isin(sel)]
 
     c_bld = pick_building_col(df)
     if c_bld:
         uniq = sorted(df[c_bld].dropna().astype(str).unique().tolist())
         sel = st.sidebar.multiselect("Building", uniq)
+        filter_state["buildings"] = sel
         if sel:
             df = df[df[c_bld].astype(str).isin(sel)]
 
-    return df
+    return df, filter_state
 
 
 # ============================================================
@@ -577,7 +594,7 @@ except Exception as e:
 df_all = read_real_master_from_bytes(excel_bytes)
 fixed_data = load_fixed_data_from_bytes(excel_bytes)
 
-df = add_filters(df_all.copy())
+df, filter_state = add_filters(df_all.copy())
 
 
 # ============================================================
@@ -673,13 +690,20 @@ mgmt_fee_total = float(df[c_mgmt].fillna(0).sum())
 royalty_5_total = float(df[c_roy5].fillna(0).sum())
 royalty_3_total = float(df[c_roy3].fillna(0).sum()) if c_roy3 else 0.0
 
-selected_company = None
-if c_company:
-    companies = df[c_company].dropna().astype(str).str.strip().unique().tolist()
-    if len(companies) == 1:
-        selected_company = companies[0]
+selected_companies_explicit = [str(x).strip() for x in filter_state.get("companies", [])]
+selected_projects_explicit = [str(x).strip() for x in filter_state.get("projects", [])]
 
-apply_fixed = selected_company in {COMPANY_FIXED_124, COMPANY_FIXED_9359}
+project_filter_active = len(selected_projects_explicit) > 0
+company_filter_active = len(selected_companies_explicit) > 0
+
+selected_company = selected_companies_explicit[0] if len(selected_companies_explicit) == 1 else None
+
+apply_fixed = (
+    company_filter_active
+    and not project_filter_active
+    and len(selected_companies_explicit) == 1
+    and selected_company in {COMPANY_FIXED_124, COMPANY_FIXED_9359}
+)
 
 fixed_total = 0.0
 fixed_sheet_name = ""
@@ -1028,8 +1052,8 @@ if apply_fixed:
         st.plotly_chart(fig_fx, use_container_width=True)
 else:
     st.info(
-        "Fixed expenses breakdown is shown only when Company filter is exactly "
-        "'12433087 Canada Inc' or '9359-6633 Quebec Inc'."
+        "Fixed expenses breakdown is shown only when Company filter is explicitly selected as exactly "
+        "'12433087 Canada Inc' or '9359-6633 Quebec Inc', and no Project filter is active."
     )
 
 
