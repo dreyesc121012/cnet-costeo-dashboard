@@ -363,7 +363,7 @@ def report_validation(df: pd.DataFrame, hide_marketing: bool = False) -> pd.Data
     return rep
 
 # =========================================================
-# Sales Summary (UPDATED: Month labels + Multi-year)
+# Sales Summary
 # =========================================================
 def sales_summary(df: pd.DataFrame):
     st.subheader("Sales Summary")
@@ -443,7 +443,7 @@ with h2:
     st.title(APP_TITLE)
 
 # =========================================================
-# UI (NO COMPARISON ANYMORE)
+# UI
 # =========================================================
 month_labels = [
     "January", "February", "March", "April", "May", "June",
@@ -456,24 +456,43 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Month filter (Main)")
-    month_name = st.selectbox("Month", month_labels, index=0, key="main_month")
+
+    select_all_main_months = st.checkbox("Select All Months", value=False, key="select_all_main_months")
+
+    if select_all_main_months:
+        main_months = month_labels.copy()
+        st.multiselect(
+            "Month",
+            month_labels,
+            default=main_months,
+            key="main_months_disabled"
+        )
+    else:
+        main_months = st.multiselect(
+            "Month",
+            month_labels,
+            default=["February"],
+            key="main_months"
+        )
+
     year = st.number_input("Year", min_value=2020, max_value=2035, value=2026, step=1, key="main_year")
 
     st.divider()
     st.subheader("Sales Summary")
 
-    # We will populate years list from df_raw after download; for now set a default range
     exec_months = st.multiselect(
         "Months",
         month_labels,
-        default=[month_name],
+        default=main_months if main_months else ["February"],
         key="exec_months"
     )
 
     st.divider()
     run = st.button("Download + Process", type="primary")
 
+# =========================================================
 # Download/process on click
+# =========================================================
 if run:
     with st.spinner("Downloading export from CNET..."):
         content = download_export_file()
@@ -494,19 +513,28 @@ if "df_raw" not in st.session_state:
 
 df_raw = st.session_state["df_raw"].copy()
 
-# Build month df (main)
-m = month_name_to_num(month_name)
+# =========================================================
+# Build month df (main) - MULTI MONTH
+# =========================================================
 y = int(year)
-df_month = df_raw[(df_raw["Creation Date"].dt.month == m) & (df_raw["Creation Date"].dt.year == y)].copy()
+
+months_for_main = main_months if main_months else ["February"]
+main_month_nums = [month_name_to_num(mn) for mn in months_for_main]
+
+df_month = df_raw[
+    (df_raw["Creation Date"].dt.year == y) &
+    (df_raw["Creation Date"].dt.month.isin(main_month_nums))
+].copy()
+
 df_main = build_columns(df_month)
 
-st.success(f"Data cargada en memoria: {month_name} {y} | Rows: {len(df_main):,}")
+main_months_label = ", ".join(months_for_main) if len(months_for_main) <= 3 else f"{len(months_for_main)} months selected"
+st.success(f"Data cargada en memoria: {main_months_label} {y} | Rows: {len(df_main):,}")
 
-# ============== Sidebar Filters (ONLY THESE — NO COMPARISON FILTERS) ==============
+# ============== Sidebar Filters ==============
 company_col = get_company_col(df_main)
 
 with st.sidebar:
-    # Multi-year selector (after df_raw is loaded)
     available_years = sorted(df_raw["Creation Date"].dropna().dt.year.unique().tolist())
     if not available_years:
         available_years = list(range(2020, 2036))
@@ -574,7 +602,8 @@ show_kpis_from_df(df_for_report, hide_marketing=hide_marketing)
 # =========================================================
 st.divider()
 
-exec_month_nums = [month_name_to_num(mn) for mn in (exec_months or [month_name])]
+exec_months_selected = exec_months if exec_months else months_for_main
+exec_month_nums = [month_name_to_num(mn) for mn in exec_months_selected]
 years_for_summary = sel_years or [y]
 
 df_exec_raw = df_raw[
@@ -609,10 +638,12 @@ else:
 
 st.dataframe(format_report_for_display(rep), use_container_width=True)
 
+main_file_month_label = "all_months" if len(months_for_main) == 12 else "_".join([m.lower() for m in months_for_main[:3]])
+
 st.download_button(
     label="Download selected report (CSV)",
     data=df_to_csv_bytes(rep),
-    file_name=f"{report_choice.replace(' ', '_').lower()}_{month_name.lower()}_{y}.csv",
+    file_name=f"{report_choice.replace(' ', '_').lower()}_{main_file_month_label}_{y}.csv",
     mime="text/csv"
 )
 
