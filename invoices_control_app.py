@@ -194,6 +194,30 @@ def _norm(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip().lower()
     return s
 
+def clean_text_value(v) -> str:
+    if pd.isna(v):
+        return ""
+    s = str(v).replace("\u00A0", " ").strip()
+    if s.lower() in {"nan", "none", "null"}:
+        return ""
+    return s
+
+def clean_series_text(s: pd.Series, blank_label: str = "Unspecified") -> pd.Series:
+    out = s.astype(str).str.replace("\u00A0", " ", regex=False).str.strip()
+    out = out.replace(
+        {
+            "nan": "",
+            "None": "",
+            "none": "",
+            "NULL": "",
+            "null": "",
+            "<NA>": "",
+        }
+    )
+    out = out.fillna("")
+    out = out.mask(out.str.strip() == "", blank_label)
+    return out
+
 def find_col(df: pd.DataFrame, name: str):
     t = _norm(name)
     for c in df.columns:
@@ -247,6 +271,32 @@ def read_sheet_with_detected_header(
     df.columns = [str(c).strip() for c in df.columns]
     return df, header_row
 
+def get_column_by_position(df: pd.DataFrame, zero_based_idx: int):
+    if 0 <= zero_based_idx < len(df.columns):
+        return df.columns[zero_based_idx]
+    return None
+
+def find_col_or_position(df: pd.DataFrame, candidates: List[str], zero_based_idx: int = None):
+    col = find_first_existing_col(df, candidates)
+    if col:
+        return col
+    if zero_based_idx is not None:
+        return get_column_by_position(df, zero_based_idx)
+    return None
+
+def normalize_category_series(s: pd.Series) -> pd.Series:
+    temp = s.astype(str).str.strip()
+    mapping = {
+        "labour": "Labor",
+        "labor": "Labor",
+        "supplies": "Supplies",
+        "equipment": "Equipment",
+        "pw": "PW",
+        "power washing": "PW",
+        "powerwashing": "PW",
+    }
+    return temp.apply(lambda x: mapping.get(x.strip().lower(), x.strip()))
+
 # ============================================================
 # READ EXCEL
 # ============================================================
@@ -260,6 +310,10 @@ def load_sheets_from_bytes(excel_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFra
         "Amount without taxes",
         "Amount",
         "Address",
+        "Supplier",
+        "Type of work",
+        "Diverse expense",
+        "Province",
     ]
     invoicing_expected = [
         "Building Address",
@@ -377,8 +431,8 @@ st.success(f"✅ Signed in as {signed_in_email}")
 
 if st.button("🚪 Sign out"):
     st.session_state.pop("token_result", None)
-    st.session_state.pop("excel_bytes", None)
-    st.session_state.pop("selected_item_id", None)
+    st.session_state.pop("excel_file_map", None)
+    st.session_state.pop("selected_item_ids", None)
     st.cache_data.clear()
     clear_query_params_compat()
     st.rerun()
@@ -397,8 +451,8 @@ with col_sb1:
     refresh_btn = st.sidebar.button("🔄 Refresh list", use_container_width=True)
 with col_sb2:
     if st.sidebar.button("🧹 Clear cache", use_container_width=True):
-        st.session_state.pop("excel_bytes", None)
-        st.session_state.pop("selected_item_id", None)
+        st.session_state.pop("excel_file_map", None)
+        st.session_state.pop("selected_item_ids", None)
         st.cache_data.clear()
         st.rerun()
 
@@ -420,8 +474,8 @@ drive_id = meta["parentReference"]["driveId"]
 root_item_id = meta["id"]
 is_folder = "folder" in meta
 
-selected_item_id: Optional[str] = None
-selected_name: Optional[str] = None
+selected_item_ids: List[str] = []
+selected_names: List[str] = []
 
 if is_folder:
     st.sidebar.subheader("📄 Excel files in folder")
@@ -434,51 +488,87 @@ if is_folder:
         st.stop()
 
     names = [f["name"] for f in excels]
-    default_ix = 0
-    prev = st.session_state.get("selected_item_id")
-    if prev:
-        for i, f in enumerate(excels):
-            if f["id"] == prev:
-                default_ix = i
-                break
+    month_options = ["ALL MONTHS"] + names
 
-    selected_name = st.sidebar.selectbox("Choose an Excel file", names, index=default_ix)
-    chosen = next(f for f in excels if f["name"] == selected_name)
-    selected_item_id = chosen["id"]
+    prev_selected_ids = st.session_state.get("selected_item_ids", [])
+    default_selected = [f["name"] for f in excels if f["id"] in prev_selected_ids] if prev_selected_ids else []
+
+    selected_names = st.sidebar.multiselect(
+        "Choose one or more Excel files",
+        month_options,
+        default=default_selected,
+    )
+
+    if "ALL MONTHS" in selected_names:
+        selected_names = names
+
+    if not selected_names:
+        st.info("Please select at least one Excel file.")
+        st.stop()
+
+    selected_item_ids = [f["id"] for f in excels if f["name"] in selected_names]
 
 else:
-    selected_item_id = root_item_id
-    selected_name = meta.get("name", "Selected file")
-    st.sidebar.caption(f"Using file: {selected_name}")
+    selected_item_ids = [root_item_id]
+    selected_names = [meta.get("name", "Selected file")]
+    st.sidebar.caption(f"Using file: {selected_names[0]}")
 
 # ============================================================
-# DOWNLOAD FILE
+# DOWNLOAD FILE(S)
 # ============================================================
 needs_download = (
-    ("excel_bytes" not in st.session_state)
-    or (st.session_state.get("selected_item_id") != selected_item_id)
+    ("excel_file_map" not in st.session_state)
+    or (st.session_state.get("selected_item_ids") != selected_item_ids)
     or refresh_btn
 )
 
 if needs_download:
     try:
-        st.info("📥 Downloading Excel from SharePoint/OneDrive...")
-        st.session_state.excel_bytes = download_item_bytes(access_token, drive_id, selected_item_id)
-        st.session_state.selected_item_id = selected_item_id
+        st.info("📥 Downloading selected Excel file(s) from SharePoint/OneDrive...")
+        excel_file_map = {}
+
+        for item_id, file_name in zip(selected_item_ids, selected_names):
+            excel_file_map[file_name] = download_item_bytes(access_token, drive_id, item_id)
+
+        st.session_state.excel_file_map = excel_file_map
+        st.session_state.selected_item_ids = selected_item_ids
+
     except Exception as e:
-        st.error("Could not download the selected Excel file.")
+        st.error("Could not download the selected Excel file(s).")
         st.code(str(e))
         st.stop()
 
-excel_bytes = st.session_state.excel_bytes
+excel_file_map = st.session_state.excel_file_map
 
 # ============================================================
-# LOAD DATA
+# LOAD DATA FROM MULTIPLE FILES
 # ============================================================
+all_payments = []
+all_invoicing = []
+payments_header_rows = {}
+invoicing_header_rows = {}
+
 try:
-    payments_df, invoicing_df, payments_header_row, invoicing_header_row = load_sheets_from_bytes(excel_bytes)
+    for file_name, excel_bytes in excel_file_map.items():
+        p_df, i_df, p_header, i_header = load_sheets_from_bytes(excel_bytes)
+
+        p_df = p_df.copy()
+        i_df = i_df.copy()
+
+        p_df["Source File"] = file_name
+        i_df["Source File"] = file_name
+
+        all_payments.append(p_df)
+        all_invoicing.append(i_df)
+
+        payments_header_rows[file_name] = p_header
+        invoicing_header_rows[file_name] = i_header
+
+    payments_df = pd.concat(all_payments, ignore_index=True) if all_payments else pd.DataFrame()
+    invoicing_df = pd.concat(all_invoicing, ignore_index=True) if all_invoicing else pd.DataFrame()
+
 except Exception as e:
-    st.error("Could not read the required sheets from the Excel file.")
+    st.error("Could not read the required sheets from the selected Excel files.")
     st.code(str(e))
     st.stop()
 
@@ -490,6 +580,17 @@ pay_cat = find_col(payments_df, "Category")
 pay_amt = find_col(payments_df, "Amount without taxes")
 if not pay_amt:
     pay_amt = find_col(payments_df, "Amount")
+
+# Requested breakdown columns from Summary PAYMENTS
+pay_supplier = find_col_or_position(payments_df, ["Supplier"], zero_based_idx=1)           # Column B
+pay_type_of_work = find_col_or_position(payments_df, ["Type of work", "Type Of Work"], 5)  # Column F
+pay_diverse_expense = find_col_or_position(
+    payments_df,
+    ["Diverse expense", "Diverse Expense"],
+    6,  # Column G
+)
+pay_province = find_col_or_position(payments_df, ["Province"], 10)                          # Column K
+pay_source_file = find_col(payments_df, "Source File")
 
 inv_addr = find_col(invoicing_df, "Building Address")
 if not inv_addr:
@@ -508,17 +609,16 @@ labor_budget_col = find_col(invoicing_df, "Labor Budget")
 supplies_budget_col = find_col(invoicing_df, "Supplies Budget")
 equipment_budget_col = find_col(invoicing_df, "Equipment Budget")
 pw_budget_col = find_col(invoicing_df, "PW Budget")
+inv_source_file = find_col(invoicing_df, "Source File")
 
 if not (pay_addr and pay_cat and pay_amt):
     st.error("Missing required columns in 'Summary PAYMENTS'.")
     st.write("Detected columns:", list(payments_df.columns))
-    st.write("Detected header row in PAYMENTS sheet (0-based):", payments_header_row)
     st.stop()
 
 if not inv_addr:
     st.error("Missing 'Building Address' (or equivalent) in 'Invoicing'.")
     st.write("Detected columns:", list(invoicing_df.columns))
-    st.write("Detected header row in INVOICING sheet (0-based):", invoicing_header_row)
     st.stop()
 
 # ============================================================
@@ -528,13 +628,16 @@ inv_base = invoicing_df.copy()
 inv_base[inv_addr] = inv_base[inv_addr].astype(str).str.strip()
 
 if inv_company:
-    inv_base[inv_company] = inv_base[inv_company].astype(str).str.strip()
-    inv_base[inv_company] = inv_base[inv_company].replace({"nan": "", "None": ""})
-    inv_base[inv_company] = inv_base[inv_company].fillna("")
-    inv_base.loc[inv_base[inv_company].astype(str).str.strip() == "", inv_company] = "Unassigned"
+    inv_base[inv_company] = clean_series_text(inv_base[inv_company], blank_label="Unassigned")
 else:
     inv_base["__Company__"] = "Unassigned"
     inv_company = "__Company__"
+
+if inv_source_file:
+    inv_base[inv_source_file] = clean_series_text(inv_base[inv_source_file], blank_label="Unknown File")
+else:
+    inv_base["Source File"] = "Unknown File"
+    inv_source_file = "Source File"
 
 budget_rows = []
 
@@ -547,45 +650,105 @@ category_budget_map = [
 
 for category_name, budget_col in category_budget_map:
     if budget_col:
-        b = inv_base[[inv_addr, inv_company, budget_col]].copy()
-        b.columns = ["Building Address", "Company", "Budget"]
+        b = inv_base[[inv_addr, inv_company, inv_source_file, budget_col]].copy()
+        b.columns = ["Building Address", "Company", "Source File", "Budget"]
         b["Category"] = category_name
         b["Budget"] = safe_num(b["Budget"])
-        budget_rows.append(b[["Building Address", "Company", "Category", "Budget"]])
+        budget_rows.append(b[["Source File", "Building Address", "Company", "Category", "Budget"]])
 
 if budget_rows:
     budgets = pd.concat(budget_rows, ignore_index=True)
-    budgets = budgets.groupby(["Building Address", "Company", "Category"], as_index=False)["Budget"].sum()
+    budgets = budgets.groupby(
+        ["Source File", "Building Address", "Company", "Category"],
+        as_index=False
+    )["Budget"].sum()
 else:
-    budgets = pd.DataFrame(columns=["Building Address", "Company", "Category", "Budget"])
+    budgets = pd.DataFrame(columns=["Source File", "Building Address", "Company", "Category", "Budget"])
 
 # ============================================================
-# PAYMENTS: ONLY ROWS WITH CATEGORY
+# PAYMENTS BASE WITH EXTRA BREAKDOWN COLUMNS
 # ============================================================
-pay_base = payments_df[[pay_addr, pay_cat, pay_amt]].copy()
-pay_base.columns = ["Building Address", "Category", "Real"]
+pay_cols_to_take = [pay_addr, pay_cat, pay_amt]
+for extra_col in [pay_supplier, pay_type_of_work, pay_diverse_expense, pay_province, pay_source_file]:
+    if extra_col and extra_col not in pay_cols_to_take:
+        pay_cols_to_take.append(extra_col)
+
+pay_base = payments_df[pay_cols_to_take].copy()
+
+rename_map = {
+    pay_addr: "Building Address",
+    pay_cat: "Category",
+    pay_amt: "Real",
+}
+if pay_supplier:
+    rename_map[pay_supplier] = "Supplier"
+if pay_type_of_work:
+    rename_map[pay_type_of_work] = "Type of work"
+if pay_diverse_expense:
+    rename_map[pay_diverse_expense] = "Diverse expense"
+if pay_province:
+    rename_map[pay_province] = "Province"
+if pay_source_file:
+    rename_map[pay_source_file] = "Source File"
+
+pay_base = pay_base.rename(columns=rename_map)
+
+for col in ["Supplier", "Type of work", "Diverse expense", "Province", "Source File"]:
+    if col not in pay_base.columns:
+        pay_base[col] = "Unspecified"
+    pay_base[col] = clean_series_text(pay_base[col], blank_label="Unspecified")
+
 pay_base["Building Address"] = pay_base["Building Address"].astype(str).str.strip()
 pay_base["Category"] = pay_base["Category"].astype(str).str.strip()
 pay_base["Real"] = safe_num(pay_base["Real"])
+pay_base["Category"] = normalize_category_series(pay_base["Category"])
 
 pay_base = pay_base[
     pay_base["Category"].notna()
     & (pay_base["Category"].astype(str).str.strip() != "")
-    & (_norm(pay_base["Category"].astype(str)) != "nan")
+    & (~pay_base["Category"].astype(str).str.strip().str.lower().isin(["nan", "none", "null"]))
 ]
 
-pay_base["Category"] = pay_base["Category"].replace({
-    "labour": "Labor",
-    "labor": "Labor",
-    "supplies": "Supplies",
-    "equipment": "Equipment",
-    "pw": "PW",
-    "Power Washing": "PW",
-})
+# ============================================================
+# FILTERS
+# ============================================================
+st.sidebar.header("🔎 Filters")
 
+all_source_files = sorted(pay_base["Source File"].dropna().unique().tolist())
+sel_source_files = st.sidebar.multiselect("Excel File(s)", all_source_files, default=[])
+
+all_suppliers = sorted(pay_base["Supplier"].dropna().unique().tolist())
+sel_suppliers = st.sidebar.multiselect("Supplier", all_suppliers, default=[])
+
+all_type_of_work = sorted(pay_base["Type of work"].dropna().unique().tolist())
+sel_type_of_work = st.sidebar.multiselect("Type of work", all_type_of_work, default=[])
+
+all_diverse_expense = sorted(pay_base["Diverse expense"].dropna().unique().tolist())
+sel_diverse_expense = st.sidebar.multiselect("Diverse expense", all_diverse_expense, default=[])
+
+all_provinces = sorted(pay_base["Province"].dropna().unique().tolist())
+sel_provinces = st.sidebar.multiselect("Province", all_provinces, default=[])
+
+# Apply payment-level filters first
+filtered_pay_base = pay_base.copy()
+
+if sel_source_files:
+    filtered_pay_base = filtered_pay_base[filtered_pay_base["Source File"].isin(sel_source_files)]
+if sel_suppliers:
+    filtered_pay_base = filtered_pay_base[filtered_pay_base["Supplier"].isin(sel_suppliers)]
+if sel_type_of_work:
+    filtered_pay_base = filtered_pay_base[filtered_pay_base["Type of work"].isin(sel_type_of_work)]
+if sel_diverse_expense:
+    filtered_pay_base = filtered_pay_base[filtered_pay_base["Diverse expense"].isin(sel_diverse_expense)]
+if sel_provinces:
+    filtered_pay_base = filtered_pay_base[filtered_pay_base["Province"].isin(sel_provinces)]
+
+# Actuals aggregated after payment filters
 actuals = (
-    pay_base.groupby(["Building Address", "Category"], as_index=False)["Real"]
-    .sum()
+    filtered_pay_base.groupby(
+        ["Source File", "Building Address", "Category"],
+        as_index=False
+    )["Real"].sum()
 )
 
 # ============================================================
@@ -593,7 +756,7 @@ actuals = (
 # ============================================================
 compare = budgets.merge(
     actuals,
-    on=["Building Address", "Category"],
+    on=["Source File", "Building Address", "Category"],
     how="left"
 )
 
@@ -610,11 +773,55 @@ compare["Status"] = compare.apply(
     axis=1,
 )
 
+# Extra payment metadata aggregated for display
+meta_by_building_cat = (
+    filtered_pay_base.groupby(["Source File", "Building Address", "Category"], as_index=False)
+    .agg(
+        Supplier=("Supplier", lambda s: " | ".join(sorted(set([x for x in s if clean_text_value(x)]))[:10])),
+        Type_of_work=("Type of work", lambda s: " | ".join(sorted(set([x for x in s if clean_text_value(x)]))[:10])),
+        Diverse_expense=("Diverse expense", lambda s: " | ".join(sorted(set([x for x in s if clean_text_value(x)]))[:10])),
+        Province=("Province", lambda s: " | ".join(sorted(set([x for x in s if clean_text_value(x)]))[:10])),
+    )
+)
+
+compare = compare.merge(
+    meta_by_building_cat,
+    on=["Source File", "Building Address", "Category"],
+    how="left"
+)
+
+# ============================================================
+# ADDITIONAL COMPARE FILTERS
+# ============================================================
+all_companies = sorted(compare["Company"].dropna().unique().tolist())
+sel_companies = st.sidebar.multiselect("Company", all_companies, default=[])
+
+all_buildings = sorted(compare["Building Address"].dropna().unique().tolist())
+sel_buildings = st.sidebar.multiselect("Building Address", all_buildings, default=[])
+
+all_categories = sorted(compare["Category"].dropna().unique().tolist())
+sel_categories = st.sidebar.multiselect("Category", all_categories, default=[])
+
+all_statuses = sorted(compare["Status"].dropna().unique().tolist())
+sel_statuses = st.sidebar.multiselect("Status", all_statuses, default=[])
+
+view = compare.copy()
+if sel_source_files:
+    view = view[view["Source File"].isin(sel_source_files)]
+if sel_companies:
+    view = view[view["Company"].isin(sel_companies)]
+if sel_buildings:
+    view = view[view["Building Address"].isin(sel_buildings)]
+if sel_categories:
+    view = view[view["Category"].isin(sel_categories)]
+if sel_statuses:
+    view = view[view["Status"].isin(sel_statuses)]
+
 # ============================================================
 # BUILDING SUMMARY
 # ============================================================
 building_summary = (
-    compare.groupby(["Building Address", "Company"], as_index=False)
+    view.groupby(["Source File", "Building Address", "Company"], as_index=False)
     .agg(
         Real=("Real", "sum"),
         Budget=("Budget", "sum"),
@@ -632,38 +839,7 @@ building_summary["Status"] = building_summary.apply(
     axis=1,
 )
 
-# ============================================================
-# FILTERS
-# ============================================================
-st.sidebar.header("🔎 Filters")
-
-all_companies = sorted(compare["Company"].dropna().unique().tolist())
-sel_companies = st.sidebar.multiselect("Company", all_companies, default=[])
-
-all_buildings = sorted(compare["Building Address"].dropna().unique().tolist())
-sel_buildings = st.sidebar.multiselect("Building Address", all_buildings, default=[])
-
-all_categories = sorted(compare["Category"].dropna().unique().tolist())
-sel_categories = st.sidebar.multiselect("Category", all_categories, default=[])
-
-all_statuses = sorted(compare["Status"].dropna().unique().tolist())
-sel_statuses = st.sidebar.multiselect("Status", all_statuses, default=[])
-
-view = compare.copy()
-if sel_companies:
-    view = view[view["Company"].isin(sel_companies)]
-if sel_buildings:
-    view = view[view["Building Address"].isin(sel_buildings)]
-if sel_categories:
-    view = view[view["Category"].isin(sel_categories)]
-if sel_statuses:
-    view = view[view["Status"].isin(sel_statuses)]
-
 building_view = building_summary.copy()
-if sel_companies:
-    building_view = building_view[building_view["Company"].isin(sel_companies)]
-if sel_buildings:
-    building_view = building_view[building_view["Building Address"].isin(sel_buildings)]
 if sel_statuses:
     building_view = building_view[building_view["Status"].isin(sel_statuses)]
 
@@ -698,7 +874,7 @@ with left_col:
     st.markdown("### 🚨 Priority Addresses with No Real Yet")
     if not missing_real.empty:
         missing_real_display = missing_real[
-            ["Status", "Company", "Building Address", "Real", "Budget", "Pending_to_Reach_Budget", "% Used"]
+            ["Status", "Source File", "Company", "Building Address", "Real", "Budget", "Pending_to_Reach_Budget", "% Used"]
         ].copy()
 
         st.dataframe(
@@ -752,6 +928,99 @@ with right_col:
         st.info("No data available for selected statuses.")
 
 # ============================================================
+# BREAKDOWNS REQUESTED
+# ============================================================
+st.subheader("🧩 Payments Breakdown")
+
+b1, b2 = st.columns(2)
+
+with b1:
+    st.markdown("### Supplier Breakdown")
+    supplier_breakdown = (
+        filtered_pay_base.groupby("Supplier", as_index=False)
+        .agg(
+            Transactions=("Real", "size"),
+            Real=("Real", "sum"),
+            Buildings=("Building Address", "nunique"),
+            Files=("Source File", "nunique"),
+        )
+        .sort_values("Real", ascending=False)
+    )
+
+    st.dataframe(
+        supplier_breakdown.style.format({
+            "Real": fmt_currency,
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+with b2:
+    st.markdown("### Type of Work Breakdown")
+    type_breakdown = (
+        filtered_pay_base.groupby("Type of work", as_index=False)
+        .agg(
+            Transactions=("Real", "size"),
+            Real=("Real", "sum"),
+            Buildings=("Building Address", "nunique"),
+            Files=("Source File", "nunique"),
+        )
+        .sort_values("Real", ascending=False)
+    )
+
+    st.dataframe(
+        type_breakdown.style.format({
+            "Real": fmt_currency,
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+b3, b4 = st.columns(2)
+
+with b3:
+    st.markdown("### Diverse Expense Breakdown")
+    diverse_breakdown = (
+        filtered_pay_base.groupby("Diverse expense", as_index=False)
+        .agg(
+            Transactions=("Real", "size"),
+            Real=("Real", "sum"),
+            Buildings=("Building Address", "nunique"),
+            Files=("Source File", "nunique"),
+        )
+        .sort_values("Real", ascending=False)
+    )
+
+    st.dataframe(
+        diverse_breakdown.style.format({
+            "Real": fmt_currency,
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+with b4:
+    st.markdown("### Province Breakdown")
+    province_breakdown = (
+        filtered_pay_base.groupby("Province", as_index=False)
+        .agg(
+            Transactions=("Real", "size"),
+            Real=("Real", "sum"),
+            Buildings=("Building Address", "nunique"),
+            Files=("Source File", "nunique"),
+        )
+        .sort_values("Real", ascending=False)
+    )
+
+    st.dataframe(
+        province_breakdown.style.format({
+            "Real": fmt_currency,
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+# ============================================================
 # COMPANY BREAKDOWN
 # ============================================================
 st.subheader("🏢 Company Breakdown")
@@ -763,6 +1032,7 @@ company_breakdown = (
         Budget=("Budget", "sum"),
         Pending=("Pending to Reach Budget", "sum"),
         Buildings=("Building Address", "nunique"),
+        Files=("Source File", "nunique"),
     )
     .sort_values("Budget", ascending=False)
 )
@@ -788,9 +1058,30 @@ st.dataframe(
 # ============================================================
 st.subheader("📋 Real vs Budget (by Building & Category)")
 
-detail_view_display = view[
-    ["Status", "Company", "Building Address", "Category", "Real", "Budget", "Variance", "% Used", "Pending to Reach Budget"]
-].copy()
+detail_columns = [
+    "Status",
+    "Source File",
+    "Company",
+    "Building Address",
+    "Category",
+    "Supplier",
+    "Type_of_work",
+    "Diverse_expense",
+    "Province",
+    "Real",
+    "Budget",
+    "Variance",
+    "% Used",
+    "Pending to Reach Budget",
+]
+
+detail_view_display = view[detail_columns].copy()
+detail_view_display = detail_view_display.rename(
+    columns={
+        "Type_of_work": "Type of work",
+        "Diverse_expense": "Diverse expense",
+    }
+)
 
 st.dataframe(
     detail_view_display.style.format({
@@ -816,7 +1107,7 @@ building_view = building_view.sort_values(
 
 st.dataframe(
     building_view[
-        ["Status", "Company", "Building Address", "Real", "Budget", "Variance", "Pending_to_Reach_Budget", "% Used"]
+        ["Status", "Source File", "Company", "Building Address", "Real", "Budget", "Variance", "Pending_to_Reach_Budget", "% Used"]
     ].style.format({
         "Real": fmt_currency,
         "Budget": fmt_currency,
@@ -873,6 +1164,27 @@ if not cat_summary.empty:
     )
     st.plotly_chart(fig_cat, use_container_width=True)
 
+supplier_chart = supplier_breakdown.head(15).copy()
+if not supplier_chart.empty:
+    fig_supplier = px.bar(
+        supplier_chart,
+        x="Supplier",
+        y="Real",
+        title="Top 15 Suppliers by Real",
+    )
+    fig_supplier.update_layout(xaxis_tickangle=-45)
+    st.plotly_chart(fig_supplier, use_container_width=True)
+
+province_chart = province_breakdown.copy()
+if not province_chart.empty:
+    fig_province = px.pie(
+        province_chart,
+        names="Province",
+        values="Real",
+        title="Real by Province",
+    )
+    st.plotly_chart(fig_province, use_container_width=True)
+
 # ============================================================
 # DIAGNOSTICS
 # ============================================================
@@ -880,10 +1192,10 @@ with st.expander("🛠 Diagnostics"):
     st.write("Redirect URI used:", REDIRECT_URI)
     st.write("Allowed domain:", ALLOWED_DOMAIN)
     st.write("Signed in as:", signed_in_email)
-    st.write("Selected Excel:", selected_name)
+    st.write("Selected Excel files:", selected_names)
     st.write("Link type:", "FOLDER" if is_folder else "FILE")
-    st.write("Detected payments header row (0-based):", payments_header_row)
-    st.write("Detected invoicing header row (0-based):", invoicing_header_row)
+    st.write("Detected payments header rows (0-based):", payments_header_rows)
+    st.write("Detected invoicing header rows (0-based):", invoicing_header_rows)
     st.write("Payments columns:", list(payments_df.columns))
     st.write("Invoicing columns:", list(invoicing_df.columns))
     st.write(
@@ -892,16 +1204,22 @@ with st.expander("🛠 Diagnostics"):
             "Building Address": pay_addr,
             "Category": pay_cat,
             "Amount without taxes / Amount": pay_amt,
+            "Supplier": pay_supplier,
+            "Type of work": pay_type_of_work,
+            "Diverse expense": pay_diverse_expense,
+            "Province": pay_province,
+            "Source File": pay_source_file,
         },
     )
     st.write(
         "Detected in Invoicing:",
         {
             "Building Address": inv_addr,
-            "Company detected as": inv_company,
+            "Company": inv_company,
             "Labor Budget": labor_budget_col,
             "Supplies Budget": supplies_budget_col,
             "Equipment Budget": equipment_budget_col,
             "PW Budget": pw_budget_col,
+            "Source File": inv_source_file,
         },
     )
