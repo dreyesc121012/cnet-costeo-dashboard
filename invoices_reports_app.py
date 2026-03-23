@@ -155,10 +155,19 @@ def add_province_from_taxes(df: pd.DataFrame) -> pd.DataFrame:
     tax_cols = [c for c in df.columns if any(k in c.upper() for k in ["GST", "HST", "QST", "PST", "RST", "TAX"])]
 
     mapping = {
-        "QC": "Quebec", "ON": "Ontario", "BC": "British Columbia", "AB": "Alberta",
-        "MB": "Manitoba", "SK": "Saskatchewan", "NB": "New Brunswick", "NS": "Nova Scotia",
-        "NL": "Newfoundland and Labrador", "PE": "Prince Edward Island",
-        "NT": "Northwest Territories", "NU": "Nunavut", "YT": "Yukon",
+        "QC": "Quebec",
+        "ON": "Ontario",
+        "BC": "British Columbia",
+        "AB": "Alberta",
+        "MB": "Manitoba",
+        "SK": "Saskatchewan",
+        "NB": "New Brunswick",
+        "NS": "Nova Scotia",
+        "NL": "Newfoundland and Labrador",
+        "PE": "Prince Edward Island",
+        "NT": "Northwest Territories",
+        "NU": "Nunavut",
+        "YT": "Yukon",
         "PEI": "Prince Edward Island",
     }
 
@@ -363,6 +372,62 @@ def report_validation(df: pd.DataFrame, hide_marketing: bool = False) -> pd.Data
     return rep
 
 # =========================================================
+# Monthly by Province - Fee rows, Provinces as columns
+# =========================================================
+def build_monthly_province_fee_rows_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+
+    work = df.copy()
+    work["Creation Date"] = pd.to_datetime(work["Creation Date"], errors="coerce")
+    work = work.dropna(subset=["Creation Date"])
+    work["Province"] = work["Province"].fillna("Unknown")
+
+    work["MonthStart"] = work["Creation Date"].dt.to_period("M").dt.to_timestamp()
+    work["MonthLabel"] = work["MonthStart"].dt.strftime("%B %Y")
+
+    fee_order = [
+        "Total Amount Without Taxes",
+        "5% Royalty Fee Group",
+        "3% Royalty Fee Group",
+        "5% Brokerage Fee",
+        "2.5% Brokerage Fee",
+    ]
+    fee_order = [c for c in fee_order if c in work.columns]
+
+    if not fee_order:
+        return pd.DataFrame()
+
+    long_df = work.melt(
+        id_vars=["MonthStart", "MonthLabel", "Province"],
+        value_vars=fee_order,
+        var_name="Fee Type",
+        value_name="Amount"
+    )
+
+    rep = pd.pivot_table(
+        long_df,
+        index=["MonthStart", "MonthLabel", "Fee Type"],
+        columns="Province",
+        values="Amount",
+        aggfunc="sum",
+        fill_value=0.0
+    ).reset_index()
+
+    fee_rank = {name: i for i, name in enumerate(fee_order)}
+    rep["__fee_order"] = rep["Fee Type"].map(lambda x: fee_rank.get(x, 999))
+
+    province_cols = [c for c in rep.columns if c not in ["MonthStart", "MonthLabel", "Fee Type", "__fee_order"]]
+    province_cols = sorted(province_cols)
+
+    rep = rep.sort_values(["MonthStart", "__fee_order"]).drop(columns=["MonthStart", "__fee_order"])
+
+    final_cols = ["MonthLabel", "Fee Type"] + province_cols
+    rep = rep[final_cols]
+
+    return rep
+
+# =========================================================
 # Sales Summary
 # =========================================================
 def sales_summary(df: pd.DataFrame):
@@ -416,21 +481,13 @@ def sales_summary(df: pd.DataFrame):
             use_container_width=True
         )
 
-    st.markdown("### Monthly by Province (Total Amount Without Taxes)")
-    pivot = pd.pivot_table(
-        df,
-        index="MonthLabel",
-        columns="Province",
-        values="Total Amount Without Taxes",
-        aggfunc="sum",
-        fill_value=0.0
-    ).reset_index()
+    st.markdown("### Monthly by Province (Fees as Rows)")
+    monthly_fee_rows = build_monthly_province_fee_rows_table(df)
 
-    order = month_totals["MonthLabel"].tolist()
-    pivot["__order"] = pivot["MonthLabel"].apply(lambda x: order.index(x) if x in order else 999999)
-    pivot = pivot.sort_values("__order").drop(columns="__order")
-
-    st.dataframe(format_report_for_display(pivot), use_container_width=True)
+    if monthly_fee_rows.empty:
+        st.info("No monthly by province fee data available.")
+    else:
+        st.dataframe(format_report_for_display(monthly_fee_rows), use_container_width=True)
 
 # =========================================================
 # HEADER (Logo + Title)
