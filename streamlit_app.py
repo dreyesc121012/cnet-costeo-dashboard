@@ -1,4 +1,5 @@
 import base64
+import os
 from io import BytesIO
 from datetime import datetime
 import re
@@ -394,7 +395,7 @@ def add_filters(df: pd.DataFrame):
 
 
 # ============================================================
-# PDF REPORT
+# PDF REPORT - EXECUTIVE VERSION WITH LOGO
 # ============================================================
 def build_pdf_report(
     *,
@@ -409,90 +410,184 @@ def build_pdf_report(
     c = canvas.Canvas(buf, pagesize=letter)
     width, height = letter
 
-    y = height - 50
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(40, y, "CNET Costing & Net - Executive Summary")
-    y -= 16
-    c.setFont("Helvetica", 9)
-    c.drawString(40, y, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    y -= 10
-    c.drawString(40, y, f"Target Margin: {target:.0%}")
-    y -= 20
+    # Layout
+    left = 40
+    right = width - 40
+    top = height - 40
+    bottom = 40
+    page_num = 1
 
+    def money(x):
+        return f"${x:,.2f}"
+
+    def pct(x):
+        return f"{x:.1%}"
+
+    def footer():
+        c.setStrokeColorRGB(0.8, 0.8, 0.8)
+        c.line(left, bottom + 15, right, bottom + 15)
+        c.setFont("Helvetica", 8)
+        c.setFillColorRGB(0.4, 0.4, 0.4)
+        c.drawString(left, bottom, "CNET Building Maintenance Services")
+        c.drawRightString(right, bottom, f"Page {page_num}")
+
+    def new_page():
+        nonlocal page_num
+        footer()
+        c.showPage()
+        page_num += 1
+        return header()
+
+    def space(y, needed=50):
+        if y < bottom + needed:
+            return new_page()
+        return y
+
+    def header():
+        y = top
+
+        try:
+            logo_candidates = [
+                "cnet_logo.png",
+                os.path.join(os.getcwd(), "cnet_logo.png"),
+                "/mount/src/work-orders/cnet_logo.png",
+            ]
+            for logo_path in logo_candidates:
+                if os.path.exists(logo_path):
+                    logo = ImageReader(logo_path)
+                    c.drawImage(
+                        logo,
+                        left,
+                        y - 40,
+                        width=120,
+                        height=40,
+                        preserveAspectRatio=True,
+                        mask='auto'
+                    )
+                    break
+        except Exception:
+            pass
+
+        c.setFillColorRGB(0, 0, 0)
+        c.setFont("Helvetica-Bold", 18)
+        c.drawRightString(right, y, "Executive Summary")
+
+        c.setFont("Helvetica", 9)
+        c.setFillColorRGB(0.4, 0.4, 0.4)
+        c.drawRightString(right, y - 15, datetime.now().strftime("%Y-%m-%d %H:%M"))
+        c.drawRightString(right, y - 28, f"Target Margin: {target:.0%}")
+
+        c.setStrokeColorRGB(0.7, 0.7, 0.7)
+        c.line(left, y - 45, right, y - 45)
+
+        return y - 65
+
+    y = header()
+
+    # Executive Overview
+    y = space(y, 80)
+    c.setFillColorRGB(0.97, 0.97, 0.97)
+    c.roundRect(left, y - 60, right - left, 60, 6, fill=1, stroke=0)
+
+    c.setFillColorRGB(0, 0, 0)
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(left + 10, y - 15, "Executive Overview")
+
+    c.setFont("Helvetica", 10)
+    c.drawString(left + 10, y - 35, f"Revenue: {money(income)} | Final Margin: {pct(final_margin)}")
+    c.drawString(left + 10, y - 50, f"Net: {money(net)} | Final Total: {money(new_total)}")
+
+    y -= 80
+
+    # KPI table
     rows = [
-        ("Revenue (Total to Bill)", income, 1.0),
-        ("Costs (Total Cost Real)", cost, p_cost),
-        ("Gross (Revenue - Cost)", gross, p_gross),
+        ("Revenue", income, 1.0),
+        ("Direct Costs", cost, p_cost),
+        ("Gross Profit", gross, p_gross),
     ]
 
-    if fixed_total_applied != 0.0:
+    if fixed_total_applied != 0:
         rows += [
-            (f"Fixed Expenses ({fixed_sheet_name})", fixed_total_applied, p_fixed),
-            ("Net (Gross - Fixed)", net, p_net),
+            ("Fixed Expenses", fixed_total_applied, p_fixed),
+            ("Net Profit", net, p_net),
         ]
     else:
-        rows += [
-            ("Net", net, p_net),
-        ]
+        rows += [("Net Profit", net, p_net)]
 
     rows += [
         ("Management Fee", mgmt_fee_total, p_mgmt),
-        ("Royalty (5%)", royalty_5_total, p_roy5),
+        ("Royalty 5%", royalty_5_total, p_roy5),
     ]
 
-    if royalty_3_total != 0.0:
-        rows += [("Royalty (3%) BGIS", royalty_3_total, p_roy3)]
+    if royalty_3_total != 0:
+        rows += [("Royalty 3%", royalty_3_total, p_roy3)]
 
-    rows += [("New Total", new_total, p_new)]
+    rows += [("Final Total", new_total, p_new)]
 
+    y = space(y, 120)
     c.setFont("Helvetica-Bold", 11)
-    c.drawString(40, y, "KPIs")
-    y -= 14
+    c.drawString(left, y, "Key Performance Indicators")
+    y -= 15
 
-    c.setFont("Helvetica", 10)
-    c.drawString(40, y, "Concept")
-    c.drawRightString(360, y, "Amount")
-    c.drawRightString(520, y, "% of Revenue")
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(left, y, "Concept")
+    c.drawRightString(380, y, "Amount")
+    c.drawRightString(right, y, "%")
     y -= 12
 
-    for label, val, pct in rows:
-        c.drawString(40, y, label[:55])
-        c.drawRightString(360, y, f"${val:,.2f}")
-        c.drawRightString(520, y, f"{pct:.1%}")
-        y -= 14
-
-    y -= 8
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(40, y, "Executive Margins")
-    y -= 14
     c.setFont("Helvetica", 10)
-    c.drawString(40, y, f"Gross Margin: {gross_margin:.1%}")
-    y -= 14
-    c.drawString(40, y, f"Net Margin: {net_margin:.1%}")
-    y -= 14
-    c.drawString(40, y, f"Final Margin (after fees): {final_margin:.1%}")
-    y -= 18
 
-    def add_plotly_image(fig, title, y_top):
+    for label, val, share in rows:
+        y = space(y, 20)
+        c.drawString(left, y, label)
+        c.drawRightString(380, y, money(val))
+        c.drawRightString(right, y, pct(share))
+        y -= 15
+
+    # Margins
+    y -= 10
+    y = space(y, 60)
+
+    c.setFillColorRGB(0.97, 0.97, 0.97)
+    c.roundRect(left, y - 50, right - left, 50, 6, fill=1, stroke=0)
+
+    c.setFillColorRGB(0, 0, 0)
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(left + 10, y - 15, "Margins")
+
+    c.setFont("Helvetica", 10)
+    c.drawString(left + 10, y - 35, f"Gross: {pct(gross_margin)} | Net: {pct(net_margin)} | Final: {pct(final_margin)}")
+
+    y -= 70
+
+    # Charts
+    def add_chart(fig, title, y):
         if fig is None:
-            return y_top
+            return y
+
+        y = space(y, 250)
+
+        c.setFont("Helvetica-Bold", 10)
+        c.setFillColorRGB(0, 0, 0)
+        c.drawString(left, y, title)
+        y -= 10
+
         try:
-            img_bytes = fig.to_image(format="png")
-            img = ImageReader(BytesIO(img_bytes))
-            c.setFont("Helvetica-Bold", 11)
-            c.drawString(40, y_top, title)
-            y_top -= 10
-            c.drawImage(img, 40, y_top - 220, width=520, height=220, preserveAspectRatio=True, mask='auto')
-            return y_top - 235
+            img = ImageReader(BytesIO(fig.to_image(format="png")))
+            c.drawImage(img, left, y - 200, width=520, height=200, preserveAspectRatio=True, mask='auto')
+            y -= 220
         except Exception:
             c.setFont("Helvetica", 9)
-            c.drawString(40, y_top, f"{title} (could not export image - install kaleido)")
-            return y_top - 15
+            c.drawString(left, y, "Chart not available (install kaleido)")
+            y -= 20
 
-    y = add_plotly_image(fig_gauge, "Gauge - Final Margin", y)
-    y = add_plotly_image(fig_waterfall, "Waterfall - Revenue → Cost → Fixed → Fees → Total", y)
+        return y
 
-    c.showPage()
+    y = add_chart(fig_gauge, "Margin Gauge", y)
+    y = add_chart(fig_waterfall, "Financial Waterfall", y)
+
+    footer()
+
     c.save()
     buf.seek(0)
     return buf.getvalue()
@@ -672,10 +767,6 @@ if c_roy3:
 
 # ============================================================
 # FINAL BUSINESS RULES
-# 1) Fixed Expenses from sheet:
-#    - 12433087 Canada Inc -> Gasto Fijo
-#    - 9359-6633 Quebec Inc -> Gasto Fijo 9359
-# 2) Royalty 3% ONLY for Company = 9359-6633 Quebec Inc AND Client = BGIS
 # ============================================================
 COMPANY_FIXED_124 = "12433087 Canada Inc"
 COMPANY_FIXED_9359 = "9359-6633 Quebec Inc"
@@ -861,7 +952,7 @@ if tc_r and tc_b and tc_v:
     t1.metric("Total Cost Real", f"${total_cost_real:,.2f}")
     t2.metric("Total Cost Budget", f"${total_cost_budget:,.2f}")
     t3.metric("Variation (Budget - Real)", f"${total_cost_var:,.2f}", status_tc)
-    t4.metric("% Budget Used", f"{pct_used*100:,.1f}%", f"Over: {pct_over*100:,.1f}% | Under: {pct_under*100:,.1f}%")
+    t4.metric("%% Budget Used", f"{pct_used*100:,.1f}%", f"Over: {pct_over*100:,.1f}% | Under: {pct_under*100:,.1f}%")
 
 
 # ============================================================
