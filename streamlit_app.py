@@ -146,7 +146,7 @@ def read_real_master_from_bytes(excel_bytes: bytes) -> pd.DataFrame:
     return df
 
 
-def _load_fixed_total_by_sheet(excel_bytes: bytes, sheet_name: str) -> float:
+def _load_fixed_total_by_sheet(excel_bytes: bytes) -> float:
     try:
         fx = pd.read_excel(BytesIO(excel_bytes), sheet_name=sheet_name, header=None)
     except Exception:
@@ -259,18 +259,6 @@ def sanitize_for_arrow(df: pd.DataFrame) -> pd.DataFrame:
     return df2
 
 
-def pick_building_col(df: pd.DataFrame):
-    candidates = ["Building", "Building ID", "BuildinG ID", "Building Name", "Site", "Location", "Branch"]
-    for name in candidates:
-        c = find_col(df, name)
-        if c:
-            return c
-    for c in df.columns:
-        if "build" in _norm(c):
-            return c
-    return None
-
-
 # ============================================================
 # MONTH + YEAR -> TEXT LABELS (NO TIME AXIS)
 # ============================================================
@@ -330,7 +318,6 @@ def add_filters(df: pd.DataFrame):
         "provinces": [],
         "clients": [],
         "projects": [],
-        "buildings": [],
     }
 
     if MONTH_COL in df.columns and YEAR_COL in df.columns:
@@ -383,14 +370,6 @@ def add_filters(df: pd.DataFrame):
         if sel:
             df = df[df[c_proj].astype(str).isin(sel)]
 
-    c_bld = pick_building_col(df)
-    if c_bld:
-        uniq = sorted(df[c_bld].dropna().astype(str).unique().tolist())
-        sel = st.sidebar.multiselect("Building", uniq)
-        filter_state["buildings"] = sel
-        if sel:
-            df = df[df[c_bld].astype(str).isin(sel)]
-
     return df, filter_state
 
 
@@ -405,7 +384,7 @@ def build_pdf_report(
     p_cost, p_gross, p_fixed, p_net, p_mgmt, p_roy5, p_roy3, p_new,
     target, gross_margin, net_margin, final_margin,
     report_company="All Companies",
-    report_building="All Buildings",
+    report_project="All Projects",
     report_month="All Periods",
     fig_waterfall=None, fig_gauge=None,
 ):
@@ -413,7 +392,6 @@ def build_pdf_report(
     c = canvas.Canvas(buf, pagesize=letter)
     width, height = letter
 
-    # Layout
     left = 40
     right = width - 40
     top = height - 40
@@ -485,26 +463,22 @@ def build_pdf_report(
         except Exception:
             pass
 
-        # Title
         c.setFillColorRGB(0, 0, 0)
         c.setFont("Helvetica-Bold", 18)
         c.drawRightString(right, y, "Executive Summary")
 
-        # Generated date
         c.setFont("Helvetica", 9)
         c.setFillColorRGB(0.4, 0.4, 0.4)
         c.drawRightString(right, y - 15, datetime.now().strftime("%Y-%m-%d %H:%M"))
 
-        # Report filters
-        c.setFillColorRGB(0, 0, 0)
-        c.setFont("Helvetica-Bold", 9)
-
         company_text = truncate_text(report_company, 90)
-        building_text = truncate_text(report_building, 90)
+        project_text = truncate_text(report_project, 90)
         month_text = truncate_text(report_month, 90)
 
+        c.setFillColorRGB(0, 0, 0)
+        c.setFont("Helvetica-Bold", 9)
         c.drawString(left, y - 58, f"Company: {company_text}")
-        c.drawString(left, y - 72, f"Building: {building_text}")
+        c.drawString(left, y - 72, f"Project: {project_text}")
         c.drawString(left, y - 86, f"Report Period: {month_text}")
 
         c.setStrokeColorRGB(0.7, 0.7, 0.7)
@@ -514,7 +488,6 @@ def build_pdf_report(
 
     y = header()
 
-    # Executive Overview
     y = space(y, 90)
     c.setFillColorRGB(0.97, 0.97, 0.97)
     c.roundRect(left, y - 65, right - left, 65, 6, fill=1, stroke=0)
@@ -529,7 +502,6 @@ def build_pdf_report(
 
     y -= 90
 
-    # KPI table
     rows = [
         ("Revenue", income, 1.0),
         ("Direct Costs", cost, p_cost),
@@ -574,7 +546,6 @@ def build_pdf_report(
         c.drawRightString(right, y, pct(share))
         y -= 16
 
-    # Margins
     y -= 8
     y = space(y, 70)
 
@@ -594,7 +565,6 @@ def build_pdf_report(
 
     y -= 75
 
-    # Charts
     def add_chart(fig, title, y):
         if fig is None:
             return y
@@ -618,9 +588,9 @@ def build_pdf_report(
                 mask='auto'
             )
             y -= 220
-        except Exception:
-            c.setFont("Helvetica", 9)
-            c.drawString(left, y, "Chart not available (install kaleido)")
+        except Exception as e:
+            c.setFont("Helvetica", 8)
+            c.drawString(left, y, f"Chart export error: {str(e)[:95]}")
             y -= 20
 
         return y
@@ -776,7 +746,6 @@ CATEGORY_SPECS = {
     },
 }
 
-# Resolve columns
 c_income = find_col(df, COL_INCOME)
 c_cost = find_col(df, COL_COST_REAL)
 c_mgmt = find_col(df, COL_MGMT)
@@ -799,7 +768,6 @@ if missing:
         st.write(df.columns.tolist())
     st.stop()
 
-# Numeric conversion
 for c in [c_income, c_cost, c_mgmt, c_roy5]:
     df[c] = pd.to_numeric(df[c], errors="coerce")
 if c_roy3:
@@ -864,7 +832,6 @@ if apply_roy3:
 else:
     new_total = net + mgmt_fee_total + royalty_5_total
 
-# % of revenue
 p_cost = safe_pct(cost, income)
 p_gross = safe_pct(gross, income)
 p_fixed = safe_pct(fixed_total, income)
@@ -1346,7 +1313,7 @@ st.divider()
 st.subheader("📄 Export Executive Report (PDF)")
 
 report_company = ", ".join(filter_state.get("companies", [])) if filter_state.get("companies") else "All Companies"
-report_building = ", ".join(filter_state.get("buildings", [])) if filter_state.get("buildings") else "All Buildings"
+report_project = ", ".join(filter_state.get("projects", [])) if filter_state.get("projects") else "All Projects"
 report_month = ", ".join(filter_state.get("months", [])) if filter_state.get("months") else "All Periods"
 
 pdf_bytes = build_pdf_report(
@@ -1373,7 +1340,7 @@ pdf_bytes = build_pdf_report(
     net_margin=net_margin,
     final_margin=final_margin,
     report_company=report_company,
-    report_building=report_building,
+    report_project=report_project,
     report_month=report_month,
     fig_waterfall=fig_waterfall,
     fig_gauge=fig_gauge,
