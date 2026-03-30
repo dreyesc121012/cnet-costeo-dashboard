@@ -404,6 +404,9 @@ def build_pdf_report(
     net, mgmt_fee_total, royalty_5_total, royalty_3_total, new_total,
     p_cost, p_gross, p_fixed, p_net, p_mgmt, p_roy5, p_roy3, p_new,
     target, gross_margin, net_margin, final_margin,
+    report_company="All Companies",
+    report_building="All Buildings",
+    report_month="All Periods",
     fig_waterfall=None, fig_gauge=None,
 ):
     buf = BytesIO()
@@ -418,10 +421,24 @@ def build_pdf_report(
     page_num = 1
 
     def money(x):
-        return f"${x:,.2f}"
+        try:
+            return f"${float(x):,.2f}"
+        except Exception:
+            return "$0.00"
 
     def pct(x):
-        return f"{x:.1%}"
+        try:
+            return f"{float(x):.1%}"
+        except Exception:
+            return "0.0%"
+
+    def safe_text(value, default_text):
+        txt = str(value).strip() if value is not None else ""
+        return txt if txt else default_text
+
+    def truncate_text(text, max_len=95):
+        text = safe_text(text, "")
+        return text if len(text) <= max_len else text[:max_len - 3] + "..."
 
     def footer():
         c.setStrokeColorRGB(0.8, 0.8, 0.8)
@@ -468,26 +485,39 @@ def build_pdf_report(
         except Exception:
             pass
 
+        # Title
         c.setFillColorRGB(0, 0, 0)
         c.setFont("Helvetica-Bold", 18)
         c.drawRightString(right, y, "Executive Summary")
 
+        # Generated date
         c.setFont("Helvetica", 9)
         c.setFillColorRGB(0.4, 0.4, 0.4)
         c.drawRightString(right, y - 15, datetime.now().strftime("%Y-%m-%d %H:%M"))
-        c.drawRightString(right, y - 28, f"Target Margin: {target:.0%}")
+
+        # Report filters
+        c.setFillColorRGB(0, 0, 0)
+        c.setFont("Helvetica-Bold", 9)
+
+        company_text = truncate_text(report_company, 90)
+        building_text = truncate_text(report_building, 90)
+        month_text = truncate_text(report_month, 90)
+
+        c.drawString(left, y - 58, f"Company: {company_text}")
+        c.drawString(left, y - 72, f"Building: {building_text}")
+        c.drawString(left, y - 86, f"Report Period: {month_text}")
 
         c.setStrokeColorRGB(0.7, 0.7, 0.7)
-        c.line(left, y - 45, right, y - 45)
+        c.line(left, y - 98, right, y - 98)
 
-        return y - 65
+        return y - 118
 
     y = header()
 
     # Executive Overview
-    y = space(y, 80)
+    y = space(y, 90)
     c.setFillColorRGB(0.97, 0.97, 0.97)
-    c.roundRect(left, y - 60, right - left, 60, 6, fill=1, stroke=0)
+    c.roundRect(left, y - 65, right - left, 65, 6, fill=1, stroke=0)
 
     c.setFillColorRGB(0, 0, 0)
     c.setFont("Helvetica-Bold", 11)
@@ -497,7 +527,7 @@ def build_pdf_report(
     c.drawString(left + 10, y - 35, f"Revenue: {money(income)} | Final Margin: {pct(final_margin)}")
     c.drawString(left + 10, y - 50, f"Net: {money(net)} | Final Total: {money(new_total)}")
 
-    y -= 80
+    y -= 90
 
     # KPI table
     rows = [
@@ -524,41 +554,45 @@ def build_pdf_report(
 
     rows += [("Final Total", new_total, p_new)]
 
-    y = space(y, 120)
+    y = space(y, 140)
     c.setFont("Helvetica-Bold", 11)
     c.drawString(left, y, "Key Performance Indicators")
-    y -= 15
+    y -= 18
 
     c.setFont("Helvetica-Bold", 10)
     c.drawString(left, y, "Concept")
     c.drawRightString(380, y, "Amount")
     c.drawRightString(right, y, "%")
-    y -= 12
+    y -= 14
 
     c.setFont("Helvetica", 10)
 
     for label, val, share in rows:
-        y = space(y, 20)
-        c.drawString(left, y, label)
+        y = space(y, 24)
+        c.drawString(left, y, str(label))
         c.drawRightString(380, y, money(val))
         c.drawRightString(right, y, pct(share))
-        y -= 15
+        y -= 16
 
     # Margins
-    y -= 10
-    y = space(y, 60)
+    y -= 8
+    y = space(y, 70)
 
     c.setFillColorRGB(0.97, 0.97, 0.97)
-    c.roundRect(left, y - 50, right - left, 50, 6, fill=1, stroke=0)
+    c.roundRect(left, y - 52, right - left, 52, 6, fill=1, stroke=0)
 
     c.setFillColorRGB(0, 0, 0)
     c.setFont("Helvetica-Bold", 10)
-    c.drawString(left + 10, y - 15, "Margins")
+    c.drawString(left + 10, y - 16, "Margins")
 
     c.setFont("Helvetica", 10)
-    c.drawString(left + 10, y - 35, f"Gross: {pct(gross_margin)} | Net: {pct(net_margin)} | Final: {pct(final_margin)}")
+    c.drawString(
+        left + 10,
+        y - 36,
+        f"Gross: {pct(gross_margin)} | Net: {pct(net_margin)} | Final: {pct(final_margin)}"
+    )
 
-    y -= 70
+    y -= 75
 
     # Charts
     def add_chart(fig, title, y):
@@ -574,7 +608,15 @@ def build_pdf_report(
 
         try:
             img = ImageReader(BytesIO(fig.to_image(format="png")))
-            c.drawImage(img, left, y - 200, width=520, height=200, preserveAspectRatio=True, mask='auto')
+            c.drawImage(
+                img,
+                left,
+                y - 200,
+                width=520,
+                height=200,
+                preserveAspectRatio=True,
+                mask='auto'
+            )
             y -= 220
         except Exception:
             c.setFont("Helvetica", 9)
@@ -587,7 +629,6 @@ def build_pdf_report(
     y = add_chart(fig_waterfall, "Financial Waterfall", y)
 
     footer()
-
     c.save()
     buf.seek(0)
     return buf.getvalue()
@@ -952,7 +993,7 @@ if tc_r and tc_b and tc_v:
     t1.metric("Total Cost Real", f"${total_cost_real:,.2f}")
     t2.metric("Total Cost Budget", f"${total_cost_budget:,.2f}")
     t3.metric("Variation (Budget - Real)", f"${total_cost_var:,.2f}", status_tc)
-    t4.metric("%% Budget Used", f"{pct_used*100:,.1f}%", f"Over: {pct_over*100:,.1f}% | Under: {pct_under*100:,.1f}%")
+    t4.metric("% Budget Used", f"{pct_used*100:,.1f}%", f"Over: {pct_over*100:,.1f}% | Under: {pct_under*100:,.1f}%")
 
 
 # ============================================================
@@ -1304,6 +1345,10 @@ else:
 st.divider()
 st.subheader("📄 Export Executive Report (PDF)")
 
+report_company = ", ".join(filter_state.get("companies", [])) if filter_state.get("companies") else "All Companies"
+report_building = ", ".join(filter_state.get("buildings", [])) if filter_state.get("buildings") else "All Buildings"
+report_month = ", ".join(filter_state.get("months", [])) if filter_state.get("months") else "All Periods"
+
 pdf_bytes = build_pdf_report(
     income=income,
     cost=cost,
@@ -1327,6 +1372,9 @@ pdf_bytes = build_pdf_report(
     gross_margin=gross_margin,
     net_margin=net_margin,
     final_margin=final_margin,
+    report_company=report_company,
+    report_building=report_building,
+    report_month=report_month,
     fig_waterfall=fig_waterfall,
     fig_gauge=fig_gauge,
 )
