@@ -405,7 +405,7 @@ def build_pdf_report(
     p_cost, p_gross, p_fixed, p_net, p_mgmt, p_roy5, p_roy3, p_new,
     target, gross_margin, net_margin, final_margin,
     report_company="All Companies",
-    report_building="All Buildings",
+    report_project="All Projects",
     report_month="All Periods",
     fig_waterfall=None, fig_gauge=None,
 ):
@@ -500,11 +500,11 @@ def build_pdf_report(
         c.setFont("Helvetica-Bold", 9)
 
         company_text = truncate_text(report_company, 90)
-        building_text = truncate_text(report_building, 90)
+        project_text = truncate_text(report_project, 90)
         month_text = truncate_text(report_month, 90)
 
         c.drawString(left, y - 58, f"Company: {company_text}")
-        c.drawString(left, y - 72, f"Building: {building_text}")
+        c.drawString(left, y - 72, f"Project: {project_text}")
         c.drawString(left, y - 86, f"Report Period: {month_text}")
 
         c.setStrokeColorRGB(0.7, 0.7, 0.7)
@@ -1346,7 +1346,7 @@ st.divider()
 st.subheader("📄 Export Executive Report (PDF)")
 
 report_company = ", ".join(filter_state.get("companies", [])) if filter_state.get("companies") else "All Companies"
-report_building = ", ".join(filter_state.get("buildings", [])) if filter_state.get("buildings") else "All Buildings"
+report_project = ", ".join(filter_state.get("projects", [])) if filter_state.get("projects") else "All Projects"
 report_month = ", ".join(filter_state.get("months", [])) if filter_state.get("months") else "All Periods"
 
 pdf_bytes = build_pdf_report(
@@ -1373,7 +1373,7 @@ pdf_bytes = build_pdf_report(
     net_margin=net_margin,
     final_margin=final_margin,
     report_company=report_company,
-    report_building=report_building,
+    report_project=report_project,
     report_month=report_month,
     fig_waterfall=fig_waterfall,
     fig_gauge=fig_gauge,
