@@ -158,7 +158,6 @@ def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def normalize_work_type(value: str) -> str:
     v = str(value).strip().upper()
-
     if "REGULAR" in v:
         return "Regular"
     if "SUPPL" in v:
@@ -192,6 +191,30 @@ def safe_text_series(s: pd.Series) -> pd.Series:
         }
     ).fillna("")
 
+def coalesce_duplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    If renaming creates duplicate column names, combine them left-to-right,
+    keeping the first non-empty value on each row.
+    """
+    cols = list(df.columns)
+    duplicates = [c for c in pd.unique(cols) if cols.count(c) > 1]
+
+    for col in duplicates:
+        dup_df = df.loc[:, df.columns == col].copy()
+
+        combined = dup_df.iloc[:, 0].astype(object)
+        for i in range(1, dup_df.shape[1]):
+            next_col = dup_df.iloc[:, i]
+            combined = combined.where(
+                combined.notna() & (combined.astype(str).str.strip() != ""),
+                next_col,
+            )
+
+        df = df.loc[:, df.columns != col]
+        df[col] = combined
+
+    return df
+
 def load_selected_excel_files(access_token: str, drive_id: str, selected_files: list[dict], month_name_map: dict) -> pd.DataFrame:
     dfs = []
 
@@ -216,7 +239,6 @@ def load_selected_excel_files(access_token: str, drive_id: str, selected_files: 
             df = excel_file.parse(sheet_to_use)
             df = clean_columns(df)
             df.columns = [str(c).strip().lower() for c in df.columns]
-
             df["source_file"] = file_info["name"]
             df["source_month_folder"] = month_name_map.get(file_info["id"], "")
             dfs.append(df)
@@ -231,11 +253,9 @@ def load_selected_excel_files(access_token: str, drive_id: str, selected_files: 
 
 def to_excel_report(detail_df: pd.DataFrame, summary_df: pd.DataFrame) -> BytesIO:
     output = BytesIO()
-
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         detail_df.to_excel(writer, index=False, sheet_name="Data_Filtered")
         summary_df.to_excel(writer, index=False, sheet_name="Summary")
-
     output.seek(0)
     return output
 
@@ -436,39 +456,33 @@ if df.empty:
 # COLUMN MAPPING
 # ============================================================
 column_map = {
-    # DATE
     "date": "date",
 
-    # EMPLOYEE
     "employee": "employee",
     "name employee": "employee",
     "name employee & vendor company": "employee",
 
-    # PROVINCE
     "province": "province",
 
-    # HOURS
     "total hours worked (number)": "hours",
     "total hours worked(number)": "hours",
     "total hours worked ( number )": "hours",
     "total hours worked": "hours",
 
-    # PAY
     "total_pay": "total_pay",
     "total to pay": "total_pay",
 
-    # TYPE OF WORK
     "type_of_work": "type_of_work",
     "type of work": "type_of_work",
     "category": "type_of_work",
 
-    # VENDOR
     "vendor_company": "vendor_company",
     "vendor company": "vendor_company",
     "building & vendor company": "vendor_company",
 }
 
 df = df.rename(columns=column_map)
+df = coalesce_duplicate_columns(df)
 
 required_cols = ["date", "province", "employee", "hours", "total_pay", "type_of_work", "vendor_company"]
 missing = [c for c in required_cols if c not in df.columns]
