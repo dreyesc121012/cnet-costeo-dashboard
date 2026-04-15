@@ -15,16 +15,6 @@ st.title("Comité Paritaire Québec - Weekly Report")
 
 # ============================================================
 # CONFIG (SECRETS)
-# Required in Streamlit Secrets:
-#
-# CLIENT_ID = "..."
-# CLIENT_SECRET = "..."
-# TENANT_ID = "..."
-# REDIRECT_URI = "https://comite-paritaire.streamlit.app"
-# ONEDRIVE_FOLDER_URL = "https://...shared folder link of 2026 root folder..."
-# ALLOWED_DOMAIN = "groupcastillo.com"
-# DOMAIN_HINT = "groupcastillo.com"
-# LOGIN_HINT = ""
 # ============================================================
 CLIENT_ID = str(st.secrets["CLIENT_ID"]).strip()
 CLIENT_SECRET = str(st.secrets["CLIENT_SECRET"]).strip()
@@ -225,6 +215,8 @@ def load_selected_excel_files(access_token: str, drive_id: str, selected_files: 
 
             df = excel_file.parse(sheet_to_use)
             df = clean_columns(df)
+            df.columns = [str(c).strip().lower() for c in df.columns]
+
             df["source_file"] = file_info["name"]
             df["source_month_folder"] = month_name_map.get(file_info["id"], "")
             dfs.append(df)
@@ -334,7 +326,7 @@ st.sidebar.header("📁 SharePoint Source")
 st.sidebar.caption("Select month folder(s), then choose Excel files inside them.")
 
 # ============================================================
-# RESOLVE ROOT FOLDER (2026)
+# RESOLVE ROOT FOLDER
 # ============================================================
 try:
     meta = resolve_shared_link(access_token, ONEDRIVE_FOLDER_URL)
@@ -442,54 +434,38 @@ if df.empty:
 
 # ============================================================
 # COLUMN MAPPING
-# Adjust here if your source headers vary
 # ============================================================
 column_map = {
     # DATE
     "date": "date",
-    "Date": "date",
 
     # EMPLOYEE
     "employee": "employee",
-    "Employee": "employee",
     "name employee": "employee",
-    "Name Employee": "employee",
-    "Name Employee & vendor company": "employee",
+    "name employee & vendor company": "employee",
 
     # PROVINCE
     "province": "province",
-    "Province": "province",
 
-    # HOURS (🔥 FIX AQUÍ)
+    # HOURS
     "total hours worked (number)": "hours",
-    "total hours worked (number )": "hours",
-    "total hours worked (number)": "hours",
-    "total hours worked (number)": "hours",
-    "total hours worked (number)": "hours",
-    "total hours worked (number)": "hours",
-    "total hours worked (number)": "hours",
-    "total hours worked (number)": "hours",
-    "total hours worked (number)": "hours",
-    "total hours worked (number)": "hours",
+    "total hours worked(number)": "hours",
+    "total hours worked ( number )": "hours",
     "total hours worked": "hours",
-    "Total Hours Worked": "hours",
 
     # PAY
     "total_pay": "total_pay",
-    "Total Pay": "total_pay",
-    "Total to pay": "total_pay",
+    "total to pay": "total_pay",
 
     # TYPE OF WORK
     "type_of_work": "type_of_work",
-    "Type of work": "type_of_work",
-    "Type Of Work": "type_of_work",
-    "Category": "type_of_work",
+    "type of work": "type_of_work",
+    "category": "type_of_work",
 
     # VENDOR
     "vendor_company": "vendor_company",
-    "Vendor Company": "vendor_company",
-    "Vendor company": "vendor_company",
-    "Building & vendor company": "vendor_company",
+    "vendor company": "vendor_company",
+    "building & vendor company": "vendor_company",
 }
 
 df = df.rename(columns=column_map)
