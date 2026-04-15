@@ -1,170 +1,259 @@
-import streamlit as st
+import base64
+from io import BytesIO
+from datetime import timedelta, datetime
+
 import pandas as pd
 import requests
+import streamlit as st
 import msal
-import base64
-from datetime import timedelta, datetime
-from io import BytesIO
 
 st.set_page_config(page_title="Comité Paritaire QC", layout="wide")
 st.title("Comité Paritaire Québec - Weekly Report")
 
-# =========================
-# Secrets / Config
-# =========================
-CLIENT_ID = st.secrets["CLIENT_ID"]
-CLIENT_SECRET = st.secrets["CLIENT_SECRET"]
-TENANT_ID = st.secrets["TENANT_ID"]
-ONEDRIVE_FOLDER_URL = st.secrets["ONEDRIVE_FOLDER_URL"]
+# ============================================================
+# CONFIG (Secrets)
+# ============================================================
+CLIENT_ID = str(st.secrets["CLIENT_ID"]).strip()
+CLIENT_SECRET = str(st.secrets["CLIENT_SECRET"]).strip()
+TENANT_ID = str(st.secrets["TENANT_ID"]).strip()
+REDIRECT_URI = str(st.secrets["REDIRECT_URI"]).strip().rstrip("/")
+ONEDRIVE_FOLDER_URL = str(st.secrets["ONEDRIVE_FOLDER_URL"]).strip()
+DOMAIN_HINT = str(st.secrets.get("DOMAIN_HINT", "")).strip()
+LOGIN_HINT = str(st.secrets.get("LOGIN_HINT", "")).strip()
+ALLOWED_DOMAIN = str(st.secrets.get("ALLOWED_DOMAIN", "")).strip().lower()
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
-SCOPES = ["https://graph.microsoft.com/.default"]
+SCOPES = ["User.Read", "Files.Read.All", "Sites.Read.All"]
 
-# =========================
-# Microsoft Graph helpers
-# =========================
-def get_access_token():
-    app = msal.ConfidentialClientApplication(
+# ============================================================
+# URL PARAM HELPERS
+# ============================================================
+def get_query_params_compat() -> dict:
+    try:
+        qp = st.query_params
+        out = {}
+        for k in qp.keys():
+            v = qp.get(k)
+            if isinstance(v, list):
+                out[k] = v[0] if v else ""
+            else:
+                out[k] = str(v) if v is not None else ""
+        return out
+    except Exception:
+        try:
+            qp = st.experimental_get_query_params()
+            out = {}
+            for k, v in qp.items():
+                if isinstance(v, list):
+                    out[k] = v[0] if v else ""
+                else:
+                    out[k] = str(v) if v is not None else ""
+            return out
+        except Exception:
+            return {}
+
+def clear_query_params_compat():
+    try:
+        st.query_params.clear()
+    except Exception:
+        try:
+            st.experimental_set_query_params()
+        except Exception:
+            pass
+
+# ============================================================
+# MSAL
+# ============================================================
+def get_msal_app():
+    return msal.ConfidentialClientApplication(
         CLIENT_ID,
         authority=AUTHORITY,
-        client_credential=CLIENT_SECRET
+        client_credential=CLIENT_SECRET,
+        token_cache=None,
     )
-    result = app.acquire_token_for_client(scopes=SCOPES)
 
-    if "access_token" not in result:
-        raise Exception(f"Could not obtain access token: {result}")
+# ============================================================
+# GRAPH HELPERS
+# ============================================================
+def graph_get(url: str, access_token: str) -> requests.Response:
+    return requests.get(
+        url,
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=60,
+    )
 
-    return result["access_token"]
+def graph_get_json(url: str, access_token: str) -> dict:
+    r = graph_get(url, access_token)
+    if r.status_code != 200:
+        raise RuntimeError(f"Graph error {r.status_code}\n{r.text}")
+    return r.json()
 
+def get_me(access_token: str) -> dict:
+    r = requests.get(
+        "https://graph.microsoft.com/v1.0/me",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=60,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"Graph /me error {r.status_code}\n{r.text}")
+    return r.json()
 
-def encode_share_url(url: str) -> str:
-    encoded = base64.b64encode(url.encode("utf-8")).decode("utf-8")
-    encoded = encoded.rstrip("=").replace("/", "_").replace("+", "-")
-    return f"u!{encoded}"
+def get_user_email(me: dict) -> str:
+    return (me.get("mail") or me.get("userPrincipalName") or "").strip().lower()
 
+def is_allowed_user(me: dict) -> bool:
+    email = get_user_email(me)
+    if not ALLOWED_DOMAIN:
+        return False
+    return email.endswith(f"@{ALLOWED_DOMAIN}")
 
-def resolve_folder_from_share_url(token: str, folder_url: str) -> dict:
-    share_id = encode_share_url(folder_url)
-    endpoint = f"https://graph.microsoft.com/v1.0/shares/{share_id}/driveItem"
-    headers = {"Authorization": f"Bearer {token}"}
+def make_share_id(shared_url: str) -> str:
+    b = base64.b64encode(shared_url.encode("utf-8")).decode("utf-8")
+    b = b.rstrip("=").replace("/", "_").replace("+", "-")
+    return "u!" + b
 
-    response = requests.get(endpoint, headers=headers, timeout=60)
-    response.raise_for_status()
-    return response.json()
+def resolve_shared_link(access_token: str, shared_url: str) -> dict:
+    share_id = make_share_id(shared_url)
+    meta_url = f"https://graph.microsoft.com/v1.0/shares/{share_id}/driveItem"
+    meta = graph_get(meta_url, access_token)
+    if meta.status_code != 200:
+        raise RuntimeError(
+            f"Error resolving shared link: {meta.status_code}\n{meta.text}\n\n"
+            "TIP: Use SharePoint/OneDrive → Share → Copy link (within your organization)."
+        )
+    return meta.json()
 
+def download_item_bytes(access_token: str, drive_id: str, item_id: str) -> bytes:
+    content_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
+    r = graph_get(content_url, access_token)
+    if r.status_code != 200:
+        raise RuntimeError(f"Error downloading file: {r.status_code}\n{r.text}")
+    return r.content
 
-def list_folder_files(token: str, drive_id: str, item_id: str) -> list[dict]:
-    endpoint = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/children"
-    headers = {"Authorization": f"Bearer {token}"}
+def list_children_all(access_token: str, drive_id: str, folder_item_id: str):
+    url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{folder_item_id}/children?$top=200"
+    all_items = []
+    while url:
+        data = graph_get_json(url, access_token)
+        all_items.extend(data.get("value", []))
+        url = data.get("@odata.nextLink")
+    return all_items
 
-    response = requests.get(endpoint, headers=headers, timeout=60)
-    response.raise_for_status()
-    data = response.json()
+def is_excel_name(name: str) -> bool:
+    n = (name or "").lower()
+    return n.endswith(".xlsx") or n.endswith(".xlsm") or n.endswith(".xls")
 
-    files = []
-    for item in data.get("value", []):
-        name = item.get("name", "")
-        if name.lower().endswith((".xlsx", ".xlsm")):
-            files.append({
-                "name": name,
-                "id": item["id"],
-                "drive_id": drive_id,
-            })
+# ============================================================
+# AUTH FLOW
+# ============================================================
+if not ALLOWED_DOMAIN:
+    st.error("Missing ALLOWED_DOMAIN in Streamlit secrets.")
+    st.stop()
 
-    files = sorted(files, key=lambda x: x["name"].lower())
-    return files
+app = get_msal_app()
+params = get_query_params_compat()
 
+if "token_result" not in st.session_state:
+    code = params.get("code")
 
-def download_file_bytes(token: str, drive_id: str, item_id: str) -> BytesIO:
-    endpoint = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
-    headers = {"Authorization": f"Bearer {token}"}
+    if code:
+        result = app.acquire_token_by_authorization_code(
+            code=code,
+            scopes=SCOPES,
+            redirect_uri=REDIRECT_URI,
+        )
 
-    response = requests.get(endpoint, headers=headers, timeout=120)
-    response.raise_for_status()
-    return BytesIO(response.content)
+        if "access_token" in result:
+            st.session_state.token_result = result
+            clear_query_params_compat()
+            st.rerun()
+        else:
+            st.error("Could not obtain access token.")
+            st.code(str(result))
+            st.stop()
 
-# =========================
-# Data helpers
-# =========================
-def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
+    st.warning("You are not signed in to Microsoft 365 / SharePoint.")
 
+    extra_qp = {}
+    if DOMAIN_HINT:
+        extra_qp["domain_hint"] = DOMAIN_HINT
+    if LOGIN_HINT:
+        extra_qp["login_hint"] = LOGIN_HINT
 
-def normalize_work_type(value: str) -> str:
-    v = str(value).strip().upper()
+    auth_url = app.get_authorization_request_url(
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI,
+        prompt="select_account",
+        response_mode="query",
+        extra_query_parameters=extra_qp,
+    )
 
-    if "REGULAR" in v:
-        return "Regular"
-    if "SUPPL" in v:
-        return "Suppl."
-    if "CONGE TRAVAIL" in v or "CONGÉ TRAVAIL" in v:
-        return "Congé Travaillé"
-    if v == "CONGE" or v == "CONGÉ" or "CONGE " in v or "CONGÉ " in v:
-        return "Congé"
-    if "MALAD" in v:
-        return "Maladie"
-    return "Other"
+    st.link_button("🔐 Sign in with Microsoft (Company)", auth_url)
+    st.caption(f"Redirect URI used: {REDIRECT_URI}")
+    st.stop()
 
+token_result = st.session_state.token_result
+access_token = token_result.get("access_token", "")
 
-def assign_committee_week(date_value: pd.Timestamp, start_date: pd.Timestamp, num_weeks: int = 6):
-    for i in range(num_weeks):
-        week_start = start_date + timedelta(days=i * 7)
-        week_end = week_start + timedelta(days=6)
-        if week_start <= date_value <= week_end:
-            return week_start, week_end
-    return None, None
-
-
-def load_selected_cloud_files(token: str, selected_files: list[dict]) -> pd.DataFrame:
-    dataframes = []
-
-    for file_info in selected_files:
-        try:
-            file_bytes = download_file_bytes(token, file_info["drive_id"], file_info["id"])
-            df = pd.read_excel(file_bytes, sheet_name="data")
-            df = clean_columns(df)
-            df["source_file"] = file_info["name"]
-            dataframes.append(df)
-        except Exception as e:
-            st.warning(f"Could not read {file_info['name']}: {e}")
-
-    if dataframes:
-        return pd.concat(dataframes, ignore_index=True)
-
-    return pd.DataFrame()
-
-
-def to_excel_report(detail_df: pd.DataFrame, summary_df: pd.DataFrame) -> BytesIO:
-    output = BytesIO()
-
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        detail_df.to_excel(writer, index=False, sheet_name="Data_Filtered")
-        summary_df.to_excel(writer, index=False, sheet_name="Summary")
-
-    output.seek(0)
-    return output
-
-# =========================
-# Connect to cloud folder
-# =========================
-st.subheader("1. Read Excel files from OneDrive folder")
+if not access_token:
+    st.error("No access token found. Please sign in again.")
+    st.session_state.pop("token_result", None)
+    st.stop()
 
 try:
-    token = get_access_token()
-    folder_info = resolve_folder_from_share_url(token, ONEDRIVE_FOLDER_URL)
-
-    drive_id = folder_info["parentReference"]["driveId"]
-    item_id = folder_info["id"]
-
-    cloud_files = list_folder_files(token, drive_id, item_id)
-
-    if not cloud_files:
-        st.warning("No Excel files were found in the OneDrive folder.")
-        st.stop()
-
+    me = get_me(access_token)
+    signed_in_email = get_user_email(me)
 except Exception as e:
-    st.error(f"Error connecting to OneDrive folder: {e}")
+    st.error("Could not validate signed-in user.")
+    st.code(str(e))
+    st.session_state.pop("token_result", None)
+    st.stop()
+
+if not is_allowed_user(me):
+    st.error("Access denied. This dashboard is restricted to company users only.")
+    st.write("Signed in as:", signed_in_email if signed_in_email else "(unknown user)")
+    st.session_state.pop("token_result", None)
+    st.stop()
+
+st.sidebar.success(f"Logged in as {signed_in_email}")
+st.success(f"✅ Signed in as {signed_in_email}")
+
+if st.button("🚪 Sign out"):
+    st.session_state.pop("token_result", None)
+    st.session_state.pop("selected_item_ids", None)
+    st.session_state.pop("cloud_files", None)
+    clear_query_params_compat()
+    st.rerun()
+
+# ============================================================
+# LOAD FILE LIST FROM ONEDRIVE FOLDER
+# ============================================================
+try:
+    meta = resolve_shared_link(access_token, ONEDRIVE_FOLDER_URL)
+except Exception as e:
+    st.error("Could not resolve the SharePoint/OneDrive folder link.")
+    st.code(str(e))
+    st.stop()
+
+drive_id = meta["parentReference"]["driveId"]
+root_item_id = meta["id"]
+is_folder = "folder" in meta
+
+if not is_folder:
+    st.error("ONEDRIVE_FOLDER_URL must be a folder link, not a file link.")
+    st.stop()
+
+try:
+    children = list_children_all(access_token, drive_id, root_item_id)
+    cloud_files = [c for c in children if c.get("id") and is_excel_name(c.get("name", ""))]
+    cloud_files.sort(key=lambda x: (x.get("name") or "").lower())
+except Exception as e:
+    st.error("Could not list Excel files in the OneDrive folder.")
+    st.code(str(e))
+    st.stop()
+
+if not cloud_files:
+    st.warning("No Excel files found in the OneDrive folder.")
     st.stop()
 
 file_names = [f["name"] for f in cloud_files]
@@ -181,121 +270,25 @@ if not selected_names:
 
 selected_files = [f for f in cloud_files if f["name"] in selected_names]
 
-with st.expander("Files found in OneDrive folder", expanded=False):
-    st.write(file_names)
+def load_selected_cloud_files(selected_files):
+    dataframes = []
 
-df = load_selected_cloud_files(token, selected_files)
+    for file_info in selected_files:
+        try:
+            file_bytes = BytesIO(download_item_bytes(access_token, drive_id, file_info["id"]))
+            df = pd.read_excel(file_bytes, sheet_name="data")
+            df.columns = [str(c).strip() for c in df.columns]
+            df["source_file"] = file_info["name"]
+            dataframes.append(df)
+        except Exception as e:
+            st.warning(f"Could not read {file_info['name']}: {e}")
+
+    if dataframes:
+        return pd.concat(dataframes, ignore_index=True)
+    return pd.DataFrame()
+
+df = load_selected_cloud_files(selected_files)
 
 if df.empty:
     st.error("No valid data could be loaded from the selected files.")
     st.stop()
-
-# =========================
-# Column mapping
-# =========================
-column_map = {
-    "Date": "date",
-    "Province": "province",
-    "name employee": "employee",
-    "total hours worked (numb)": "hours",
-    "total hours worked (numb.)": "hours",
-    "total hours worked (numb...)": "hours",
-    "total hours worked": "hours",
-    "Total to pay": "total_pay",
-    "Type of work": "type_of_work",
-    "Vendor Company": "vendor_company",
-}
-
-df = df.rename(columns=column_map)
-
-required_cols = ["date", "province", "employee", "hours", "total_pay", "type_of_work", "vendor_company"]
-missing = [c for c in required_cols if c not in df.columns]
-
-if missing:
-    st.error(f"Missing required columns: {missing}")
-    st.stop()
-
-# =========================
-# Data cleaning
-# =========================
-df["date"] = pd.to_datetime(df["date"], errors="coerce")
-df["province"] = df["province"].astype(str).str.strip().str.upper()
-df["employee"] = df["employee"].astype(str).str.strip()
-df["vendor_company"] = df["vendor_company"].astype(str).str.strip()
-df["type_of_work"] = df["type_of_work"].astype(str).str.strip()
-df["hours"] = pd.to_numeric(df["hours"], errors="coerce").fillna(0)
-df["total_pay"] = pd.to_numeric(df["total_pay"], errors="coerce").fillna(0)
-
-df = df.dropna(subset=["date"])
-df = df[df["province"] == "QC"].copy()
-df["work_class"] = df["type_of_work"].apply(normalize_work_type)
-
-# =========================
-# Sidebar filters
-# =========================
-st.sidebar.header("Filters")
-
-default_start = datetime(2026, 1, 4).date()
-start_date = st.sidebar.date_input("First committee week start date", value=default_start)
-num_weeks = st.sidebar.number_input("Number of weeks", min_value=1, max_value=12, value=4)
-
-vendors = sorted([v for v in df["vendor_company"].dropna().unique().tolist() if v])
-selected_vendors = st.sidebar.multiselect("Vendor Company", vendors, default=vendors)
-
-employees = sorted([e for e in df["employee"].dropna().unique().tolist() if e])
-selected_employees = st.sidebar.multiselect("Employee", employees, default=employees)
-
-work_types = ["Regular", "Suppl.", "Congé", "Congé Travaillé", "Maladie", "Other"]
-selected_work_types = st.sidebar.multiselect("Work Class", work_types, default=work_types)
-
-# =========================
-# Assign weeks and filter
-# =========================
-start_date_dt = pd.to_datetime(start_date)
-
-df[["week_start", "week_end"]] = df["date"].apply(
-    lambda x: pd.Series(assign_committee_week(x, start_date_dt, num_weeks))
-)
-
-df = df[df["week_start"].notna()].copy()
-df = df[df["vendor_company"].isin(selected_vendors)]
-df = df[df["employee"].isin(selected_employees)]
-df = df[df["work_class"].isin(selected_work_types)]
-
-df["week_label"] = df["week_end"].dt.strftime("%Y-%m-%d")
-
-# =========================
-# Summary
-# =========================
-summary = (
-    df.groupby(["vendor_company", "employee", "week_label", "work_class"], dropna=False)
-      .agg(
-          total_hours=("hours", "sum"),
-          total_pay=("total_pay", "sum")
-      )
-      .reset_index()
-      .sort_values(["vendor_company", "employee", "week_label", "work_class"])
-)
-
-# =========================
-# Output
-# =========================
-st.subheader("2. Filtered source data")
-st.dataframe(df, use_container_width=True)
-
-st.subheader("3. Weekly summary")
-st.dataframe(summary, use_container_width=True)
-
-col1, col2, col3 = st.columns(3)
-col1.metric("Rows", len(df))
-col2.metric("Total Hours", f"{df['hours'].sum():,.2f}")
-col3.metric("Total Pay", f"${df['total_pay'].sum():,.2f}")
-
-excel_file = to_excel_report(df, summary)
-
-st.download_button(
-    label="Download Excel Report",
-    data=excel_file,
-    file_name="comite_paritaire_report.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
