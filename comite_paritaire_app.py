@@ -191,30 +191,6 @@ def safe_text_series(s: pd.Series) -> pd.Series:
         }
     ).fillna("")
 
-def coalesce_duplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    If renaming creates duplicate column names, combine them left-to-right,
-    keeping the first non-empty value on each row.
-    """
-    cols = list(df.columns)
-    duplicates = [c for c in pd.unique(cols) if cols.count(c) > 1]
-
-    for col in duplicates:
-        dup_df = df.loc[:, df.columns == col].copy()
-
-        combined = dup_df.iloc[:, 0].astype(object)
-        for i in range(1, dup_df.shape[1]):
-            next_col = dup_df.iloc[:, i]
-            combined = combined.where(
-                combined.notna() & (combined.astype(str).str.strip() != ""),
-                next_col,
-            )
-
-        df = df.loc[:, df.columns != col]
-        df[col] = combined
-
-    return df
-
 def load_selected_excel_files(access_token: str, drive_id: str, selected_files: list[dict], month_name_map: dict) -> pd.DataFrame:
     dfs = []
 
@@ -250,6 +226,42 @@ def load_selected_excel_files(access_token: str, drive_id: str, selected_files: 
         return pd.concat(dfs, ignore_index=True)
 
     return pd.DataFrame()
+
+def build_required_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build a clean dataframe with only required fields, even if the source
+    contains duplicate columns after renaming.
+    """
+    target_cols = [
+        "date",
+        "province",
+        "employee",
+        "hours",
+        "total_pay",
+        "type_of_work",
+        "vendor_company",
+        "source_file",
+        "source_month_folder",
+    ]
+
+    cleaned = {}
+
+    for col in target_cols:
+        matches = [c for c in df.columns if str(c) == col]
+        if not matches:
+            continue
+
+        data = df.loc[:, matches]
+
+        if isinstance(data, pd.Series):
+            cleaned[col] = data
+        else:
+            # If there are duplicate columns with same final name,
+            # take first non-empty value left-to-right
+            combined = data.bfill(axis=1).iloc[:, 0]
+            cleaned[col] = combined
+
+    return pd.DataFrame(cleaned)
 
 def to_excel_report(detail_df: pd.DataFrame, summary_df: pd.DataFrame) -> BytesIO:
     output = BytesIO()
@@ -456,33 +468,40 @@ if df.empty:
 # COLUMN MAPPING
 # ============================================================
 column_map = {
+    # DATE
     "date": "date",
 
+    # EMPLOYEE
     "employee": "employee",
     "name employee": "employee",
     "name employee & vendor company": "employee",
 
+    # PROVINCE
     "province": "province",
 
+    # HOURS
     "total hours worked (number)": "hours",
     "total hours worked(number)": "hours",
     "total hours worked ( number )": "hours",
     "total hours worked": "hours",
 
+    # PAY
     "total_pay": "total_pay",
     "total to pay": "total_pay",
 
+    # TYPE OF WORK
     "type_of_work": "type_of_work",
     "type of work": "type_of_work",
     "category": "type_of_work",
 
+    # VENDOR
     "vendor_company": "vendor_company",
     "vendor company": "vendor_company",
     "building & vendor company": "vendor_company",
 }
 
 df = df.rename(columns=column_map)
-df = coalesce_duplicate_columns(df)
+df = build_required_dataframe(df)
 
 required_cols = ["date", "province", "employee", "hours", "total_pay", "type_of_work", "vendor_company"]
 missing = [c for c in required_cols if c not in df.columns]
