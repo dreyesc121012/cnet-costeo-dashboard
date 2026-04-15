@@ -1,7 +1,6 @@
 import base64
 from io import BytesIO
 from datetime import timedelta, datetime
-from math import isnan
 
 import pandas as pd
 import requests
@@ -207,37 +206,6 @@ def assign_committee_week(date_value: pd.Timestamp, start_date: pd.Timestamp, nu
             return week_start, week_end
     return None, None
 
-def build_required_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    target_cols = [
-        "date",
-        "province",
-        "employee",
-        "hours",
-        "total_pay",
-        "type_of_work",
-        "vendor_company",
-        "hourly_rate",
-        "source_file",
-        "source_month_folder",
-    ]
-
-    cleaned = {}
-
-    for col in target_cols:
-        matches = [c for c in df.columns if str(c) == col]
-        if not matches:
-            continue
-
-        data = df.loc[:, matches]
-
-        if isinstance(data, pd.Series):
-            cleaned[col] = data
-        else:
-            combined = data.bfill(axis=1).iloc[:, 0]
-            cleaned[col] = combined
-
-    return pd.DataFrame(cleaned)
-
 def load_selected_excel_files(access_token: str, drive_id: str, selected_files: list[dict], month_name_map: dict) -> pd.DataFrame:
     dfs = []
 
@@ -294,15 +262,12 @@ def calculate_committee_hours(row: pd.Series) -> float:
     except Exception:
         hourly_rate = 0.0
 
-    # Flat work: 1 hour with a high payment
     if hours <= 1 and total_pay > COMITE_CLASS_A_RATE:
         return round(total_pay / COMITE_CLASS_A_RATE, 2)
 
-    # Worker paid below Comité rate
     if hourly_rate > 0 and hourly_rate < COMITE_CLASS_A_RATE:
         return round(total_pay / COMITE_CLASS_A_RATE, 2)
 
-    # Otherwise keep actual hours
     return round(hours, 2)
 
 def format_money(x) -> str:
@@ -311,12 +276,88 @@ def format_money(x) -> str:
     except Exception:
         return "$0.00"
 
+def get_col_by_position(dataframe: pd.DataFrame, idx: int):
+    if idx < len(dataframe.columns):
+        return dataframe.columns[idx]
+    return None
+
+def build_required_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Force these columns by Excel positions:
+    N = Type of work  -> index 13
+    O = Vendor Company -> index 14
+    P = Employee -> index 15
+    """
+    raw_cols = list(df.columns)
+
+    # Rename easy columns first
+    column_map = {
+        "date": "date",
+        "province": "province",
+        "total hours worked (number)": "hours",
+        "total hours worked(number)": "hours",
+        "total hours worked ( number )": "hours",
+        "total hours worked": "hours",
+        "total_pay": "total_pay",
+        "total to pay": "total_pay",
+        "hourly rate": "hourly_rate",
+        "hourly_rate": "hourly_rate",
+    }
+    df = df.rename(columns=column_map)
+
+    # Force column positions from sheet Data
+    type_col_pos = get_col_by_position(df, 13)     # N
+    vendor_col_pos = get_col_by_position(df, 14)   # O
+    employee_col_pos = get_col_by_position(df, 15) # P
+
+    if type_col_pos is not None:
+        df["type_of_work"] = df.iloc[:, 13]
+
+    if vendor_col_pos is not None:
+        df["vendor_company"] = df.iloc[:, 14]
+
+    if employee_col_pos is not None:
+        df["employee"] = df.iloc[:, 15]
+
+    if "source_file" not in df.columns:
+        df["source_file"] = ""
+
+    if "source_month_folder" not in df.columns:
+        df["source_month_folder"] = ""
+
+    if "hourly_rate" not in df.columns:
+        df["hourly_rate"] = 0
+
+    needed_cols = [
+        "date",
+        "province",
+        "employee",
+        "hours",
+        "total_pay",
+        "type_of_work",
+        "vendor_company",
+        "hourly_rate",
+        "source_file",
+        "source_month_folder",
+    ]
+
+    final_data = {}
+    for col in needed_cols:
+        if col in df.columns:
+            data = df[col]
+            if isinstance(data, pd.DataFrame):
+                final_data[col] = data.bfill(axis=1).iloc[:, 0]
+            else:
+                final_data[col] = data
+
+    clean_df = pd.DataFrame(final_data)
+    return clean_df, raw_cols, type_col_pos, vendor_col_pos, employee_col_pos
+
 def create_employee_report_blocks(df: pd.DataFrame, vendor_company: str):
     report_data = []
 
     vendor_df = df[df["vendor_company"] == vendor_company].copy()
     employees = sorted(vendor_df["employee"].dropna().unique().tolist())
-
     week_labels = sorted(vendor_df["week_label"].dropna().unique().tolist())
 
     for employee in employees:
@@ -423,7 +464,6 @@ def export_committee_report(filtered_df: pd.DataFrame, company_name: str, start_
             return output
 
         vendors = sorted(filtered_df["vendor_company"].dropna().unique().tolist())
-
         summary_rows = []
 
         for vendor in vendors:
@@ -432,15 +472,13 @@ def export_committee_report(filtered_df: pd.DataFrame, company_name: str, start_
             writer.sheets[sheet_name] = ws
 
             ws.set_column("A:A", 6)
-            ws.set_column("B:B", 28)
+            ws.set_column("B:B", 35)
             ws.set_column("C:Z", 12)
-            ws.set_column("AA:AC", 14)
+            ws.set_column("AA:AC", 16)
 
             vendor_df = filtered_df[filtered_df["vendor_company"] == vendor].copy()
             report_blocks = create_employee_report_blocks(filtered_df, vendor)
-
             week_labels = sorted(vendor_df["week_label"].dropna().unique().tolist())
-            max_weeks = max(len(week_labels), num_weeks)
 
             row = 0
             ws.merge_range(row, 0, row, 10, f"Versement de {pd.to_datetime(start_date_value).strftime('%b. %Y')}", title_fmt)
@@ -481,8 +519,8 @@ def export_committee_report(filtered_df: pd.DataFrame, company_name: str, start_
 
                     col = 1
                     for val in class_row["week_values"]:
-                        ws.write_number(row, col, val, num_fmt)   # A
-                        ws.write_number(row, col + 1, 0, num_fmt) # B always zero
+                        ws.write_number(row, col, val, num_fmt)
+                        ws.write_number(row, col + 1, 0, num_fmt)
                         col += 2
 
                     ws.write_number(row, col, class_row["row_total"], num_fmt)
@@ -491,25 +529,21 @@ def export_committee_report(filtered_df: pd.DataFrame, company_name: str, start_
                 ws.write(row, 0, "", row_label_fmt)
                 col = 1
                 for pay_val in block["week_pay_totals"]:
-                    ws.write_number(row, col, pay_val, money_fmt)   # A pay
-                    ws.write_number(row, col + 1, 0, money_fmt)     # B pay
+                    ws.write_number(row, col, pay_val, money_fmt)
+                    ws.write_number(row, col + 1, 0, money_fmt)
                     col += 2
-
                 ws.write_number(row, col, block["total_hours"], total_fmt)
                 row += 1
 
-                ws.write(row, 0, "", row_label_fmt)
                 ws.write(row, 1, "Total gains", row_label_fmt)
                 ws.write_number(row, 2, block["total_pay"], total_money_fmt)
                 row += 1
 
-                ws.write(row, 0, "", row_label_fmt)
                 ws.write(row, 1, "REER", row_label_fmt)
                 ws.write_number(row, 2, REER_PER_HOUR, num_fmt)
                 ws.write_number(row, 3, block["reer_amount"], total_money_fmt)
                 row += 1
 
-                ws.write(row, 0, "", row_label_fmt)
                 ws.write(row, 1, "Total gains including REER", row_label_fmt)
                 ws.write_number(row, 2, block["total_with_reer"], total_money_fmt)
                 row += 2
@@ -534,17 +568,17 @@ def export_committee_report(filtered_df: pd.DataFrame, company_name: str, start_
             ws.write(1, top_col, "TOTAL DES GAINS DE TOUTES LES EMPLOYÉS INCLUANT MONTANTS REER", header_fmt)
             ws.write_number(1, top_col + 1, grand_total_with_reer, total_money_fmt)
 
+            levy = round(grand_total_with_reer * 0.01, 2)
             ws.write(2, top_col, "X 1% (EMPLOYEUR ET EMPLOYÉS)", header_fmt)
-            ws.write_number(2, top_col + 1, round(grand_total_with_reer * 0.01, 2), total_money_fmt)
+            ws.write_number(2, top_col + 1, levy, total_money_fmt)
 
             ws.write(3, top_col, "AJUST. MOIS PRÉCÉDENTS", header_fmt)
             ws.write_number(3, top_col + 1, 0, total_money_fmt)
 
             ws.write(4, top_col, "PRÉLÈVEMENT TOTAL DÛ", header_fmt)
-            ws.write_number(4, top_col + 1, round(grand_total_with_reer * 0.01, 2), total_money_fmt)
+            ws.write_number(4, top_col + 1, levy, total_money_fmt)
 
-        summary_df = pd.DataFrame(summary_rows)
-        summary_df.to_excel(writer, sheet_name="Summary", index=False)
+        pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Summary", index=False)
 
     output.seek(0)
     return output
@@ -732,56 +766,27 @@ selected_excel_files = [f for f in all_excel_files if f["display_name"] in selec
 # ============================================================
 # LOAD EXCEL DATA
 # ============================================================
-df = load_selected_excel_files(access_token, drive_id, selected_excel_files, month_name_map)
+raw_df = load_selected_excel_files(access_token, drive_id, selected_excel_files, month_name_map)
 
-if df.empty:
+if raw_df.empty:
     st.error("No valid data could be loaded from the selected Excel files.")
     st.stop()
 
 # ============================================================
-# COLUMN MAPPING
+# BUILD FINAL DATAFRAME USING POSITIONAL RULES
+# N = Type of work, O = Vendor Company, P = Employee
 # ============================================================
-column_map = {
-    "date": "date",
-
-    "employee": "employee",
-    "name employee": "employee",
-    "name employee & vendor company": "employee",
-
-    "province": "province",
-
-    "total hours worked (number)": "hours",
-    "total hours worked(number)": "hours",
-    "total hours worked ( number )": "hours",
-    "total hours worked": "hours",
-
-    "total_pay": "total_pay",
-    "total to pay": "total_pay",
-
-    "type_of_work": "type_of_work",
-    "type of work": "type_of_work",
-    "category": "type_of_work",
-
-    "vendor_company": "vendor_company",
-    "vendor company": "vendor_company",
-    "building & vendor company": "vendor_company",
-
-    "hourly rate": "hourly_rate",
-    "hourly_rate": "hourly_rate",
-}
-
-df = df.rename(columns=column_map)
-df = build_required_dataframe(df)
+df, raw_cols, type_col_pos, vendor_col_pos, employee_col_pos = build_required_dataframe(raw_df)
 
 required_cols = [
-    "date", "province", "employee", "hours", "total_pay",
-    "type_of_work", "vendor_company"
+    "date", "province", "employee", "hours",
+    "total_pay", "type_of_work", "vendor_company"
 ]
 missing = [c for c in required_cols if c not in df.columns]
 
 if missing:
     st.error(f"Missing required columns: {missing}")
-    st.write("Detected columns:", list(df.columns))
+    st.write("Detected columns:", raw_cols)
     st.stop()
 
 if "hourly_rate" not in df.columns:
@@ -807,7 +812,7 @@ df["class_code"] = "A"
 # ============================================================
 # FILTERS
 # ============================================================
-st.sidebar.header("🔎 Committee Filters")
+st.sidebar.header("🧷 Committee Filters")
 
 all_provinces = sorted([p for p in df["province"].dropna().unique().tolist() if p])
 selected_provinces = st.sidebar.multiselect("Province", all_provinces, default=all_provinces)
@@ -853,7 +858,7 @@ if filtered_df.empty:
     st.stop()
 
 # ============================================================
-# SUMMARY METRICS
+# METRICS
 # ============================================================
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Rows", len(filtered_df))
@@ -862,7 +867,7 @@ col3.metric("Committee Hours", f"{filtered_df['committee_hours'].sum():,.2f}")
 col4.metric("Total Pay", format_money(filtered_df["total_pay"].sum()))
 
 # ============================================================
-# PREVIEW TABLE
+# PREVIEW
 # ============================================================
 preview_cols = [
     "source_month_folder",
@@ -901,19 +906,20 @@ st.subheader("Employee summary")
 st.dataframe(employee_summary, use_container_width=True)
 
 # ============================================================
-# EXPORT COMMITTEE REPORT
+# EXPORT
 # ============================================================
-company_for_export = st.selectbox(
+company_options = sorted(filtered_df["vendor_company"].dropna().unique().tolist())
+selected_company_for_report = st.selectbox(
     "Select Vendor Company for Comité report export",
-    sorted(filtered_df["vendor_company"].dropna().unique().tolist()),
+    company_options
 )
 
-report_file = export_committee_report(filtered_df, company_for_export, start_date, int(num_weeks))
+report_file = export_committee_report(filtered_df, selected_company_for_report, start_date, int(num_weeks))
 
 st.download_button(
     label="Download Comité Excel Report",
     data=report_file,
-    file_name=f"comite_paritaire_{company_for_export.replace(' ', '_')}.xlsx",
+    file_name=f"comite_paritaire_{selected_company_for_report.replace(' ', '_')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
@@ -927,4 +933,8 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Root folder resolved name:", meta.get("name"))
     st.write("Selected month folders:", selected_month_names)
     st.write("Selected excel display names:", selected_excel_display_names)
-    st.write("Detected columns:", list(filtered_df.columns))
+    st.write("Original detected columns:", raw_cols)
+    st.write("Column at N (13):", type_col_pos)
+    st.write("Column at O (14):", vendor_col_pos)
+    st.write("Column at P (15):", employee_col_pos)
+    st.write("Final columns:", list(filtered_df.columns))
