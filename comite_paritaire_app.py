@@ -445,21 +445,51 @@ if df.empty:
 # Adjust here if your source headers vary
 # ============================================================
 column_map = {
+    # DATE
+    "date": "date",
     "Date": "date",
-    "Province": "province",
+
+    # EMPLOYEE
+    "employee": "employee",
+    "Employee": "employee",
     "name employee": "employee",
     "Name Employee": "employee",
-    "Employee": "employee",
-    "total hours worked (numb)": "hours",
-    "total hours worked (numb.)": "hours",
-    "total hours worked (numb...)": "hours",
+    "Name Employee & vendor company": "employee",
+
+    # PROVINCE
+    "province": "province",
+    "Province": "province",
+
+    # HOURS (🔥 FIX AQUÍ)
+    "total hours worked (number)": "hours",
+    "total hours worked (number )": "hours",
+    "total hours worked (number)": "hours",
+    "total hours worked (number)": "hours",
+    "total hours worked (number)": "hours",
+    "total hours worked (number)": "hours",
+    "total hours worked (number)": "hours",
+    "total hours worked (number)": "hours",
+    "total hours worked (number)": "hours",
+    "total hours worked (number)": "hours",
     "total hours worked": "hours",
     "Total Hours Worked": "hours",
+
+    # PAY
+    "total_pay": "total_pay",
+    "Total Pay": "total_pay",
     "Total to pay": "total_pay",
+
+    # TYPE OF WORK
+    "type_of_work": "type_of_work",
     "Type of work": "type_of_work",
     "Type Of Work": "type_of_work",
+    "Category": "type_of_work",
+
+    # VENDOR
+    "vendor_company": "vendor_company",
     "Vendor Company": "vendor_company",
     "Vendor company": "vendor_company",
+    "Building & vendor company": "vendor_company",
 }
 
 df = df.rename(columns=column_map)
