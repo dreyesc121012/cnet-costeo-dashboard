@@ -208,11 +208,27 @@ def load_selected_excel_files(access_token: str, drive_id: str, selected_files: 
     for file_info in selected_files:
         try:
             file_bytes = download_item_bytes(access_token, drive_id, file_info["id"])
-            df = pd.read_excel(BytesIO(file_bytes), sheet_name="data")
+            excel_file = pd.ExcelFile(BytesIO(file_bytes))
+
+            sheet_to_use = None
+            for s in excel_file.sheet_names:
+                if s.strip().lower() == "data":
+                    sheet_to_use = s
+                    break
+
+            if sheet_to_use is None:
+                st.warning(
+                    f"Could not read {file_info['name']}: sheet 'Data' not found. "
+                    f"Available sheets: {excel_file.sheet_names}"
+                )
+                continue
+
+            df = excel_file.parse(sheet_to_use)
             df = clean_columns(df)
             df["source_file"] = file_info["name"]
             df["source_month_folder"] = month_name_map.get(file_info["id"], "")
             dfs.append(df)
+
         except Exception as e:
             st.warning(f"Could not read {file_info['name']}: {e}")
 
