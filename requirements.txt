@@ -9,3 +9,4 @@ plotly
 beautifulsoup4
 lxml
 kaleido==0.2.1
+xlsxwriter
