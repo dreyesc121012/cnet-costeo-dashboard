@@ -8,11 +8,13 @@ import requests
 import streamlit as st
 import msal
 
+
 # ============================================================
 # PAGE
 # ============================================================
 st.set_page_config(page_title="Comité Paritaire QC", layout="wide")
 st.title("Comité Paritaire Québec - Weekly Report")
+
 
 # ============================================================
 # CONFIG (SECRETS)
@@ -29,6 +31,7 @@ LOGIN_HINT = str(st.secrets.get("LOGIN_HINT", "")).strip()
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 SCOPES = ["User.Read", "Files.Read.All", "Sites.Read.All"]
 
+
 # ============================================================
 # BUSINESS RULES
 # ============================================================
@@ -43,8 +46,9 @@ ROW_ORDER = [
     ("Maladie", "maladie_hours"),
 ]
 
+
 # ============================================================
-# HELPERS
+# GENERIC HELPERS
 # ============================================================
 def normalize_text(s: str) -> str:
     s = "" if s is None else str(s)
@@ -54,6 +58,7 @@ def normalize_text(s: str) -> str:
     s = s.replace("\u00A0", " ")
     s = " ".join(s.split())
     return s
+
 
 def get_query_params_compat() -> dict:
     try:
@@ -79,6 +84,7 @@ def get_query_params_compat() -> dict:
         except Exception:
             return {}
 
+
 def clear_query_params_compat():
     try:
         st.query_params.clear()
@@ -88,94 +94,13 @@ def clear_query_params_compat():
         except Exception:
             pass
 
-def get_msal_app():
-    return msal.ConfidentialClientApplication(
-        CLIENT_ID,
-        authority=AUTHORITY,
-        client_credential=CLIENT_SECRET,
-        token_cache=None,
-    )
 
-# ============================================================
-# GRAPH HELPERS
-# ============================================================
-def graph_get(url: str, access_token: str) -> requests.Response:
-    return requests.get(
-        url,
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=60,
-    )
+def format_money(x) -> str:
+    try:
+        return f"${float(x):,.2f}"
+    except Exception:
+        return "$0.00"
 
-def graph_get_json(url: str, access_token: str) -> dict:
-    r = graph_get(url, access_token)
-    if r.status_code != 200:
-        raise RuntimeError(f"Graph error {r.status_code}\n{r.text}")
-    return r.json()
-
-def get_me(access_token: str) -> dict:
-    r = requests.get(
-        "https://graph.microsoft.com/v1.0/me",
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=60,
-    )
-    if r.status_code != 200:
-        raise RuntimeError(f"Graph /me error {r.status_code}\n{r.text}")
-    return r.json()
-
-def get_user_email(me: dict) -> str:
-    return (me.get("mail") or me.get("userPrincipalName") or "").strip().lower()
-
-def is_allowed_user(me: dict) -> bool:
-    email = get_user_email(me)
-    if not ALLOWED_DOMAIN:
-        return False
-    return email.endswith(f"@{ALLOWED_DOMAIN}")
-
-def make_share_id(shared_url: str) -> str:
-    b = base64.b64encode(shared_url.encode("utf-8")).decode("utf-8")
-    b = b.rstrip("=").replace("/", "_").replace("+", "-")
-    return "u!" + b
-
-def resolve_shared_link(access_token: str, shared_url: str) -> dict:
-    share_id = make_share_id(shared_url)
-    meta_url = f"https://graph.microsoft.com/v1.0/shares/{share_id}/driveItem"
-    meta = graph_get(meta_url, access_token)
-    if meta.status_code != 200:
-        raise RuntimeError(
-            f"Error resolving shared link: {meta.status_code}\n{meta.text}\n\n"
-            "TIP: Use SharePoint/OneDrive → Share → Copy link (within your organization)."
-        )
-    return meta.json()
-
-def download_item_bytes(access_token: str, drive_id: str, item_id: str) -> bytes:
-    content_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
-    r = graph_get(content_url, access_token)
-    if r.status_code != 200:
-        raise RuntimeError(f"Error downloading file: {r.status_code}\n{r.text}")
-    return r.content
-
-def list_children_all(access_token: str, drive_id: str, folder_item_id: str):
-    url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{folder_item_id}/children?$top=200"
-    all_items = []
-    while url:
-        data = graph_get_json(url, access_token)
-        all_items.extend(data.get("value", []))
-        url = data.get("@odata.nextLink")
-    return all_items
-
-def is_excel_name(name: str) -> bool:
-    n = (name or "").lower()
-    return n.endswith(".xlsx") or n.endswith(".xlsm") or n.endswith(".xls")
-
-def is_folder_item(item: dict) -> bool:
-    return "folder" in item
-
-# ============================================================
-# DATA HELPERS
-# ============================================================
-def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
 
 def safe_text_series(s: pd.Series) -> pd.Series:
     out = s.astype(str).str.replace("\u00A0", " ", regex=False).str.strip()
@@ -189,6 +114,112 @@ def safe_text_series(s: pd.Series) -> pd.Series:
             "<NA>": "",
         }
     ).fillna("")
+
+
+# ============================================================
+# MSAL / AUTH
+# ============================================================
+def get_msal_app():
+    return msal.ConfidentialClientApplication(
+        CLIENT_ID,
+        authority=AUTHORITY,
+        client_credential=CLIENT_SECRET,
+        token_cache=None,
+    )
+
+
+def get_me(access_token: str) -> dict:
+    r = requests.get(
+        "https://graph.microsoft.com/v1.0/me",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=60,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"Graph /me error {r.status_code}\n{r.text}")
+    return r.json()
+
+
+def get_user_email(me: dict) -> str:
+    return (me.get("mail") or me.get("userPrincipalName") or "").strip().lower()
+
+
+def is_allowed_user(me: dict) -> bool:
+    email = get_user_email(me)
+    if not ALLOWED_DOMAIN:
+        return False
+    return email.endswith(f"@{ALLOWED_DOMAIN}")
+
+
+# ============================================================
+# GRAPH / ONEDRIVE HELPERS
+# ============================================================
+def graph_get(url: str, access_token: str) -> requests.Response:
+    return requests.get(
+        url,
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=60,
+    )
+
+
+def graph_get_json(url: str, access_token: str) -> dict:
+    r = graph_get(url, access_token)
+    if r.status_code != 200:
+        raise RuntimeError(f"Graph error {r.status_code}\n{r.text}")
+    return r.json()
+
+
+def make_share_id(shared_url: str) -> str:
+    b = base64.b64encode(shared_url.encode("utf-8")).decode("utf-8")
+    b = b.rstrip("=").replace("/", "_").replace("+", "-")
+    return "u!" + b
+
+
+def resolve_shared_link(access_token: str, shared_url: str) -> dict:
+    share_id = make_share_id(shared_url)
+    meta_url = f"https://graph.microsoft.com/v1.0/shares/{share_id}/driveItem"
+    meta = graph_get(meta_url, access_token)
+    if meta.status_code != 200:
+        raise RuntimeError(
+            f"Error resolving shared link: {meta.status_code}\n{meta.text}\n\n"
+            "TIP: Use SharePoint/OneDrive → Share → Copy link (within your organization)."
+        )
+    return meta.json()
+
+
+def download_item_bytes(access_token: str, drive_id: str, item_id: str) -> bytes:
+    content_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
+    r = graph_get(content_url, access_token)
+    if r.status_code != 200:
+        raise RuntimeError(f"Error downloading file: {r.status_code}\n{r.text}")
+    return r.content
+
+
+def list_children_all(access_token: str, drive_id: str, folder_item_id: str):
+    url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{folder_item_id}/children?$top=200"
+    all_items = []
+    while url:
+        data = graph_get_json(url, access_token)
+        all_items.extend(data.get("value", []))
+        url = data.get("@odata.nextLink")
+    return all_items
+
+
+def is_excel_name(name: str) -> bool:
+    n = (name or "").lower()
+    return n.endswith(".xlsx") or n.endswith(".xlsm") or n.endswith(".xls")
+
+
+def is_folder_item(item: dict) -> bool:
+    return "folder" in item
+
+
+# ============================================================
+# DATA LOADING / MAPPING
+# ============================================================
+def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
 
 def pick_column(df: pd.DataFrame, candidates: list[str], fallback_idx: int | None = None):
     norm_cols = {normalize_text(c): c for c in df.columns}
@@ -209,58 +240,6 @@ def pick_column(df: pd.DataFrame, candidates: list[str], fallback_idx: int | Non
 
     return None
 
-def assign_committee_week(date_value: pd.Timestamp, start_date: pd.Timestamp, num_weeks: int = 6):
-    for i in range(num_weeks):
-        week_start = start_date + timedelta(days=i * 7)
-        week_end = week_start + timedelta(days=6)
-        if week_start <= date_value <= week_end:
-            return week_start, week_end
-    return None, None
-
-def normalize_work_type(value: str) -> str:
-    v = normalize_text(value)
-
-    if "suppl" in v:
-        return "Suppl."
-    if "conge travaille" in v:
-        return "Congé Travaillé"
-    if v == "conge" or " conge " in f" {v} ":
-        return "Congé"
-    if "malad" in v:
-        return "Maladie"
-    return "Regular"
-
-def calculate_committee_hours_raw(row: pd.Series) -> float:
-    hours = row.get("hours", 0)
-    total_pay = row.get("total_pay", 0)
-    hourly_rate = row.get("hourly_rate", 0)
-
-    try:
-        hours = float(hours)
-    except Exception:
-        hours = 0.0
-
-    try:
-        total_pay = float(total_pay)
-    except Exception:
-        total_pay = 0.0
-
-    try:
-        hourly_rate = float(hourly_rate)
-    except Exception:
-        hourly_rate = 0.0
-
-    # caso flat o salario menor al mínimo clase A
-    if (hours <= 1 and total_pay > COMITE_CLASS_A_RATE) or (hourly_rate > 0 and hourly_rate < COMITE_CLASS_A_RATE):
-        return total_pay / COMITE_CLASS_A_RATE
-
-    return hours
-
-def format_money(x) -> str:
-    try:
-        return f"${float(x):,.2f}"
-    except Exception:
-        return "$0.00"
 
 def load_selected_excel_files(access_token: str, drive_id: str, selected_files: list[dict], month_name_map: dict) -> pd.DataFrame:
     dfs = []
@@ -297,10 +276,12 @@ def load_selected_excel_files(access_token: str, drive_id: str, selected_files: 
 
     return pd.DataFrame()
 
+
 def build_required_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     """
-    Use header names first, with position fallback only if needed.
-    Based on your screenshot:
+    Expected layout from your sheet:
+    H = total hours worked (number)
+    I = hourly rate
     J = hours Suppl
     K = hours Congé
     L = hours Congé Travaillé
@@ -363,98 +344,107 @@ def build_required_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     out["vendor_company"] = col_or_blank(vendor_col)
     out["employee"] = col_or_blank(employee_col)
 
-    if "source_file" in df.columns:
-        out["source_file"] = df["source_file"]
-    else:
-        out["source_file"] = ""
-
-    if "source_month_folder" in df.columns:
-        out["source_month_folder"] = df["source_month_folder"]
-    else:
-        out["source_month_folder"] = ""
+    out["source_file"] = df["source_file"] if "source_file" in df.columns else ""
+    out["source_month_folder"] = df["source_month_folder"] if "source_month_folder" in df.columns else ""
 
     return out, col_debug
 
-def apply_hours_buckets(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Use the dedicated columns you created:
-    - hours Suppl
-    - hours Congé
-    - hours Congé Travaillé
-    - Hours Maladie
 
-    Regular hours = committee_hours - special columns if special columns exist.
-    If all special columns are 0/blank, fallback to type_of_work.
-    """
-    df = df.copy()
+# ============================================================
+# COMMITTEE LOGIC
+# ============================================================
+def assign_committee_week(date_value: pd.Timestamp, start_date: pd.Timestamp, num_weeks: int = 6):
+    for i in range(num_weeks):
+        week_start = start_date + timedelta(days=i * 7)
+        week_end = week_start + timedelta(days=6)
+        if week_start <= date_value <= week_end:
+            return week_start, week_end
+    return None, None
 
-    df["suppl_raw"] = pd.to_numeric(df["suppl_raw"], errors="coerce").fillna(0)
-    df["conge_raw"] = pd.to_numeric(df["conge_raw"], errors="coerce").fillna(0)
-    df["conge_trav_raw"] = pd.to_numeric(df["conge_trav_raw"], errors="coerce").fillna(0)
-    df["maladie_raw"] = pd.to_numeric(df["maladie_raw"], errors="coerce").fillna(0)
 
-    df["special_total"] = (
-        df["suppl_raw"] +
-        df["conge_raw"] +
-        df["conge_trav_raw"] +
-        df["maladie_raw"]
+def calculate_weekly_committee_hours(total_pay: float, raw_hours_sum: float, hourly_rate_min: float) -> float:
+    try:
+        total_pay = float(total_pay)
+    except Exception:
+        total_pay = 0.0
+
+    try:
+        raw_hours_sum = float(raw_hours_sum)
+    except Exception:
+        raw_hours_sum = 0.0
+
+    try:
+        hourly_rate_min = float(hourly_rate_min)
+    except Exception:
+        hourly_rate_min = 0.0
+
+    # Flat case / lower than Class A:
+    # use weekly total pay / 21.57
+    if hourly_rate_min > 0 and hourly_rate_min < COMITE_CLASS_A_RATE:
+        return round(total_pay / COMITE_CLASS_A_RATE, 2)
+
+    # Flat weekly case with only ~1 hour but high payment
+    if raw_hours_sum <= 1 and total_pay > COMITE_CLASS_A_RATE:
+        return round(total_pay / COMITE_CLASS_A_RATE, 2)
+
+    # Otherwise keep real summed hours
+    return round(raw_hours_sum, 2)
+
+
+def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
+    grouped = (
+        df.groupby(["vendor_company", "employee", "week_label"], dropna=False)
+        .agg(
+            raw_hours_sum=("hours", "sum"),
+            suppl_hours_raw=("suppl_raw", "sum"),
+            conge_hours_raw=("conge_raw", "sum"),
+            conge_trav_hours_raw=("conge_trav_raw", "sum"),
+            maladie_hours_raw=("maladie_raw", "sum"),
+            total_pay=("total_pay", "sum"),
+            hourly_rate_min=("hourly_rate", "min"),
+            source_month_folder=("source_month_folder", "first"),
+            source_file=("source_file", "first"),
+            province=("province", "first"),
+        )
+        .reset_index()
+        .sort_values(["vendor_company", "employee", "week_label"])
     )
 
-    df["regular_hours"] = 0.0
-    df["suppl_hours"] = 0.0
-    df["conge_hours"] = 0.0
-    df["conge_trav_hours"] = 0.0
-    df["maladie_hours"] = 0.0
-
-    # Case 1: use the dedicated columns directly
-    mask_has_special = df["special_total"] > 0
-
-    df.loc[mask_has_special, "suppl_hours"] = df.loc[mask_has_special, "suppl_raw"]
-    df.loc[mask_has_special, "conge_hours"] = df.loc[mask_has_special, "conge_raw"]
-    df.loc[mask_has_special, "conge_trav_hours"] = df.loc[mask_has_special, "conge_trav_raw"]
-    df.loc[mask_has_special, "maladie_hours"] = df.loc[mask_has_special, "maladie_raw"]
-
-    df.loc[mask_has_special, "regular_hours"] = (
-        df.loc[mask_has_special, "committee_hours"] -
-        df.loc[mask_has_special, "special_total"]
-    ).clip(lower=0)
-
-    # Case 2: if special cols are empty, fallback to type_of_work
-    mask_no_special = ~mask_has_special
-    type_norm = df["type_of_work"].astype(str).map(normalize_text)
-
-    df.loc[mask_no_special & type_norm.str.contains("suppl", na=False), "suppl_hours"] = df.loc[
-        mask_no_special & type_norm.str.contains("suppl", na=False), "committee_hours"
-    ]
-
-    df.loc[mask_no_special & type_norm.eq("conge"), "conge_hours"] = df.loc[
-        mask_no_special & type_norm.eq("conge"), "committee_hours"
-    ]
-
-    df.loc[mask_no_special & type_norm.str.contains("conge travaille", na=False), "conge_trav_hours"] = df.loc[
-        mask_no_special & type_norm.str.contains("conge travaille", na=False), "committee_hours"
-    ]
-
-    df.loc[mask_no_special & type_norm.str.contains("malad", na=False), "maladie_hours"] = df.loc[
-        mask_no_special & type_norm.str.contains("malad", na=False), "committee_hours"
-    ]
-
-    mask_any_special_from_type = (
-        (df["suppl_hours"] > 0) |
-        (df["conge_hours"] > 0) |
-        (df["conge_trav_hours"] > 0) |
-        (df["maladie_hours"] > 0)
+    grouped["committee_hours"] = grouped.apply(
+        lambda r: calculate_weekly_committee_hours(
+            r["total_pay"],
+            r["raw_hours_sum"],
+            r["hourly_rate_min"],
+        ),
+        axis=1,
     )
-    df.loc[mask_no_special & ~mask_any_special_from_type, "regular_hours"] = df.loc[
-        mask_no_special & ~mask_any_special_from_type, "committee_hours"
-    ]
 
-    return df
+    grouped["suppl_hours"] = pd.to_numeric(grouped["suppl_hours_raw"], errors="coerce").fillna(0)
+    grouped["conge_hours"] = pd.to_numeric(grouped["conge_hours_raw"], errors="coerce").fillna(0)
+    grouped["conge_trav_hours"] = pd.to_numeric(grouped["conge_trav_hours_raw"], errors="coerce").fillna(0)
+    grouped["maladie_hours"] = pd.to_numeric(grouped["maladie_hours_raw"], errors="coerce").fillna(0)
 
-def create_employee_report_blocks(df: pd.DataFrame, vendor_company: str):
+    special_total = (
+        grouped["suppl_hours"] +
+        grouped["conge_hours"] +
+        grouped["conge_trav_hours"] +
+        grouped["maladie_hours"]
+    )
+
+    grouped["regular_hours"] = (grouped["committee_hours"] - special_total).clip(lower=0)
+    grouped["reer"] = grouped["committee_hours"] * REER_PER_HOUR
+    grouped["total_with_reer"] = grouped["total_pay"] + grouped["reer"]
+
+    return grouped
+
+
+# ============================================================
+# EXPORT HELPERS
+# ============================================================
+def create_employee_report_blocks(weekly_df: pd.DataFrame, vendor_company: str):
     report_data = []
 
-    vendor_df = df[df["vendor_company"] == vendor_company].copy()
+    vendor_df = weekly_df[weekly_df["vendor_company"] == vendor_company].copy()
     employees = sorted(vendor_df["employee"].dropna().unique().tolist())
     week_labels = sorted(vendor_df["week_label"].dropna().unique().tolist())
 
@@ -477,23 +467,20 @@ def create_employee_report_blocks(df: pd.DataFrame, vendor_company: str):
         total_pay_employee = 0.0
 
         for label, col_name in ROW_ORDER:
-            row_hours = []
+            row_values = []
             row_total = 0.0
 
             for wk in week_labels:
-                val = emp_df.loc[
-                    emp_df["week_label"] == wk,
-                    col_name,
-                ].sum()
+                val = emp_df.loc[emp_df["week_label"] == wk, col_name].sum()
                 val = round(float(val), 2)
-                row_hours.append(val)
+                row_values.append(val)
                 row_total += val
 
             total_hours_employee += row_total
             block["rows"].append(
                 {
                     "label": label,
-                    "week_values": row_hours,
+                    "week_values": row_values,
                     "row_total": round(row_total, 2),
                 }
             )
@@ -512,7 +499,8 @@ def create_employee_report_blocks(df: pd.DataFrame, vendor_company: str):
 
     return report_data
 
-def export_committee_report(filtered_df: pd.DataFrame, start_date_value) -> BytesIO:
+
+def export_committee_report(weekly_df: pd.DataFrame, start_date_value) -> BytesIO:
     output = BytesIO()
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -556,7 +544,7 @@ def export_committee_report(filtered_df: pd.DataFrame, start_date_value) -> Byte
             "bg_color": "#FCE4D6"
         })
 
-        vendors = sorted(filtered_df["vendor_company"].dropna().unique().tolist())
+        vendors = sorted(weekly_df["vendor_company"].dropna().unique().tolist())
         summary_rows = []
 
         for vendor in vendors:
@@ -569,8 +557,8 @@ def export_committee_report(filtered_df: pd.DataFrame, start_date_value) -> Byte
             ws.set_column("C:Z", 12)
             ws.set_column("AA:AC", 16)
 
-            vendor_df = filtered_df[filtered_df["vendor_company"] == vendor].copy()
-            report_blocks = create_employee_report_blocks(filtered_df, vendor)
+            vendor_df = weekly_df[weekly_df["vendor_company"] == vendor].copy()
+            report_blocks = create_employee_report_blocks(weekly_df, vendor)
             week_labels = sorted(vendor_df["week_label"].dropna().unique().tolist())
 
             row = 0
@@ -676,6 +664,7 @@ def export_committee_report(filtered_df: pd.DataFrame, start_date_value) -> Byte
     output.seek(0)
     return output
 
+
 # ============================================================
 # AUTH FLOW
 # ============================================================
@@ -748,6 +737,7 @@ if not is_allowed_user(me):
     st.session_state.pop("token_result", None)
     st.stop()
 
+
 # ============================================================
 # SIDEBAR
 # ============================================================
@@ -761,6 +751,7 @@ if st.button("🚪 Sign out"):
 
 st.sidebar.header("📁 SharePoint Source")
 st.sidebar.caption("Select month folder(s), then choose Excel files inside them.")
+
 
 # ============================================================
 # RESOLVE ROOT FOLDER
@@ -778,6 +769,7 @@ root_item_id = meta["id"]
 if "folder" not in meta:
     st.error("ONEDRIVE_FOLDER_URL must be a folder link.")
     st.stop()
+
 
 # ============================================================
 # LIST MONTH FOLDERS
@@ -809,6 +801,7 @@ if not selected_month_names:
     st.stop()
 
 selected_month_folders = [f for f in month_folders if f["name"] in selected_month_names]
+
 
 # ============================================================
 # LIST EXCEL FILES INSIDE SELECTED MONTH FOLDERS
@@ -856,6 +849,7 @@ if not selected_excel_display_names:
 
 selected_excel_files = [f for f in all_excel_files if f["display_name"] in selected_excel_display_names]
 
+
 # ============================================================
 # LOAD EXCEL DATA
 # ============================================================
@@ -864,6 +858,7 @@ raw_df = load_selected_excel_files(access_token, drive_id, selected_excel_files,
 if raw_df.empty:
     st.error("No valid data could be loaded from the selected Excel files.")
     st.stop()
+
 
 # ============================================================
 # BUILD FINAL DATAFRAME
@@ -881,6 +876,7 @@ if missing:
     st.write("Detected columns:", list(raw_df.columns))
     st.stop()
 
+
 # ============================================================
 # DATA CLEANING
 # ============================================================
@@ -897,8 +893,7 @@ for c in [
     df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
 df = df.dropna(subset=["date"]).copy()
-df["committee_hours_raw"] = df.apply(calculate_committee_hours_raw, axis=1)
-df = apply_hours_buckets(df)
+
 
 # ============================================================
 # FILTERS
@@ -920,6 +915,7 @@ selected_types = st.sidebar.multiselect("Type of work", all_types, default=all_t
 default_start = datetime(2026, 1, 4).date()
 start_date = st.sidebar.date_input("First committee week start date", value=default_start)
 num_weeks = st.sidebar.number_input("Number of weeks", min_value=1, max_value=12, value=4)
+
 
 # ============================================================
 # APPLY FILTERS
@@ -948,17 +944,25 @@ if filtered_df.empty:
     st.warning("No data available for the selected filters.")
     st.stop()
 
+
+# ============================================================
+# BUILD WEEKLY SUMMARY
+# ============================================================
+weekly_summary = build_weekly_summary(filtered_df)
+
+
 # ============================================================
 # METRICS
 # ============================================================
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Rows", len(filtered_df))
-col2.metric("Employees", filtered_df["employee"].nunique())
-col3.metric("Committee Hours", f"{filtered_df['committee_hours'].sum():,.2f}")
-col4.metric("Total Pay", format_money(filtered_df["total_pay"].sum()))
+col2.metric("Employees", weekly_summary["employee"].nunique())
+col3.metric("Committee Hours", f"{weekly_summary['committee_hours'].sum():,.2f}")
+col4.metric("Total Pay", format_money(weekly_summary["total_pay"].sum()))
+
 
 # ============================================================
-# PREVIEW
+# PREVIEW SOURCE
 # ============================================================
 preview_cols = [
     "source_month_folder",
@@ -974,12 +978,6 @@ preview_cols = [
     "conge_raw",
     "conge_trav_raw",
     "maladie_raw",
-    "regular_hours",
-    "suppl_hours",
-    "conge_hours",
-    "conge_trav_hours",
-    "maladie_hours",
-    "committee_hours",
     "total_pay",
     "week_label",
 ]
@@ -988,50 +986,18 @@ preview_cols = [c for c in preview_cols if c in filtered_df.columns]
 st.subheader("Filtered source data")
 st.dataframe(filtered_df[preview_cols], use_container_width=True)
 
+
 # ============================================================
-# EMPLOYEE SUMMARY
+# WEEKLY EMPLOYEE SUMMARY
 # ============================================================
-employee_summary = (
-    filtered_df.groupby(["vendor_company", "employee", "week_label"], dropna=False)
-    .agg(
-        regular_hours=("regular_hours", "sum"),
-        suppl_hours=("suppl_hours", "sum"),
-        conge_hours=("conge_hours", "sum"),
-        conge_trav_hours=("conge_trav_hours", "sum"),
-        maladie_hours=("maladie_hours", "sum"),
-        total_pay=("total_pay", "sum"),
-        hourly_rate_min=("hourly_rate", "min"),
-        raw_hours_sum=("hours", "sum"),
-    )
-    .reset_index()
-    .sort_values(["vendor_company", "employee", "week_label"])
-)
-
-def calc_week_committee_hours(row):
-    total_pay = float(row["total_pay"])
-    hourly_rate_min = float(row["hourly_rate_min"])
-    raw_hours_sum = float(row["raw_hours_sum"])
-
-    # si corresponde recalcular, hacerlo sobre el total semanal
-    if hourly_rate_min > 0 and hourly_rate_min < COMITE_CLASS_A_RATE:
-        return round(total_pay / COMITE_CLASS_A_RATE, 2)
-
-    return round(raw_hours_sum, 2)
-
-employee_summary["committee_hours"] = employee_summary.apply(calc_week_committee_hours, axis=1)
-employee_summary["reer"] = employee_summary["committee_hours"] * REER_PER_HOUR
-employee_summary["total_with_reer"] = employee_summary["total_pay"] + employee_summary["reer"]
-
-employee_summary["reer"] = employee_summary["committee_hours"] * REER_PER_HOUR
-employee_summary["total_with_reer"] = employee_summary["total_pay"] + employee_summary["reer"]
-
 st.subheader("Employee summary")
-st.dataframe(employee_summary, use_container_width=True)
+st.dataframe(weekly_summary, use_container_width=True)
+
 
 # ============================================================
 # EXPORT
 # ============================================================
-report_file = export_committee_report(filtered_df, start_date)
+report_file = export_committee_report(weekly_summary, start_date)
 
 st.download_button(
     label="Download Comité Excel Report",
@@ -1039,6 +1005,7 @@ st.download_button(
     file_name="comite_paritaire_report.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
+
 
 # ============================================================
 # DIAGNOSTICS
@@ -1051,4 +1018,5 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Selected month folders:", selected_month_names)
     st.write("Selected excel display names:", selected_excel_display_names)
     st.write("Column mapping used:", col_debug)
-    st.write("Final columns:", list(filtered_df.columns))
+    st.write("Final source columns:", list(filtered_df.columns))
+    st.write("Weekly summary columns:", list(weekly_summary.columns))
