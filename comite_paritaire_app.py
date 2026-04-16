@@ -230,7 +230,7 @@ def normalize_work_type(value: str) -> str:
         return "Maladie"
     return "Regular"
 
-def calculate_committee_hours(row: pd.Series) -> float:
+def calculate_committee_hours_raw(row: pd.Series) -> float:
     hours = row.get("hours", 0)
     total_pay = row.get("total_pay", 0)
     hourly_rate = row.get("hourly_rate", 0)
@@ -250,15 +250,11 @@ def calculate_committee_hours(row: pd.Series) -> float:
     except Exception:
         hourly_rate = 0.0
 
-    # Flat work: 1 hour but high amount
-    if hours <= 1 and total_pay > COMITE_CLASS_A_RATE:
-        return round(total_pay / COMITE_CLASS_A_RATE, 2)
+    # caso flat o salario menor al mínimo clase A
+    if (hours <= 1 and total_pay > COMITE_CLASS_A_RATE) or (hourly_rate > 0 and hourly_rate < COMITE_CLASS_A_RATE):
+        return total_pay / COMITE_CLASS_A_RATE
 
-    # Hourly rate below comité rate
-    if hourly_rate > 0 and hourly_rate < COMITE_CLASS_A_RATE:
-        return round(total_pay / COMITE_CLASS_A_RATE, 2)
-
-    return round(hours, 2)
+    return hours
 
 def format_money(x) -> str:
     try:
