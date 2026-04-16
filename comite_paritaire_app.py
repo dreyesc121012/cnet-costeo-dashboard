@@ -435,6 +435,13 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     grouped["reer"] = grouped["committee_hours"] * REER_PER_HOUR
     grouped["total_with_reer"] = grouped["total_pay"] + grouped["reer"]
 
+    grouped["regular_hours"] = (grouped["committee_hours"] - special_total).clip(lower=0)
+    grouped["reer"] = grouped["committee_hours"] * REER_PER_HOUR
+    grouped["total_with_reer"] = grouped["total_pay"] + grouped["reer"]
+
+    numeric_cols = grouped.select_dtypes(include=["number"]).columns
+    grouped[numeric_cols] = grouped[numeric_cols].round(2)
+
     return grouped
 
 
@@ -984,14 +991,27 @@ preview_cols = [
 preview_cols = [c for c in preview_cols if c in filtered_df.columns]
 
 st.subheader("Filtered source data")
-st.dataframe(filtered_df[preview_cols], use_container_width=True)
+
+display_source = filtered_df[preview_cols].copy()
+numeric_cols = display_source.select_dtypes(include=["number"]).columns
+for col in numeric_cols:
+    display_source[col] = display_source[col].round(2)
+
+st.dataframe(display_source, use_container_width=True)
 
 
 # ============================================================
 # WEEKLY EMPLOYEE SUMMARY
 # ============================================================
 st.subheader("Employee summary")
-st.dataframe(weekly_summary, use_container_width=True)
+
+display_summary = weekly_summary.copy()
+
+numeric_cols = display_summary.select_dtypes(include=["number"]).columns
+for col in numeric_cols:
+    display_summary[col] = display_summary[col].round(2)
+
+st.dataframe(display_summary, use_container_width=True)
 
 
 # ============================================================
