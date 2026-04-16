@@ -1,6 +1,7 @@
 import base64
 from io import BytesIO
 from datetime import timedelta, datetime
+import unicodedata
 
 import pandas as pd
 import requests
@@ -34,17 +35,26 @@ SCOPES = ["User.Read", "Files.Read.All", "Sites.Read.All"]
 COMITE_CLASS_A_RATE = 21.57
 REER_PER_HOUR = 0.45
 
-WORK_CLASS_ORDER = [
-    "Regular",
-    "Suppl.",
-    "Congé",
-    "Congé Travaillé",
-    "Maladie",
+ROW_ORDER = [
+    ("Régulier", "regular_hours"),
+    ("Suppl.", "suppl_hours"),
+    ("Congé", "conge_hours"),
+    ("Congé Travaillé", "conge_trav_hours"),
+    ("Maladie", "maladie_hours"),
 ]
 
 # ============================================================
-# QUERY PARAM HELPERS
+# HELPERS
 # ============================================================
+def normalize_text(s: str) -> str:
+    s = "" if s is None else str(s)
+    s = s.strip().lower()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.replace("\u00A0", " ")
+    s = " ".join(s.split())
+    return s
+
 def get_query_params_compat() -> dict:
     try:
         qp = st.query_params
@@ -78,9 +88,6 @@ def clear_query_params_compat():
         except Exception:
             pass
 
-# ============================================================
-# MSAL
-# ============================================================
 def get_msal_app():
     return msal.ConfidentialClientApplication(
         CLIENT_ID,
@@ -183,20 +190,24 @@ def safe_text_series(s: pd.Series) -> pd.Series:
         }
     ).fillna("")
 
-def normalize_work_type(value: str) -> str:
-    v = str(value).strip().upper()
+def pick_column(df: pd.DataFrame, candidates: list[str], fallback_idx: int | None = None):
+    norm_cols = {normalize_text(c): c for c in df.columns}
 
-    if "REGULAR" in v:
-        return "Regular"
-    if "SUPPL" in v:
-        return "Suppl."
-    if "CONGE TRAVAIL" in v or "CONGÉ TRAVAIL" in v:
-        return "Congé Travaillé"
-    if v == "CONGE" or v == "CONGÉ" or "CONGE " in v or "CONGÉ " in v:
-        return "Congé"
-    if "MALAD" in v:
-        return "Maladie"
-    return "Regular"
+    for cand in candidates:
+        cand_norm = normalize_text(cand)
+        if cand_norm in norm_cols:
+            return norm_cols[cand_norm]
+
+    for cand in candidates:
+        cand_norm = normalize_text(cand)
+        for col in df.columns:
+            if cand_norm in normalize_text(col):
+                return col
+
+    if fallback_idx is not None and fallback_idx < len(df.columns):
+        return df.columns[fallback_idx]
+
+    return None
 
 def assign_committee_week(date_value: pd.Timestamp, start_date: pd.Timestamp, num_weeks: int = 6):
     for i in range(num_weeks):
@@ -206,41 +217,18 @@ def assign_committee_week(date_value: pd.Timestamp, start_date: pd.Timestamp, nu
             return week_start, week_end
     return None, None
 
-def load_selected_excel_files(access_token: str, drive_id: str, selected_files: list[dict], month_name_map: dict) -> pd.DataFrame:
-    dfs = []
+def normalize_work_type(value: str) -> str:
+    v = normalize_text(value)
 
-    for file_info in selected_files:
-        try:
-            file_bytes = download_item_bytes(access_token, drive_id, file_info["id"])
-            excel_file = pd.ExcelFile(BytesIO(file_bytes))
-
-            sheet_to_use = None
-            for s in excel_file.sheet_names:
-                if s.strip().lower() == "data":
-                    sheet_to_use = s
-                    break
-
-            if sheet_to_use is None:
-                st.warning(
-                    f"Could not read {file_info['name']}: sheet 'Data' not found. "
-                    f"Available sheets: {excel_file.sheet_names}"
-                )
-                continue
-
-            df = excel_file.parse(sheet_to_use)
-            df = clean_columns(df)
-            df.columns = [str(c).strip().lower() for c in df.columns]
-            df["source_file"] = file_info["name"]
-            df["source_month_folder"] = month_name_map.get(file_info["id"], "")
-            dfs.append(df)
-
-        except Exception as e:
-            st.warning(f"Could not read {file_info['name']}: {e}")
-
-    if dfs:
-        return pd.concat(dfs, ignore_index=True)
-
-    return pd.DataFrame()
+    if "suppl" in v:
+        return "Suppl."
+    if "conge travaille" in v:
+        return "Congé Travaillé"
+    if v == "conge" or " conge " in f" {v} ":
+        return "Congé"
+    if "malad" in v:
+        return "Maladie"
+    return "Regular"
 
 def calculate_committee_hours(row: pd.Series) -> float:
     hours = row.get("hours", 0)
@@ -262,9 +250,11 @@ def calculate_committee_hours(row: pd.Series) -> float:
     except Exception:
         hourly_rate = 0.0
 
+    # Flat work: 1 hour but high amount
     if hours <= 1 and total_pay > COMITE_CLASS_A_RATE:
         return round(total_pay / COMITE_CLASS_A_RATE, 2)
 
+    # Hourly rate below comité rate
     if hourly_rate > 0 and hourly_rate < COMITE_CLASS_A_RATE:
         return round(total_pay / COMITE_CLASS_A_RATE, 2)
 
@@ -276,82 +266,194 @@ def format_money(x) -> str:
     except Exception:
         return "$0.00"
 
-def get_col_by_position(dataframe: pd.DataFrame, idx: int):
-    if idx < len(dataframe.columns):
-        return dataframe.columns[idx]
-    return None
+def load_selected_excel_files(access_token: str, drive_id: str, selected_files: list[dict], month_name_map: dict) -> pd.DataFrame:
+    dfs = []
 
-def build_required_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Force these columns by Excel positions:
-    N = Type of work  -> index 13
-    O = Vendor Company -> index 14
-    P = Employee -> index 15
-    """
-    raw_cols = list(df.columns)
+    for file_info in selected_files:
+        try:
+            file_bytes = download_item_bytes(access_token, drive_id, file_info["id"])
+            excel_file = pd.ExcelFile(BytesIO(file_bytes))
 
-    # Rename easy columns first
-    column_map = {
-        "date": "date",
-        "province": "province",
-        "total hours worked (number)": "hours",
-        "total hours worked(number)": "hours",
-        "total hours worked ( number )": "hours",
-        "total hours worked": "hours",
-        "total_pay": "total_pay",
-        "total to pay": "total_pay",
-        "hourly rate": "hourly_rate",
-        "hourly_rate": "hourly_rate",
+            sheet_to_use = None
+            for s in excel_file.sheet_names:
+                if normalize_text(s) == "data":
+                    sheet_to_use = s
+                    break
+
+            if sheet_to_use is None:
+                st.warning(
+                    f"Could not read {file_info['name']}: sheet 'Data' not found. "
+                    f"Available sheets: {excel_file.sheet_names}"
+                )
+                continue
+
+            df = excel_file.parse(sheet_to_use)
+            df = clean_columns(df)
+            df["source_file"] = file_info["name"]
+            df["source_month_folder"] = month_name_map.get(file_info["id"], "")
+            dfs.append(df)
+
+        except Exception as e:
+            st.warning(f"Could not read {file_info['name']}: {e}")
+
+    if dfs:
+        return pd.concat(dfs, ignore_index=True)
+
+    return pd.DataFrame()
+
+def build_required_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """
+    Use header names first, with position fallback only if needed.
+    Based on your screenshot:
+    J = hours Suppl
+    K = hours Congé
+    L = hours Congé Travaillé
+    M = Hours Maladie
+    N = Total to pay
+    R = type of work
+    S = Vendor Company
+    T = Employee
+    """
+    out = pd.DataFrame()
+
+    date_col = pick_column(df, ["date"], fallback_idx=4)
+    province_col = pick_column(df, ["province"], fallback_idx=6)
+    hours_col = pick_column(df, ["total hours worked (number)", "total hours worked"], fallback_idx=7)
+    hourly_rate_col = pick_column(df, ["hourly rate", "hourly_rate"], fallback_idx=8)
+
+    suppl_col = pick_column(df, ["hours suppl"], fallback_idx=9)
+    conge_col = pick_column(df, ["hours congé", "hours conge"], fallback_idx=10)
+    conge_trav_col = pick_column(df, ["hours congé travaillé", "hours conge travaille"], fallback_idx=11)
+    maladie_col = pick_column(df, ["hours maladie", "maladie"], fallback_idx=12)
+
+    total_pay_col = pick_column(df, ["total to pay", "total_pay"], fallback_idx=13)
+    type_work_col = pick_column(df, ["type of work", "type_of_work"], fallback_idx=17)
+    vendor_col = pick_column(df, ["vendor company", "vendor_company"], fallback_idx=18)
+    employee_col = pick_column(df, ["employee"], fallback_idx=19)
+
+    col_debug = {
+        "date": date_col,
+        "province": province_col,
+        "hours": hours_col,
+        "hourly_rate": hourly_rate_col,
+        "hours_suppl": suppl_col,
+        "hours_conge": conge_col,
+        "hours_conge_travaille": conge_trav_col,
+        "hours_maladie": maladie_col,
+        "total_pay": total_pay_col,
+        "type_of_work": type_work_col,
+        "vendor_company": vendor_col,
+        "employee": employee_col,
     }
-    df = df.rename(columns=column_map)
 
-    # Force column positions from sheet Data
-    type_col_pos = get_col_by_position(df, 13)     # N
-    vendor_col_pos = get_col_by_position(df, 14)   # O
-    employee_col_pos = get_col_by_position(df, 15) # P
+    def col_or_blank(col_name):
+        if col_name is None:
+            return pd.Series([""] * len(df))
+        data = df[col_name]
+        if isinstance(data, pd.DataFrame):
+            return data.bfill(axis=1).iloc[:, 0]
+        return data
 
-    if type_col_pos is not None:
-        df["type_of_work"] = df.iloc[:, 13]
+    out["date"] = col_or_blank(date_col)
+    out["province"] = col_or_blank(province_col)
+    out["hours"] = col_or_blank(hours_col)
+    out["hourly_rate"] = col_or_blank(hourly_rate_col)
+    out["suppl_raw"] = col_or_blank(suppl_col)
+    out["conge_raw"] = col_or_blank(conge_col)
+    out["conge_trav_raw"] = col_or_blank(conge_trav_col)
+    out["maladie_raw"] = col_or_blank(maladie_col)
+    out["total_pay"] = col_or_blank(total_pay_col)
+    out["type_of_work"] = col_or_blank(type_work_col)
+    out["vendor_company"] = col_or_blank(vendor_col)
+    out["employee"] = col_or_blank(employee_col)
 
-    if vendor_col_pos is not None:
-        df["vendor_company"] = df.iloc[:, 14]
+    if "source_file" in df.columns:
+        out["source_file"] = df["source_file"]
+    else:
+        out["source_file"] = ""
 
-    if employee_col_pos is not None:
-        df["employee"] = df.iloc[:, 15]
+    if "source_month_folder" in df.columns:
+        out["source_month_folder"] = df["source_month_folder"]
+    else:
+        out["source_month_folder"] = ""
 
-    if "source_file" not in df.columns:
-        df["source_file"] = ""
+    return out, col_debug
 
-    if "source_month_folder" not in df.columns:
-        df["source_month_folder"] = ""
+def apply_hours_buckets(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Use the dedicated columns you created:
+    - hours Suppl
+    - hours Congé
+    - hours Congé Travaillé
+    - Hours Maladie
 
-    if "hourly_rate" not in df.columns:
-        df["hourly_rate"] = 0
+    Regular hours = committee_hours - special columns if special columns exist.
+    If all special columns are 0/blank, fallback to type_of_work.
+    """
+    df = df.copy()
 
-    needed_cols = [
-        "date",
-        "province",
-        "employee",
-        "hours",
-        "total_pay",
-        "type_of_work",
-        "vendor_company",
-        "hourly_rate",
-        "source_file",
-        "source_month_folder",
+    df["suppl_raw"] = pd.to_numeric(df["suppl_raw"], errors="coerce").fillna(0)
+    df["conge_raw"] = pd.to_numeric(df["conge_raw"], errors="coerce").fillna(0)
+    df["conge_trav_raw"] = pd.to_numeric(df["conge_trav_raw"], errors="coerce").fillna(0)
+    df["maladie_raw"] = pd.to_numeric(df["maladie_raw"], errors="coerce").fillna(0)
+
+    df["special_total"] = (
+        df["suppl_raw"] +
+        df["conge_raw"] +
+        df["conge_trav_raw"] +
+        df["maladie_raw"]
+    )
+
+    df["regular_hours"] = 0.0
+    df["suppl_hours"] = 0.0
+    df["conge_hours"] = 0.0
+    df["conge_trav_hours"] = 0.0
+    df["maladie_hours"] = 0.0
+
+    # Case 1: use the dedicated columns directly
+    mask_has_special = df["special_total"] > 0
+
+    df.loc[mask_has_special, "suppl_hours"] = df.loc[mask_has_special, "suppl_raw"]
+    df.loc[mask_has_special, "conge_hours"] = df.loc[mask_has_special, "conge_raw"]
+    df.loc[mask_has_special, "conge_trav_hours"] = df.loc[mask_has_special, "conge_trav_raw"]
+    df.loc[mask_has_special, "maladie_hours"] = df.loc[mask_has_special, "maladie_raw"]
+
+    df.loc[mask_has_special, "regular_hours"] = (
+        df.loc[mask_has_special, "committee_hours"] -
+        df.loc[mask_has_special, "special_total"]
+    ).clip(lower=0)
+
+    # Case 2: if special cols are empty, fallback to type_of_work
+    mask_no_special = ~mask_has_special
+    type_norm = df["type_of_work"].astype(str).map(normalize_text)
+
+    df.loc[mask_no_special & type_norm.str.contains("suppl", na=False), "suppl_hours"] = df.loc[
+        mask_no_special & type_norm.str.contains("suppl", na=False), "committee_hours"
     ]
 
-    final_data = {}
-    for col in needed_cols:
-        if col in df.columns:
-            data = df[col]
-            if isinstance(data, pd.DataFrame):
-                final_data[col] = data.bfill(axis=1).iloc[:, 0]
-            else:
-                final_data[col] = data
+    df.loc[mask_no_special & type_norm.eq("conge"), "conge_hours"] = df.loc[
+        mask_no_special & type_norm.eq("conge"), "committee_hours"
+    ]
 
-    clean_df = pd.DataFrame(final_data)
-    return clean_df, raw_cols, type_col_pos, vendor_col_pos, employee_col_pos
+    df.loc[mask_no_special & type_norm.str.contains("conge travaille", na=False), "conge_trav_hours"] = df.loc[
+        mask_no_special & type_norm.str.contains("conge travaille", na=False), "committee_hours"
+    ]
+
+    df.loc[mask_no_special & type_norm.str.contains("malad", na=False), "maladie_hours"] = df.loc[
+        mask_no_special & type_norm.str.contains("malad", na=False), "committee_hours"
+    ]
+
+    mask_any_special_from_type = (
+        (df["suppl_hours"] > 0) |
+        (df["conge_hours"] > 0) |
+        (df["conge_trav_hours"] > 0) |
+        (df["maladie_hours"] > 0)
+    )
+    df.loc[mask_no_special & ~mask_any_special_from_type, "regular_hours"] = df.loc[
+        mask_no_special & ~mask_any_special_from_type, "committee_hours"
+    ]
+
+    return df
 
 def create_employee_report_blocks(df: pd.DataFrame, vendor_company: str):
     report_data = []
@@ -378,14 +480,14 @@ def create_employee_report_blocks(df: pd.DataFrame, vendor_company: str):
         total_hours_employee = 0.0
         total_pay_employee = 0.0
 
-        for work_class in WORK_CLASS_ORDER:
+        for label, col_name in ROW_ORDER:
             row_hours = []
             row_total = 0.0
 
             for wk in week_labels:
                 val = emp_df.loc[
-                    (emp_df["week_label"] == wk) & (emp_df["work_class"] == work_class),
-                    "committee_hours",
+                    emp_df["week_label"] == wk,
+                    col_name,
                 ].sum()
                 val = round(float(val), 2)
                 row_hours.append(val)
@@ -394,7 +496,7 @@ def create_employee_report_blocks(df: pd.DataFrame, vendor_company: str):
             total_hours_employee += row_total
             block["rows"].append(
                 {
-                    "label": work_class,
+                    "label": label,
                     "week_values": row_hours,
                     "row_total": round(row_total, 2),
                 }
@@ -414,7 +516,7 @@ def create_employee_report_blocks(df: pd.DataFrame, vendor_company: str):
 
     return report_data
 
-def export_committee_report(filtered_df: pd.DataFrame, company_name: str, start_date_value, num_weeks: int) -> BytesIO:
+def export_committee_report(filtered_df: pd.DataFrame, start_date_value) -> BytesIO:
     output = BytesIO()
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -457,11 +559,6 @@ def export_committee_report(filtered_df: pd.DataFrame, company_name: str, start_
             "bold": True, "border": 1, "align": "left", "valign": "vcenter",
             "bg_color": "#FCE4D6"
         })
-
-        if filtered_df.empty:
-            pd.DataFrame({"Message": ["No data available"]}).to_excel(writer, sheet_name="Committee Report", index=False)
-            output.seek(0)
-            return output
 
         vendors = sorted(filtered_df["vendor_company"].dropna().unique().tolist())
         summary_rows = []
@@ -697,7 +794,7 @@ except Exception as e:
     st.stop()
 
 month_folders = [x for x in root_children if is_folder_item(x)]
-month_folders.sort(key=lambda x: (x.get("name") or "").lower())
+month_folders.sort(key=lambda x: normalize_text(x.get("name", "")))
 
 if not month_folders:
     st.warning("No month folders were found inside the selected root folder.")
@@ -734,7 +831,7 @@ for folder_info in selected_month_folders:
         continue
 
     excels = [x for x in children if is_excel_name(x.get("name", ""))]
-    excels.sort(key=lambda x: (x.get("name") or "").lower())
+    excels.sort(key=lambda x: normalize_text(x.get("name", "")))
 
     for item in excels:
         item_copy = dict(item)
@@ -743,7 +840,7 @@ for folder_info in selected_month_folders:
         all_excel_files.append(item_copy)
         month_name_map[item_copy["id"]] = folder_name
 
-all_excel_files.sort(key=lambda x: x["display_name"].lower())
+all_excel_files.sort(key=lambda x: normalize_text(x["display_name"]))
 
 if not all_excel_files:
     st.warning("No Excel files found inside the selected month folder(s).")
@@ -773,10 +870,9 @@ if raw_df.empty:
     st.stop()
 
 # ============================================================
-# BUILD FINAL DATAFRAME USING POSITIONAL RULES
-# N = Type of work, O = Vendor Company, P = Employee
+# BUILD FINAL DATAFRAME
 # ============================================================
-df, raw_cols, type_col_pos, vendor_col_pos, employee_col_pos = build_required_dataframe(raw_df)
+df, col_debug = build_required_dataframe(raw_df)
 
 required_cols = [
     "date", "province", "employee", "hours",
@@ -786,11 +882,8 @@ missing = [c for c in required_cols if c not in df.columns]
 
 if missing:
     st.error(f"Missing required columns: {missing}")
-    st.write("Detected columns:", raw_cols)
+    st.write("Detected columns:", list(raw_df.columns))
     st.stop()
-
-if "hourly_rate" not in df.columns:
-    df["hourly_rate"] = 0
 
 # ============================================================
 # DATA CLEANING
@@ -800,14 +893,16 @@ df["province"] = safe_text_series(df["province"]).str.upper()
 df["employee"] = safe_text_series(df["employee"])
 df["vendor_company"] = safe_text_series(df["vendor_company"])
 df["type_of_work"] = safe_text_series(df["type_of_work"])
-df["hours"] = pd.to_numeric(df["hours"], errors="coerce").fillna(0)
-df["total_pay"] = pd.to_numeric(df["total_pay"], errors="coerce").fillna(0)
-df["hourly_rate"] = pd.to_numeric(df["hourly_rate"], errors="coerce").fillna(0)
+
+for c in [
+    "hours", "hourly_rate", "suppl_raw", "conge_raw",
+    "conge_trav_raw", "maladie_raw", "total_pay"
+]:
+    df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
 df = df.dropna(subset=["date"]).copy()
-df["work_class"] = df["type_of_work"].apply(normalize_work_type)
 df["committee_hours"] = df.apply(calculate_committee_hours, axis=1)
-df["class_code"] = "A"
+df = apply_hours_buckets(df)
 
 # ============================================================
 # FILTERS
@@ -879,6 +974,15 @@ preview_cols = [
     "type_of_work",
     "hours",
     "hourly_rate",
+    "suppl_raw",
+    "conge_raw",
+    "conge_trav_raw",
+    "maladie_raw",
+    "regular_hours",
+    "suppl_hours",
+    "conge_hours",
+    "conge_trav_hours",
+    "maladie_hours",
     "committee_hours",
     "total_pay",
     "week_label",
@@ -894,6 +998,11 @@ st.dataframe(filtered_df[preview_cols], use_container_width=True)
 employee_summary = (
     filtered_df.groupby(["vendor_company", "employee"], dropna=False)
     .agg(
+        regular_hours=("regular_hours", "sum"),
+        suppl_hours=("suppl_hours", "sum"),
+        conge_hours=("conge_hours", "sum"),
+        conge_trav_hours=("conge_trav_hours", "sum"),
+        maladie_hours=("maladie_hours", "sum"),
         committee_hours=("committee_hours", "sum"),
         total_pay=("total_pay", "sum"),
     )
@@ -908,18 +1017,12 @@ st.dataframe(employee_summary, use_container_width=True)
 # ============================================================
 # EXPORT
 # ============================================================
-company_options = sorted(filtered_df["vendor_company"].dropna().unique().tolist())
-selected_company_for_report = st.selectbox(
-    "Select Vendor Company for Comité report export",
-    company_options
-)
-
-report_file = export_committee_report(filtered_df, selected_company_for_report, start_date, int(num_weeks))
+report_file = export_committee_report(filtered_df, start_date)
 
 st.download_button(
     label="Download Comité Excel Report",
     data=report_file,
-    file_name=f"comite_paritaire_{selected_company_for_report.replace(' ', '_')}.xlsx",
+    file_name="comite_paritaire_report.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
@@ -933,8 +1036,5 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Root folder resolved name:", meta.get("name"))
     st.write("Selected month folders:", selected_month_names)
     st.write("Selected excel display names:", selected_excel_display_names)
-    st.write("Original detected columns:", raw_cols)
-    st.write("Column at N (13):", type_col_pos)
-    st.write("Column at O (14):", vendor_col_pos)
-    st.write("Column at P (15):", employee_col_pos)
+    st.write("Column mapping used:", col_debug)
     st.write("Final columns:", list(filtered_df.columns))
