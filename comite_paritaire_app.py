@@ -897,7 +897,7 @@ for c in [
     df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
 df = df.dropna(subset=["date"]).copy()
-df["committee_hours"] = df.apply(calculate_committee_hours, axis=1)
+df["committee_hours_raw"] = df.apply(calculate_committee_hours_raw, axis=1)
 df = apply_hours_buckets(df)
 
 # ============================================================
@@ -999,12 +999,28 @@ employee_summary = (
         conge_hours=("conge_hours", "sum"),
         conge_trav_hours=("conge_trav_hours", "sum"),
         maladie_hours=("maladie_hours", "sum"),
-        committee_hours=("committee_hours", "sum"),
         total_pay=("total_pay", "sum"),
+        hourly_rate_min=("hourly_rate", "min"),
+        raw_hours_sum=("hours", "sum"),
     )
     .reset_index()
     .sort_values(["vendor_company", "employee", "week_label"])
 )
+
+def calc_week_committee_hours(row):
+    total_pay = float(row["total_pay"])
+    hourly_rate_min = float(row["hourly_rate_min"])
+    raw_hours_sum = float(row["raw_hours_sum"])
+
+    # si corresponde recalcular, hacerlo sobre el total semanal
+    if hourly_rate_min > 0 and hourly_rate_min < COMITE_CLASS_A_RATE:
+        return round(total_pay / COMITE_CLASS_A_RATE, 2)
+
+    return round(raw_hours_sum, 2)
+
+employee_summary["committee_hours"] = employee_summary.apply(calc_week_committee_hours, axis=1)
+employee_summary["reer"] = employee_summary["committee_hours"] * REER_PER_HOUR
+employee_summary["total_with_reer"] = employee_summary["total_pay"] + employee_summary["reer"]
 
 employee_summary["reer"] = employee_summary["committee_hours"] * REER_PER_HOUR
 employee_summary["total_with_reer"] = employee_summary["total_pay"] + employee_summary["reer"]
