@@ -996,7 +996,7 @@ st.dataframe(filtered_df[preview_cols], use_container_width=True)
 # EMPLOYEE SUMMARY
 # ============================================================
 employee_summary = (
-    filtered_df.groupby(["vendor_company", "employee"], dropna=False)
+    filtered_df.groupby(["vendor_company", "employee", "week_label"], dropna=False)
     .agg(
         regular_hours=("regular_hours", "sum"),
         suppl_hours=("suppl_hours", "sum"),
@@ -1007,7 +1007,9 @@ employee_summary = (
         total_pay=("total_pay", "sum"),
     )
     .reset_index()
+    .sort_values(["vendor_company", "employee", "week_label"])
 )
+
 employee_summary["reer"] = employee_summary["committee_hours"] * REER_PER_HOUR
 employee_summary["total_with_reer"] = employee_summary["total_pay"] + employee_summary["reer"]
 
