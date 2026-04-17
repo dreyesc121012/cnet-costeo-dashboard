@@ -90,6 +90,26 @@ def dataframe_with_2_decimals(df: pd.DataFrame):
     st.dataframe(df, use_container_width=True, column_config=column_config)
 
 
+def to_num_series(s: pd.Series) -> pd.Series:
+    """
+    Robust numeric cleaner:
+    - handles real numbers
+    - handles strings like '$344.80', '1,350.47', blanks
+    """
+    if pd.api.types.is_numeric_dtype(s):
+        return pd.to_numeric(s, errors="coerce").fillna(0.0)
+
+    cleaned = (
+        s.astype(str)
+        .str.replace(",", "", regex=False)
+        .str.replace("$", "", regex=False)
+        .str.replace("(", "-", regex=False)
+        .str.replace(")", "", regex=False)
+        .str.strip()
+    )
+    return pd.to_numeric(cleaned, errors="coerce").fillna(0.0)
+
+
 # ============================================================
 # QUERY PARAM HELPERS
 # ============================================================
@@ -392,23 +412,20 @@ def calculate_weekly_committee_hours(total_pay: float, raw_hours_sum: float, hou
 
     has_flat_case = bool(has_flat_case)
 
-    # Caso 1: flat
     if has_flat_case:
         return round(total_pay / COMITE_CLASS_A_RATE, 2)
 
-    # Caso 2: salario menor a clase A
     if hourly_rate_min > 0 and hourly_rate_min < COMITE_CLASS_A_RATE:
         return round(total_pay / COMITE_CLASS_A_RATE, 2)
 
-    # Caso 3: normal
     return round(raw_hours_sum, 2)
 
 
 def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    hours_num = pd.to_numeric(df["hours"], errors="coerce").fillna(0)
-    rate_num = pd.to_numeric(df["hourly_rate"], errors="coerce").fillna(0)
+    hours_num = to_num_series(df["hours"])
+    rate_num = to_num_series(df["hourly_rate"])
 
     # Flat case with tolerance: hours ~ 1.00 and hourly rate > 100
     df["flat_case"] = (
@@ -436,6 +453,15 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
         .sort_values(["vendor_company", "employee", "week_label"])
     )
 
+    # Clean post-group too, just in case
+    grouped["raw_hours_sum"] = to_num_series(grouped["raw_hours_sum"])
+    grouped["suppl_hours_raw"] = to_num_series(grouped["suppl_hours_raw"])
+    grouped["conge_hours_raw"] = to_num_series(grouped["conge_hours_raw"])
+    grouped["conge_trav_hours_raw"] = to_num_series(grouped["conge_trav_hours_raw"])
+    grouped["maladie_hours_raw"] = to_num_series(grouped["maladie_hours_raw"])
+    grouped["total_pay"] = to_num_series(grouped["total_pay"])
+    grouped["hourly_rate_min"] = to_num_series(grouped["hourly_rate_min"])
+
     grouped["committee_hours"] = grouped.apply(
         lambda r: calculate_weekly_committee_hours(
             r["total_pay"],
@@ -446,10 +472,10 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
         axis=1,
     )
 
-    grouped["suppl_hours"] = pd.to_numeric(grouped["suppl_hours_raw"], errors="coerce").fillna(0)
-    grouped["conge_hours"] = pd.to_numeric(grouped["conge_hours_raw"], errors="coerce").fillna(0)
-    grouped["conge_trav_hours"] = pd.to_numeric(grouped["conge_trav_hours_raw"], errors="coerce").fillna(0)
-    grouped["maladie_hours"] = pd.to_numeric(grouped["maladie_hours_raw"], errors="coerce").fillna(0)
+    grouped["suppl_hours"] = grouped["suppl_hours_raw"]
+    grouped["conge_hours"] = grouped["conge_hours_raw"]
+    grouped["conge_trav_hours"] = grouped["conge_trav_hours_raw"]
+    grouped["maladie_hours"] = grouped["maladie_hours_raw"]
 
     special_total = (
         grouped["suppl_hours"] +
@@ -924,7 +950,7 @@ for c in [
     "hours", "hourly_rate", "suppl_raw", "conge_raw",
     "conge_trav_raw", "maladie_raw", "total_pay"
 ]:
-    df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    df[c] = to_num_series(df[c])
 
 df = df.dropna(subset=["date"]).copy()
 
@@ -1055,7 +1081,6 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Final source columns:", list(filtered_df.columns))
     st.write("Weekly summary columns:", list(weekly_summary.columns))
 
-    # Debug Marcos example
     st.write(
         filtered_df.loc[
             (filtered_df["employee"] == "Marcos Munoz") &
