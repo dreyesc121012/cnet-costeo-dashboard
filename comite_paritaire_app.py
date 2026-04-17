@@ -374,7 +374,7 @@ def assign_committee_week(date_value: pd.Timestamp, start_date: pd.Timestamp, nu
     return None, None
 
 
-def calculate_weekly_committee_hours(total_pay: float, raw_hours_sum: float, hourly_rate_min: float) -> float:
+def calculate_weekly_committee_hours(total_pay: float, raw_hours_sum: float, hourly_rate_min: float, has_flat_case: bool) -> float:
     try:
         total_pay = float(total_pay)
     except Exception:
@@ -390,19 +390,31 @@ def calculate_weekly_committee_hours(total_pay: float, raw_hours_sum: float, hou
     except Exception:
         hourly_rate_min = 0.0
 
-    # Caso 1: gana menos que clase A
+    try:
+        has_flat_case = bool(has_flat_case)
+    except Exception:
+        has_flat_case = False
+
+    # Caso flat: si existe una fila con 1.00 hora y hourly_rate > 100
+    if has_flat_case:
+        return round(total_pay / COMITE_CLASS_A_RATE, 2)
+
+    # Caso salario menor a clase A
     if hourly_rate_min > 0 and hourly_rate_min < COMITE_CLASS_A_RATE:
         return round(total_pay / COMITE_CLASS_A_RATE, 2)
 
-    # Caso 2: trabajo flat / horas mínimas con pago alto
-    if raw_hours_sum <= 1 and total_pay > COMITE_CLASS_A_RATE:
-        return round(total_pay / COMITE_CLASS_A_RATE, 2)
-
-    # Caso 3: gana igual o más que clase A
+    # Caso normal
     return round(raw_hours_sum, 2)
 
 
 def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    df["flat_case"] = (
+        (pd.to_numeric(df["hours"], errors="coerce").fillna(0) == 1)
+        & (pd.to_numeric(df["hourly_rate"], errors="coerce").fillna(0) > 100)
+    )
+
     grouped = (
         df.groupby(["vendor_company", "employee", "week_label"], dropna=False)
         .agg(
@@ -413,6 +425,7 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
             maladie_hours_raw=("maladie_raw", "sum"),
             total_pay=("total_pay", "sum"),
             hourly_rate_min=("hourly_rate", "min"),
+            has_flat_case=("flat_case", "max"),
             source_month_folder=("source_month_folder", "first"),
             source_file=("source_file", "first"),
             province=("province", "first"),
@@ -426,6 +439,7 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
             r["total_pay"],
             r["raw_hours_sum"],
             r["hourly_rate_min"],
+            r["has_flat_case"],
         ),
         axis=1,
     )
