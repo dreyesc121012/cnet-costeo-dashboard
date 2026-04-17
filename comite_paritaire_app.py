@@ -374,13 +374,43 @@ def assign_committee_week(date_value: pd.Timestamp, start_date: pd.Timestamp, nu
     return None, None
 
 
+def calculate_weekly_committee_hours(total_pay: float, raw_hours_sum: float, hourly_rate_min: float, has_flat_case: bool) -> float:
+    try:
+        total_pay = float(total_pay)
+    except Exception:
+        total_pay = 0.0
+
+    try:
+        raw_hours_sum = float(raw_hours_sum)
+    except Exception:
+        raw_hours_sum = 0.0
+
+    try:
+        hourly_rate_min = float(hourly_rate_min)
+    except Exception:
+        hourly_rate_min = 0.0
+
+    has_flat_case = bool(has_flat_case)
+
+    # Caso 1: flat
+    if has_flat_case:
+        return round(total_pay / COMITE_CLASS_A_RATE, 2)
+
+    # Caso 2: salario menor a clase A
+    if hourly_rate_min > 0 and hourly_rate_min < COMITE_CLASS_A_RATE:
+        return round(total_pay / COMITE_CLASS_A_RATE, 2)
+
+    # Caso 3: normal
+    return round(raw_hours_sum, 2)
+
+
 def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # detectar flat con tolerancia
     hours_num = pd.to_numeric(df["hours"], errors="coerce").fillna(0)
     rate_num = pd.to_numeric(df["hourly_rate"], errors="coerce").fillna(0)
 
+    # Flat case with tolerance: hours ~ 1.00 and hourly rate > 100
     df["flat_case"] = (
         (hours_num >= 0.99) &
         (hours_num <= 1.01) &
@@ -398,64 +428,6 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
             total_pay=("total_pay", "sum"),
             hourly_rate_min=("hourly_rate", "min"),
             has_flat_case=("flat_case", "any"),
-            source_month_folder=("source_month_folder", "first"),
-            source_file=("source_file", "first"),
-            province=("province", "first"),
-        )
-        .reset_index()
-        .sort_values(["vendor_company", "employee", "week_label"])
-    )
-
-    grouped["committee_hours"] = grouped.apply(
-        lambda r: calculate_weekly_committee_hours(
-            r["total_pay"],
-            r["raw_hours_sum"],
-            r["hourly_rate_min"],
-            r["has_flat_case"],
-        ),
-        axis=1,
-    )
-
-    grouped["suppl_hours"] = pd.to_numeric(grouped["suppl_hours_raw"], errors="coerce").fillna(0)
-    grouped["conge_hours"] = pd.to_numeric(grouped["conge_hours_raw"], errors="coerce").fillna(0)
-    grouped["conge_trav_hours"] = pd.to_numeric(grouped["conge_trav_hours_raw"], errors="coerce").fillna(0)
-    grouped["maladie_hours"] = pd.to_numeric(grouped["maladie_hours_raw"], errors="coerce").fillna(0)
-
-    special_total = (
-        grouped["suppl_hours"] +
-        grouped["conge_hours"] +
-        grouped["conge_trav_hours"] +
-        grouped["maladie_hours"]
-    )
-
-    grouped["regular_hours"] = (grouped["committee_hours"] - special_total).clip(lower=0)
-    grouped["reer"] = (grouped["committee_hours"] * REER_PER_HOUR).round(2)
-    grouped["total_with_reer"] = (grouped["total_pay"] + grouped["reer"]).round(2)
-
-    numeric_cols = grouped.select_dtypes(include=["number"]).columns
-    grouped[numeric_cols] = grouped[numeric_cols].round(2)
-
-    return grouped
-
-def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-
-    df["flat_case"] = (
-        (pd.to_numeric(df["hours"], errors="coerce").fillna(0) == 1)
-        & (pd.to_numeric(df["hourly_rate"], errors="coerce").fillna(0) > 100)
-    )
-
-    grouped = (
-        df.groupby(["vendor_company", "employee", "week_label"], dropna=False)
-        .agg(
-            raw_hours_sum=("hours", "sum"),
-            suppl_hours_raw=("suppl_raw", "sum"),
-            conge_hours_raw=("conge_raw", "sum"),
-            conge_trav_hours_raw=("conge_trav_raw", "sum"),
-            maladie_hours_raw=("maladie_raw", "sum"),
-            total_pay=("total_pay", "sum"),
-            hourly_rate_min=("hourly_rate", "min"),
-            has_flat_case=("flat_case", "max"),
             source_month_folder=("source_month_folder", "first"),
             source_file=("source_file", "first"),
             province=("province", "first"),
@@ -1082,3 +1054,19 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Column mapping used:", col_debug)
     st.write("Final source columns:", list(filtered_df.columns))
     st.write("Weekly summary columns:", list(weekly_summary.columns))
+
+    # Debug Marcos example
+    st.write(
+        filtered_df.loc[
+            (filtered_df["employee"] == "Marcos Munoz") &
+            (filtered_df["week_label"] == "2026-01-17"),
+            ["date", "hours", "hourly_rate", "total_pay", "week_label"]
+        ]
+    )
+
+    st.write(
+        weekly_summary.loc[
+            (weekly_summary["employee"] == "Marcos Munoz") &
+            (weekly_summary["week_label"] == "2026-01-17")
+        ]
+    )
