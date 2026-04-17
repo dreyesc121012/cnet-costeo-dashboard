@@ -91,11 +91,6 @@ def dataframe_with_2_decimals(df: pd.DataFrame):
 
 
 def to_num_series(s: pd.Series) -> pd.Series:
-    """
-    Robust numeric cleaner:
-    - handles real numbers
-    - handles strings like '$344.80', '1,350.47', blanks
-    """
     if pd.api.types.is_numeric_dtype(s):
         return pd.to_numeric(s, errors="coerce").fillna(0.0)
 
@@ -427,7 +422,6 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     hours_num = to_num_series(df["hours"])
     rate_num = to_num_series(df["hourly_rate"])
 
-    # Flat case with tolerance: hours ~ 1.00 and hourly rate > 100
     df["flat_case"] = (
         (hours_num >= 0.99) &
         (hours_num <= 1.01) &
@@ -453,7 +447,6 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
         .sort_values(["vendor_company", "employee", "week_label"])
     )
 
-    # Clean post-group too, just in case
     grouped["raw_hours_sum"] = to_num_series(grouped["raw_hours_sum"])
     grouped["suppl_hours_raw"] = to_num_series(grouped["suppl_hours_raw"])
     grouped["conge_hours_raw"] = to_num_series(grouped["conge_hours_raw"])
@@ -611,7 +604,7 @@ def export_committee_report(weekly_df: pd.DataFrame, start_date_value) -> BytesI
             ws.set_column("A:A", 6)
             ws.set_column("B:B", 35)
             ws.set_column("C:Z", 12)
-            ws.set_column("AA:AC", 16)
+            ws.set_column("AA:AC", 18)
 
             vendor_df = weekly_df[weekly_df["vendor_company"] == vendor].copy()
             report_blocks = create_employee_report_blocks(weekly_df, vendor)
@@ -698,22 +691,24 @@ def export_committee_report(weekly_df: pd.DataFrame, start_date_value) -> BytesI
                     "Total with REER": round(float(block["total_with_reer"]), 2),
                 })
 
+            levy = round(grand_total_with_reer * 0.01, 2)
+            prelevement_total_du_vendor = round(grand_total_with_reer + levy, 2)
+
             top_col = 13
-            ws.write(0, top_col, "TOTAL REER DE TOUTES LES EMPLOYÉS", header_fmt)
+            ws.write(0, top_col, "TOTAL REER DE TOUS LES EMPLOYÉS", header_fmt)
             ws.write_number(0, top_col + 1, round(grand_total_reer, 2), total_money_fmt)
 
-            ws.write(1, top_col, "TOTAL DES GAINS DE TOUTES LES EMPLOYÉS INCLUANT MONTANTS REER", header_fmt)
+            ws.write(1, top_col, "TOTAL DES GAINS INCLUANT REER", header_fmt)
             ws.write_number(1, top_col + 1, round(grand_total_with_reer, 2), total_money_fmt)
 
-            levy = round(grand_total_with_reer * 0.01, 2)
-            ws.write(2, top_col, "X 1% (EMPLOYEUR ET EMPLOYÉS)", header_fmt)
+            ws.write(2, top_col, "X 1%", header_fmt)
             ws.write_number(2, top_col + 1, levy, total_money_fmt)
 
             ws.write(3, top_col, "AJUST. MOIS PRÉCÉDENTS", header_fmt)
             ws.write_number(3, top_col + 1, 0, total_money_fmt)
 
             ws.write(4, top_col, "PRÉLÈVEMENT TOTAL DÛ", header_fmt)
-            ws.write_number(4, top_col + 1, levy, total_money_fmt)
+            ws.write_number(4, top_col + 1, prelevement_total_du_vendor, total_money_fmt)
 
         summary_df = pd.DataFrame(summary_rows)
         if not summary_df.empty:
@@ -1010,15 +1005,47 @@ if filtered_df.empty:
 # ============================================================
 weekly_summary = build_weekly_summary(filtered_df)
 
+# ============================================================
+# TOP SUMMARY
+# ============================================================
+total_reer_all = round(float(weekly_summary["reer"].sum()), 2)
+total_with_reer_all = round(float(weekly_summary["total_with_reer"].sum()), 2)
+levy_1pct = round(total_with_reer_all * 0.01, 2)
+prelevement_total_du = round(total_with_reer_all + levy_1pct, 2)
+
 
 # ============================================================
 # METRICS
 # ============================================================
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Rows", len(filtered_df))
-col2.metric("Employees", weekly_summary["employee"].nunique())
-col3.metric("Committee Hours", f"{weekly_summary['committee_hours'].sum():,.2f}")
-col4.metric("Total Pay", format_money(weekly_summary["total_pay"].sum()))
+col1.metric("TOTAL REER DE TOUS LES EMPLOYÉS", format_money(total_reer_all))
+col2.metric("TOTAL DES GAINS INCLUANT REER", format_money(total_with_reer_all))
+col3.metric("X 1%", format_money(levy_1pct))
+col4.metric("PRÉLÈVEMENT TOTAL DÛ", format_money(prelevement_total_du))
+
+
+# ============================================================
+# WEEKLY EMPLOYEE SUMMARY
+# ============================================================
+st.subheader("Employee summary")
+
+summary_view_cols = [
+    "vendor_company",
+    "employee",
+    "week_label",
+    "committee_hours",
+    "regular_hours",
+    "suppl_hours",
+    "conge_hours",
+    "conge_trav_hours",
+    "maladie_hours",
+    "total_pay",
+    "reer",
+    "total_with_reer",
+]
+summary_view_cols = [c for c in summary_view_cols if c in weekly_summary.columns]
+
+dataframe_with_2_decimals(weekly_summary[summary_view_cols])
 
 
 # ============================================================
@@ -1048,13 +1075,6 @@ dataframe_with_2_decimals(filtered_df[preview_cols])
 
 
 # ============================================================
-# WEEKLY EMPLOYEE SUMMARY
-# ============================================================
-st.subheader("Employee summary")
-dataframe_with_2_decimals(weekly_summary)
-
-
-# ============================================================
 # EXPORT
 # ============================================================
 report_file = export_committee_report(weekly_summary, start_date)
@@ -1080,18 +1100,3 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Column mapping used:", col_debug)
     st.write("Final source columns:", list(filtered_df.columns))
     st.write("Weekly summary columns:", list(weekly_summary.columns))
-
-    st.write(
-        filtered_df.loc[
-            (filtered_df["employee"] == "Marcos Munoz") &
-            (filtered_df["week_label"] == "2026-01-17"),
-            ["date", "hours", "hourly_rate", "total_pay", "week_label"]
-        ]
-    )
-
-    st.write(
-        weekly_summary.loc[
-            (weekly_summary["employee"] == "Marcos Munoz") &
-            (weekly_summary["week_label"] == "2026-01-17")
-        ]
-    )
