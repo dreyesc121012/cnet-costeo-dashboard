@@ -1,4 +1,5 @@
 import base64
+import os
 from io import BytesIO
 from datetime import timedelta, datetime
 import unicodedata
@@ -13,7 +14,15 @@ import msal
 # PAGE
 # ============================================================
 st.set_page_config(page_title="Comité Paritaire QC", layout="wide")
-st.title("Comité Paritaire Québec - Weekly Report")
+
+LOGO_PATH = "cnet_logo.png"
+
+top_left, top_right = st.columns([1, 4])
+with top_left:
+    if os.path.exists(LOGO_PATH):
+        st.image(LOGO_PATH, width=220)
+with top_right:
+    st.title("Comité Paritaire Québec - Weekly Report")
 
 
 # ============================================================
@@ -35,7 +44,9 @@ SCOPES = ["User.Read", "Files.Read.All", "Sites.Read.All"]
 # ============================================================
 # BUSINESS RULES
 # ============================================================
-COMITE_CLASS_A_RATE = 21.57
+CLASS_A_RATE_BEFORE_MAR_4_2026 = 21.57
+CLASS_A_RATE_FROM_MAR_4_2026 = 23.25
+RATE_CHANGE_DATE = pd.Timestamp("2026-03-04")
 REER_PER_HOUR = 0.45
 
 ROW_ORDER = [
@@ -103,6 +114,18 @@ def to_num_series(s: pd.Series) -> pd.Series:
         .str.strip()
     )
     return pd.to_numeric(cleaned, errors="coerce").fillna(0.0)
+
+
+def get_class_a_rate_for_date(date_value) -> float:
+    try:
+        d = pd.to_datetime(date_value)
+    except Exception:
+        return CLASS_A_RATE_BEFORE_MAR_4_2026
+
+    if pd.isna(d):
+        return CLASS_A_RATE_BEFORE_MAR_4_2026
+
+    return CLASS_A_RATE_FROM_MAR_4_2026 if d >= RATE_CHANGE_DATE else CLASS_A_RATE_BEFORE_MAR_4_2026
 
 
 # ============================================================
@@ -389,43 +412,63 @@ def assign_committee_week(date_value: pd.Timestamp, start_date: pd.Timestamp, nu
     return None, None
 
 
-def calculate_weekly_committee_hours(total_pay: float, raw_hours_sum: float, hourly_rate_min: float, has_flat_case: bool) -> float:
-    try:
-        total_pay = float(total_pay)
-    except Exception:
-        total_pay = 0.0
+def calculate_committee_hours_row(
+    row_date,
+    hours_value: float,
+    hourly_rate_value: float,
+    total_pay_value: float
+) -> float:
+    applicable_rate = get_class_a_rate_for_date(row_date)
 
     try:
-        raw_hours_sum = float(raw_hours_sum)
+        hours_value = float(hours_value)
     except Exception:
-        raw_hours_sum = 0.0
+        hours_value = 0.0
 
     try:
-        hourly_rate_min = float(hourly_rate_min)
+        hourly_rate_value = float(hourly_rate_value)
     except Exception:
-        hourly_rate_min = 0.0
+        hourly_rate_value = 0.0
 
-    has_flat_case = bool(has_flat_case)
+    try:
+        total_pay_value = float(total_pay_value)
+    except Exception:
+        total_pay_value = 0.0
 
-    if has_flat_case:
-        return round(total_pay / COMITE_CLASS_A_RATE, 2)
+    is_flat_case = (0.99 <= hours_value <= 1.01) and (hourly_rate_value > 100)
 
-    if hourly_rate_min > 0 and hourly_rate_min < COMITE_CLASS_A_RATE:
-        return round(total_pay / COMITE_CLASS_A_RATE, 2)
+    if is_flat_case:
+        return total_pay_value / applicable_rate
 
-    return round(raw_hours_sum, 2)
+    if hourly_rate_value > 0 and hourly_rate_value < applicable_rate:
+        return total_pay_value / applicable_rate
+
+    return hours_value
 
 
 def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
+    df["applicable_class_a_rate"] = df["date"].apply(get_class_a_rate_for_date)
+
     hours_num = to_num_series(df["hours"])
     rate_num = to_num_series(df["hourly_rate"])
+    pay_num = to_num_series(df["total_pay"])
 
     df["flat_case"] = (
         (hours_num >= 0.99) &
         (hours_num <= 1.01) &
         (rate_num > 100)
+    )
+
+    df["committee_hours_row"] = df.apply(
+        lambda r: calculate_committee_hours_row(
+            r["date"],
+            r["hours"],
+            r["hourly_rate"],
+            r["total_pay"],
+        ),
+        axis=1,
     )
 
     grouped = (
@@ -439,6 +482,9 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
             total_pay=("total_pay", "sum"),
             hourly_rate_min=("hourly_rate", "min"),
             has_flat_case=("flat_case", "any"),
+            committee_hours=("committee_hours_row", "sum"),
+            min_applicable_rate=("applicable_class_a_rate", "min"),
+            max_applicable_rate=("applicable_class_a_rate", "max"),
             source_month_folder=("source_month_folder", "first"),
             source_file=("source_file", "first"),
             province=("province", "first"),
@@ -454,16 +500,9 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     grouped["maladie_hours_raw"] = to_num_series(grouped["maladie_hours_raw"])
     grouped["total_pay"] = to_num_series(grouped["total_pay"])
     grouped["hourly_rate_min"] = to_num_series(grouped["hourly_rate_min"])
-
-    grouped["committee_hours"] = grouped.apply(
-        lambda r: calculate_weekly_committee_hours(
-            r["total_pay"],
-            r["raw_hours_sum"],
-            r["hourly_rate_min"],
-            r["has_flat_case"],
-        ),
-        axis=1,
-    )
+    grouped["committee_hours"] = to_num_series(grouped["committee_hours"])
+    grouped["min_applicable_rate"] = to_num_series(grouped["min_applicable_rate"])
+    grouped["max_applicable_rate"] = to_num_series(grouped["max_applicable_rate"])
 
     grouped["suppl_hours"] = grouped["suppl_hours_raw"]
     grouped["conge_hours"] = grouped["conge_hours_raw"]
@@ -601,20 +640,23 @@ def export_committee_report(weekly_df: pd.DataFrame, start_date_value) -> BytesI
             ws = workbook.add_worksheet(sheet_name)
             writer.sheets[sheet_name] = ws
 
-            ws.set_column("A:A", 6)
+            ws.set_column("A:A", 8)
             ws.set_column("B:B", 35)
             ws.set_column("C:Z", 12)
             ws.set_column("AA:AC", 18)
 
+            if os.path.exists(LOGO_PATH):
+                ws.insert_image(0, 0, LOGO_PATH, {"x_scale": 0.35, "y_scale": 0.35})
+
+            row = 0
+            ws.merge_range(row, 2, row, 10, f"Versement de {pd.to_datetime(start_date_value).strftime('%b. %Y')}", title_fmt)
+            row += 1
+            ws.merge_range(row, 2, row, 10, vendor, subtitle_fmt)
+            row += 2
+
             vendor_df = weekly_df[weekly_df["vendor_company"] == vendor].copy()
             report_blocks = create_employee_report_blocks(weekly_df, vendor)
             week_labels = sorted(vendor_df["week_label"].dropna().unique().tolist())
-
-            row = 0
-            ws.merge_range(row, 0, row, 10, f"Versement de {pd.to_datetime(start_date_value).strftime('%b. %Y')}", title_fmt)
-            row += 1
-            ws.merge_range(row, 0, row, 10, vendor, subtitle_fmt)
-            row += 2
 
             grand_total_reer = 0.0
             grand_total_pay = 0.0
@@ -969,7 +1011,7 @@ selected_types = st.sidebar.multiselect("Type of work", all_types, default=all_t
 
 default_start = datetime(2026, 1, 4).date()
 start_date = st.sidebar.date_input("First committee week start date", value=default_start)
-num_weeks = st.sidebar.number_input("Number of weeks", min_value=1, max_value=12, value=4)
+num_weeks = st.sidebar.number_input("Number of weeks", min_value=1, max_value=24, value=4)
 
 
 # ============================================================
@@ -994,6 +1036,7 @@ filtered_df[["week_start", "week_end"]] = filtered_df["date"].apply(
 
 filtered_df = filtered_df[filtered_df["week_start"].notna()].copy()
 filtered_df["week_label"] = filtered_df["week_end"].dt.strftime("%Y-%m-%d")
+filtered_df["applicable_class_a_rate"] = filtered_df["date"].apply(get_class_a_rate_for_date)
 
 if filtered_df.empty:
     st.warning("No data available for the selected filters.")
@@ -1061,6 +1104,7 @@ preview_cols = [
     "type_of_work",
     "hours",
     "hourly_rate",
+    "applicable_class_a_rate",
     "suppl_raw",
     "conge_raw",
     "conge_trav_raw",
@@ -1098,5 +1142,8 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Selected month folders:", selected_month_names)
     st.write("Selected excel display names:", selected_excel_display_names)
     st.write("Column mapping used:", col_debug)
+    st.write("Rate change date:", str(RATE_CHANGE_DATE.date()))
+    st.write("Class A before rate change:", CLASS_A_RATE_BEFORE_MAR_4_2026)
+    st.write("Class A from rate change date:", CLASS_A_RATE_FROM_MAR_4_2026)
     st.write("Final source columns:", list(filtered_df.columns))
     st.write("Weekly summary columns:", list(weekly_summary.columns))
