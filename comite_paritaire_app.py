@@ -48,6 +48,8 @@ CLASS_A_RATE_BEFORE_MAR_4_2026 = 21.57
 CLASS_A_RATE_FROM_MAR_4_2026 = 23.25
 RATE_CHANGE_DATE = pd.Timestamp("2026-03-04")
 REER_PER_HOUR = 0.45
+MALADIE_ACCRUAL_FACTOR = 0.0244
+MALADIE_THRESHOLD_HOURS = 280.0
 
 ROW_ORDER = [
     ("Régulier", "regular_hours"),
@@ -55,6 +57,7 @@ ROW_ORDER = [
     ("Congé", "conge_hours"),
     ("Congé Travaillé", "conge_trav_hours"),
     ("Maladie", "maladie_hours"),
+    ("Banque maladie accumulée", "maladie_accrued_hours"),
 ]
 
 
@@ -126,6 +129,18 @@ def get_class_a_rate_for_date(date_value) -> float:
         return CLASS_A_RATE_BEFORE_MAR_4_2026
 
     return CLASS_A_RATE_FROM_MAR_4_2026 if d >= RATE_CHANGE_DATE else CLASS_A_RATE_BEFORE_MAR_4_2026
+
+
+def get_maladie_cycle_start(date_value):
+    d = pd.to_datetime(date_value)
+    if d.month >= 5:
+        return pd.Timestamp(year=d.year, month=5, day=1)
+    return pd.Timestamp(year=d.year - 1, month=5, day=1)
+
+
+def get_maladie_cycle_end(date_value):
+    start = get_maladie_cycle_start(date_value)
+    return pd.Timestamp(year=start.year + 1, month=4, day=30)
 
 
 # ============================================================
@@ -446,6 +461,101 @@ def calculate_committee_hours_row(
     return hours_value
 
 
+def build_maladie_accrual(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Accrual cycle:
+    - May 1 to April 30
+    Special request:
+    - Current cycle can start from 2026-01-04 for your reporting setup
+    Rule:
+    - Employee must work first 280 hours in cycle
+    - Only hours after 280 accrue at 2.44%
+    """
+    work_df = df.copy()
+
+    work_df["hours_worked_for_accrual"] = (
+        to_num_series(work_df["committee_hours_row"])
+        - to_num_series(work_df["conge_raw"])
+        - to_num_series(work_df["maladie_raw"])
+    ).clip(lower=0)
+
+    work_df["cycle_start"] = work_df["date"].apply(get_maladie_cycle_start)
+    work_df["cycle_end"] = work_df["date"].apply(get_maladie_cycle_end)
+
+    # Special handling for the partial initial cycle the user wants from Jan 4, 2026
+    jan4_2026 = pd.Timestamp("2026-01-04")
+    apr30_2026 = pd.Timestamp("2026-04-30")
+    may1_2026 = pd.Timestamp("2026-05-01")
+
+    work_df.loc[
+        (work_df["date"] >= jan4_2026) & (work_df["date"] <= apr30_2026),
+        "cycle_start"
+    ] = jan4_2026
+
+    work_df.loc[
+        (work_df["date"] >= jan4_2026) & (work_df["date"] <= apr30_2026),
+        "cycle_end"
+    ] = apr30_2026
+
+    work_df.loc[
+        work_df["date"] >= may1_2026,
+        "cycle_start"
+    ] = work_df.loc[work_df["date"] >= may1_2026, "date"].apply(get_maladie_cycle_start)
+
+    work_df.loc[
+        work_df["date"] >= may1_2026,
+        "cycle_end"
+    ] = work_df.loc[work_df["date"] >= may1_2026, "date"].apply(get_maladie_cycle_end)
+
+    work_df = work_df.sort_values(
+        ["vendor_company", "employee", "date", "source_file"]
+    ).copy()
+
+    accrued_rows = []
+
+    group_cols = ["vendor_company", "employee", "cycle_start"]
+
+    for _, grp in work_df.groupby(group_cols, dropna=False):
+        grp = grp.copy().sort_values(["date", "source_file"])
+
+        cumulative_before = 0.0
+        accrued_list = []
+
+        for _, row in grp.iterrows():
+            current_hours = float(row["hours_worked_for_accrual"])
+
+            before = cumulative_before
+            after = before + current_hours
+
+            eligible_hours = max(0.0, after - MALADIE_THRESHOLD_HOURS) - max(0.0, before - MALADIE_THRESHOLD_HOURS)
+            eligible_hours = max(0.0, eligible_hours)
+
+            accrued_hours = round(eligible_hours * MALADIE_ACCRUAL_FACTOR, 4)
+            accrued_list.append(accrued_hours)
+
+            cumulative_before = after
+
+        grp["maladie_accrued_row"] = accrued_list
+        accrued_rows.append(grp)
+
+    if not accrued_rows:
+        return pd.DataFrame(columns=["vendor_company", "employee", "week_label", "maladie_accrued_hours"])
+
+    accrual_df = pd.concat(accrued_rows, ignore_index=True)
+
+    weekly_accrual = (
+        accrual_df.groupby(["vendor_company", "employee", "week_label"], dropna=False)
+        .agg(
+            maladie_accrued_hours=("maladie_accrued_row", "sum")
+        )
+        .reset_index()
+    )
+
+    weekly_accrual["maladie_accrued_hours"] = to_num_series(weekly_accrual["maladie_accrued_hours"]).round(2)
+
+    return weekly_accrual
+
+
 def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
@@ -453,7 +563,6 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
 
     hours_num = to_num_series(df["hours"])
     rate_num = to_num_series(df["hourly_rate"])
-    pay_num = to_num_series(df["total_pay"])
 
     df["flat_case"] = (
         (hours_num >= 0.99) &
@@ -519,6 +628,16 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     grouped["regular_hours"] = (grouped["committee_hours"] - special_total).clip(lower=0)
     grouped["reer"] = (grouped["committee_hours"] * REER_PER_HOUR).round(2)
     grouped["total_with_reer"] = (grouped["total_pay"] + grouped["reer"]).round(2)
+
+    weekly_accrual = build_maladie_accrual(df)
+
+    grouped = grouped.merge(
+        weekly_accrual,
+        on=["vendor_company", "employee", "week_label"],
+        how="left"
+    )
+
+    grouped["maladie_accrued_hours"] = to_num_series(grouped["maladie_accrued_hours"]).round(2)
 
     numeric_cols = grouped.select_dtypes(include=["number"]).columns
     grouped[numeric_cols] = grouped[numeric_cols].round(2)
@@ -642,7 +761,7 @@ def export_committee_report(weekly_df: pd.DataFrame, start_date_value) -> BytesI
 
             ws.set_column("A:A", 8)
             ws.set_column("B:B", 35)
-            ws.set_column("C:Z", 12)
+            ws.set_column("C:Z", 14)
             ws.set_column("AA:AC", 18)
 
             if os.path.exists(LOGO_PATH):
@@ -737,17 +856,17 @@ def export_committee_report(weekly_df: pd.DataFrame, start_date_value) -> BytesI
             prelevement_total_du_vendor = round(grand_total_with_reer + levy, 2)
 
             top_col = 13
-            ws.write(0, top_col, "TOTAL REER DE TOUS LES EMPLOYÉS", header_fmt)
-            ws.write_number(0, top_col + 1, round(grand_total_reer, 2), total_money_fmt)
+            ws.write(0, top_col, "TOTAL DES GAINS", header_fmt)
+            ws.write_number(0, top_col + 1, round(grand_total_pay, 2), total_money_fmt)
 
-            ws.write(1, top_col, "TOTAL DES GAINS INCLUANT REER", header_fmt)
-            ws.write_number(1, top_col + 1, round(grand_total_with_reer, 2), total_money_fmt)
+            ws.write(1, top_col, "TOTAL REER DE TOUS LES EMPLOYÉS", header_fmt)
+            ws.write_number(1, top_col + 1, round(grand_total_reer, 2), total_money_fmt)
 
-            ws.write(2, top_col, "X 1%", header_fmt)
-            ws.write_number(2, top_col + 1, levy, total_money_fmt)
+            ws.write(2, top_col, "TOTAL DES GAINS INCLUANT REER", header_fmt)
+            ws.write_number(2, top_col + 1, round(grand_total_with_reer, 2), total_money_fmt)
 
-            ws.write(3, top_col, "AJUST. MOIS PRÉCÉDENTS", header_fmt)
-            ws.write_number(3, top_col + 1, 0, total_money_fmt)
+            ws.write(3, top_col, "X 1% (EMPLOYEUR ET EMPLOYÉS)", header_fmt)
+            ws.write_number(3, top_col + 1, levy, total_money_fmt)
 
             ws.write(4, top_col, "PRÉLÈVEMENT TOTAL DÛ", header_fmt)
             ws.write_number(4, top_col + 1, prelevement_total_du_vendor, total_money_fmt)
@@ -1057,11 +1176,11 @@ total_with_reer_all = round(float(weekly_summary["total_with_reer"].sum()), 2)
 levy_1pct = round(total_with_reer_all * 0.01, 2)
 prelevement_total_du = round(total_with_reer_all + levy_1pct, 2)
 
+
 # ============================================================
 # METRICS
 # ============================================================
 col1, col2, col3, col4, col5 = st.columns(5)
-
 col1.metric("TOTAL DES GAINS", format_money(total_gains_all))
 col2.metric("TOTAL REER DE TOUS LES EMPLOYÉS", format_money(total_reer_all))
 col3.metric("TOTAL DES GAINS INCLUANT REER", format_money(total_with_reer_all))
@@ -1084,6 +1203,7 @@ summary_view_cols = [
     "conge_hours",
     "conge_trav_hours",
     "maladie_hours",
+    "maladie_accrued_hours",
     "total_pay",
     "reer",
     "total_with_reer",
@@ -1147,5 +1267,7 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Rate change date:", str(RATE_CHANGE_DATE.date()))
     st.write("Class A before rate change:", CLASS_A_RATE_BEFORE_MAR_4_2026)
     st.write("Class A from rate change date:", CLASS_A_RATE_FROM_MAR_4_2026)
+    st.write("Maladie factor:", MALADIE_ACCRUAL_FACTOR)
+    st.write("Maladie threshold hours:", MALADIE_THRESHOLD_HOURS)
     st.write("Final source columns:", list(filtered_df.columns))
     st.write("Weekly summary columns:", list(weekly_summary.columns))
