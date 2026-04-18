@@ -1051,20 +1051,22 @@ weekly_summary = build_weekly_summary(filtered_df)
 # ============================================================
 # TOP SUMMARY
 # ============================================================
+total_gains_all = round(float(weekly_summary["total_pay"].sum()), 2)
 total_reer_all = round(float(weekly_summary["reer"].sum()), 2)
 total_with_reer_all = round(float(weekly_summary["total_with_reer"].sum()), 2)
 levy_1pct = round(total_with_reer_all * 0.01, 2)
 prelevement_total_du = round(total_with_reer_all + levy_1pct, 2)
 
-
 # ============================================================
 # METRICS
 # ============================================================
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("TOTAL REER DE TOUS LES EMPLOYÉS", format_money(total_reer_all))
-col2.metric("TOTAL DES GAINS INCLUANT REER", format_money(total_with_reer_all))
-col3.metric("X 1%", format_money(levy_1pct))
-col4.metric("PRÉLÈVEMENT TOTAL DÛ", format_money(prelevement_total_du))
+col1, col2, col3, col4, col5 = st.columns(5)
+
+col1.metric("TOTAL DES GAINS", format_money(total_gains_all))
+col2.metric("TOTAL REER DE TOUS LES EMPLOYÉS", format_money(total_reer_all))
+col3.metric("TOTAL DES GAINS INCLUANT REER", format_money(total_with_reer_all))
+col4.metric("X 1% (EMPLOYEUR ET EMPLOYÉS)", format_money(levy_1pct))
+col5.metric("PRÉLÈVEMENT TOTAL DÛ", format_money(prelevement_total_du))
 
 
 # ============================================================
