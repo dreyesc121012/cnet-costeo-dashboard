@@ -1272,7 +1272,6 @@ summary_view_cols = [
     "vendor_company",
     "employee",
     "week_label",
-    "committee_hours",
     "regular_hours",
     "suppl_hours",
     "conge_hours",
