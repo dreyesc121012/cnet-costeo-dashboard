@@ -583,9 +583,10 @@ def build_vacation_accrual(df: pd.DataFrame) -> pd.DataFrame:
     Vacation accrual rules:
     - First special cycle: 2026-01-04 to 2027-04-30
     - Then recurring cycles: May 1 to April 30
-    - Employee must complete 1 year before accrual starts
+    - Accrual starts immediately from the beginning of the cycle
     - Accrual base = total_pay
     - Rate = 6%
+    - Payment may happen later, but accumulation is immediate
     """
     work_df = df.copy()
 
@@ -596,31 +597,13 @@ def build_vacation_accrual(df: pd.DataFrame) -> pd.DataFrame:
         ["vendor_company", "employee", "date", "source_file"]
     ).copy()
 
-    accrual_rows = []
-
-    group_cols = ["vendor_company", "employee", "vac_cycle_start"]
-
-    for _, grp in work_df.groupby(group_cols, dropna=False):
-        grp = grp.copy().sort_values(["date", "source_file"])
-
-        cycle_start = pd.to_datetime(grp["vac_cycle_start"].iloc[0])
-        eligible_date = cycle_start + pd.DateOffset(years=1)
-
-        grp["vacation_accrued_row"] = grp.apply(
-            lambda r: round(float(r["total_pay"]) * VACATION_ACCRUAL_RATE, 2)
-            if pd.to_datetime(r["date"]) >= eligible_date else 0.0,
-            axis=1,
-        )
-
-        accrual_rows.append(grp)
-
-    if not accrual_rows:
-        return pd.DataFrame(columns=["vendor_company", "employee", "week_label", "vacation_accrued_amount"])
-
-    accrual_df = pd.concat(accrual_rows, ignore_index=True)
+    # Accumulate immediately from cycle start
+    work_df["vacation_accrued_row"] = (
+        to_num_series(work_df["total_pay"]) * VACATION_ACCRUAL_RATE
+    ).round(2)
 
     weekly_accrual = (
-        accrual_df.groupby(["vendor_company", "employee", "week_label"], dropna=False)
+        work_df.groupby(["vendor_company", "employee", "week_label"], dropna=False)
         .agg(
             vacation_accrued_amount=("vacation_accrued_row", "sum")
         )
