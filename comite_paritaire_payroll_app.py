@@ -35,7 +35,7 @@ REDIRECT_URI = str(st.secrets["REDIRECT_URI"]).strip().rstrip("/")
 ONEDRIVE_FOLDER_URL = str(
     st.secrets.get(
         "ONEDRIVE_FOLDER_URL",
-        "https://groupcastillo.sharepoint.com/:f:/s/GroupCastilloTeamSite/IgAGVuhNpEbzQ4AIHI5FIZq6AYms3-TKSUjfSdr-mWkjWJI?e=d4hsB2",
+        "https://groupcastillo.sharepoint.com/:f:/s/GroupCastilloTeamSite/IgDJ46w1V3YWT7e0yB8CKkD9AenZh0xzbn8pNRRGuDcIpPw?e=s4L0Z9",
     )
 ).strip()
 
@@ -60,16 +60,22 @@ REER_PER_HOUR = 0.45
 # B = Name Employee
 # I = Class
 # T = Rate
-# K:R = Day/hour columns area. Row 4 has day labels. Row 5 has dates.
+# Layout according to the Excel screenshot:
+# A = Vendor Company / Company P
+# B = Name Employee
+# I = Class
+# K = Week number, example: 03/01 - 09/01
+# L:R = daily hours. Row 4 has day labels SA, SU, MO, TUE, WE, TH, FRI.
+# T = Hourly rate
 COL_VENDOR_COMPANY = 0       # A
 COL_EMPLOYEE_NAME = 1        # B
 COL_EMPLOYEE_CLASS = 8       # I
+COL_WEEK_RANGE = 10          # K
 COL_RATE = 19                # T
-DAY_COL_START = 10           # K
+DAY_COL_START = 11           # L
 DAY_COL_END_EXCLUSIVE = 18   # R included
 DAY_HEADER_ROW = 3           # Excel row 4
-DATE_ROW = 4                 # Excel row 5
-DATA_START_ROW = 5           # Excel row 6
+DATA_START_ROW = 4           # Excel row 5
 
 ROW_ORDER = [
     ("Régulier", "regular_hours"),
@@ -147,39 +153,24 @@ def normalize_class(x) -> str:
     return txt
 
 
-def parse_date_cell(value, fallback_year=2026):
-    if pd.isna(value):
-        return pd.NaT
-    if isinstance(value, (pd.Timestamp, datetime)):
-        return pd.Timestamp(value).normalize()
-
+def parse_week_range_cell(value, fallback_year=2026):
+    """Parse week text like '03/01 - 09/01' as DD/MM - DD/MM and return week start/end."""
     txt = clean_text(value)
     if not txt:
-        return pd.NaT
+        return pd.NaT, pd.NaT
 
-    parsed = pd.to_datetime(txt, errors="coerce")
-    if pd.notna(parsed):
-        return pd.Timestamp(parsed).normalize()
+    txt = txt.replace("–", "-").replace("—", "-")
+    parts = [p.strip() for p in txt.split("-")]
+    if len(parts) < 2:
+        return pd.NaT, pd.NaT
 
-    replacements = {
-        "enero": "january", "janvier": "january",
-        "febrero": "february", "fevrier": "february", "février": "february",
-        "marzo": "march", "mars": "march",
-        "abril": "april", "avril": "april",
-        "mayo": "may", "mai": "may",
-        "junio": "june", "juin": "june",
-        "julio": "july", "juillet": "july",
-        "agosto": "august", "aout": "august", "août": "august",
-        "septiembre": "september", "septembre": "september",
-        "octubre": "october", "octobre": "october",
-        "noviembre": "november", "novembre": "november",
-        "diciembre": "december", "decembre": "december", "décembre": "december",
-    }
-    low = normalize_text(txt).replace(" de ", " ")
-    for k, v in replacements.items():
-        low = low.replace(k, v)
-    parsed = pd.to_datetime(f"{low} {fallback_year}", errors="coerce")
-    return pd.Timestamp(parsed).normalize() if pd.notna(parsed) else pd.NaT
+    start_txt = parts[0]
+    end_txt = parts[1]
+
+    start_dt = pd.to_datetime(f"{start_txt}/{fallback_year}", format="%d/%m/%Y", errors="coerce")
+    end_dt = pd.to_datetime(f"{end_txt}/{fallback_year}", format="%d/%m/%Y", errors="coerce")
+
+    return start_dt, end_dt
 
 
 def assign_committee_week(date_value: pd.Timestamp, start_date: pd.Timestamp, num_weeks: int = 24):
@@ -339,27 +330,32 @@ def load_selected_excel_files_regular(access_token: str, drive_id: str, selected
 
             raw = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_to_use, header=None)
 
-            # Row 4 has day labels. Row 5 has dates. Data begins row 6.
+            # Row 4 has day labels. Row 5+ has employee data.
+            # Column K contains the week range, example: 03/01 - 09/01.
+            # Columns L:R contain daily hours.
             day_headers = raw.iloc[DAY_HEADER_ROW, DAY_COL_START:DAY_COL_END_EXCLUSIVE].tolist()
-            date_headers = raw.iloc[DATE_ROW, DAY_COL_START:DAY_COL_END_EXCLUSIVE].tolist()
             data = raw.iloc[DATA_START_ROW:].copy()
 
             diagnostics.append({
                 "source_file": file_name,
                 "source_month_folder": source_month,
                 "sheet": sheet_to_use,
-                "day_headers_K_R": [clean_text(x) for x in day_headers],
-                "date_headers_K_R": [clean_text(x) for x in date_headers],
+                "day_headers_L_R": [clean_text(x) for x in day_headers],
             })
 
             for _, r in data.iterrows():
                 vendor = clean_text(r.iloc[COL_VENDOR_COMPANY]) if len(r) > COL_VENDOR_COMPANY else ""
                 employee = clean_text(r.iloc[COL_EMPLOYEE_NAME]) if len(r) > COL_EMPLOYEE_NAME else ""
                 employee_class = normalize_class(r.iloc[COL_EMPLOYEE_CLASS]) if len(r) > COL_EMPLOYEE_CLASS else DEFAULT_CLASS_WHEN_NO_CLASS
+                week_range_text = clean_text(r.iloc[COL_WEEK_RANGE]) if len(r) > COL_WEEK_RANGE else ""
+                week_start_from_excel, week_end_from_excel = parse_week_range_cell(week_range_text, fallback_year=2026)
+
                 rate = pd.to_numeric(r.iloc[COL_RATE], errors="coerce") if len(r) > COL_RATE else 0.0
                 rate = float(rate) if pd.notna(rate) else 0.0
 
                 if not vendor and not employee:
+                    continue
+                if pd.isna(week_start_from_excel):
                     continue
 
                 for offset, col_idx in enumerate(range(DAY_COL_START, DAY_COL_END_EXCLUSIVE)):
@@ -369,11 +365,14 @@ def load_selected_excel_files_regular(access_token: str, drive_id: str, selected
 
                     day_code = clean_text(day_headers[offset]).upper()
                     day_name = DAY_MAP.get(day_code, day_code if day_code else "")
-                    work_date = parse_date_cell(date_headers[offset])
+                    work_date = week_start_from_excel + pd.Timedelta(days=offset)
 
                     all_rows.append({
                         "source_month_folder": source_month,
                         "source_file": file_name,
+                        "excel_week_range": week_range_text,
+                        "excel_week_start": week_start_from_excel,
+                        "excel_week_end": week_end_from_excel,
                         "date": work_date,
                         "vendor_company": vendor,
                         "employee": employee,
@@ -867,7 +866,7 @@ dataframe_with_2_decimals(weekly_summary[[c for c in summary_view_cols if c in w
 
 st.subheader("Filtered source data")
 preview_cols = [
-    "source_month_folder", "source_file", "date", "day", "vendor_company", "employee",
+    "source_month_folder", "source_file", "excel_week_range", "excel_week_start", "excel_week_end", "date", "day", "vendor_company", "employee",
     "employee_class", "type_of_work", "hours", "hourly_rate", "total_pay", "week_label",
 ]
 dataframe_with_2_decimals(filtered_df[[c for c in preview_cols if c in filtered_df.columns]])
