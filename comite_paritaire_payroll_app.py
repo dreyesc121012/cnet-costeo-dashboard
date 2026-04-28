@@ -35,7 +35,7 @@ REDIRECT_URI = str(st.secrets["REDIRECT_URI"]).strip().rstrip("/")
 ONEDRIVE_FOLDER_URL = str(
     st.secrets.get(
         "ONEDRIVE_FOLDER_URL",
-        "https://groupcastillo.sharepoint.com/:f:/s/GroupCastilloTeamSite/IgDJ46w1V3YWT7e0yB8CKkD9AenZh0xzbn8pNRRGuDcIpPw?e=s4L0Z9",
+        "https://groupcastillo.sharepoint.com/:f:/s/GroupCastilloTeamSite/IgAGVuhNpEbzQ4AIHI5FIZq6AYms3-TKSUjfSdr-mWkjWJI?e=rA2rAX",
     )
 ).strip()
 
