@@ -35,7 +35,7 @@ REDIRECT_URI = str(st.secrets["REDIRECT_URI"]).strip().rstrip("/")
 ONEDRIVE_FOLDER_URL = str(
     st.secrets.get(
         "ONEDRIVE_FOLDER_URL",
-        "https://groupcastillo.sharepoint.com/:f:/s/GroupCastilloTeamSite/IgAGVuhNpEbzQ4AIHI5FIZq6AYms3-TKSUjfSdr-mWkjWJI?e=rA2rAX",
+        "https://groupcastillo.sharepoint.com/:f:/s/GroupCastilloTeamSite/IgAGVuhNpEbzQ4AIHI5FIZq6AYms3-TKSUjfSdr-mWkjWJI?e=d4hsB2",
     )
 ).strip()
 
@@ -823,7 +823,15 @@ if selected_types:
     filtered_df = filtered_df[filtered_df["type_of_work"].isin(selected_types)]
 
 start_date_dt = pd.to_datetime(start_date)
-filtered_df[["week_start", "week_end"]] = filtered_df["date"].apply(lambda x: pd.Series(assign_committee_week(x, start_date_dt, num_weeks)))
+filtered_df[["week_start", "week_end"]] = filtered_df["date"].apply(
+    lambda x: pd.Series(assign_committee_week(x, start_date_dt, num_weeks))
+)
+
+# Force datetime conversion before using .dt accessor.
+# This prevents AttributeError when pandas keeps week_end as object dtype.
+filtered_df["week_start"] = pd.to_datetime(filtered_df["week_start"], errors="coerce")
+filtered_df["week_end"] = pd.to_datetime(filtered_df["week_end"], errors="coerce")
+
 filtered_df = filtered_df[filtered_df["week_start"].notna()].copy()
 filtered_df["week_label"] = filtered_df["week_end"].dt.strftime("%Y-%m-%d")
 
