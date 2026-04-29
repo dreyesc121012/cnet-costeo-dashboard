@@ -278,12 +278,39 @@ def clear_query_params_compat():
 # ============================================================
 # MSAL / AUTH
 # ============================================================
-def get_msal_app():
+CACHE_FILE = "token_cache.json"
+
+def load_token_cache():
+    cache = msal.SerializableTokenCache()
+    try:
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                cache.deserialize(f.read())
+    except Exception:
+        pass
+    return cache
+
+def save_token_cache(cache):
+    try:
+        if cache.has_state_changed:
+            with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                f.write(cache.serialize())
+    except Exception:
+        pass
+
+def clear_token_cache():
+    try:
+        if os.path.exists(CACHE_FILE):
+            os.remove(CACHE_FILE)
+    except Exception:
+        pass
+
+def get_msal_app(cache):
     return msal.ConfidentialClientApplication(
         CLIENT_ID,
         authority=AUTHORITY,
         client_credential=CLIENT_SECRET,
-        token_cache=None,
+        token_cache=cache,
     )
 
 
@@ -1018,16 +1045,37 @@ def export_regular_hours_report(weekly_df: pd.DataFrame, start_date_value) -> By
 
 
 # ============================================================
-# AUTH FLOW
+# AUTH FLOW - AUTO REFRESH TOKEN
 # ============================================================
-app = get_msal_app()
+cache = load_token_cache()
+app = get_msal_app(cache)
 params = get_query_params_compat()
+
+with st.sidebar:
+    if st.button("Refresh Microsoft Login"):
+        st.session_state.pop("token_result", None)
+        clear_token_cache()
+        clear_query_params_compat()
+        st.rerun()
+
+if "token_result" not in st.session_state:
+    accounts = app.get_accounts()
+    if accounts:
+        result = app.acquire_token_silent(SCOPES, account=accounts[0])
+        save_token_cache(cache)
+        if result and "access_token" in result:
+            st.session_state.token_result = result
 
 if "token_result" not in st.session_state:
     code = params.get("code")
 
     if code:
-        result = app.acquire_token_by_authorization_code(code=code, scopes=SCOPES, redirect_uri=REDIRECT_URI)
+        result = app.acquire_token_by_authorization_code(
+            code=code,
+            scopes=SCOPES,
+            redirect_uri=REDIRECT_URI,
+        )
+        save_token_cache(cache)
 
         if "access_token" in result:
             st.session_state.token_result = result
@@ -1038,6 +1086,7 @@ if "token_result" not in st.session_state:
         st.code(str(result))
         st.stop()
 
+if "token_result" not in st.session_state:
     st.warning("You are not signed in to Microsoft 365 / SharePoint.")
 
     extra_qp = {}
@@ -1054,7 +1103,7 @@ if "token_result" not in st.session_state:
         extra_query_parameters=extra_qp,
     )
 
-    st.link_button("🔐 Sign in with Microsoft (Company)", auth_url)
+    st.link_button("Sign in with Microsoft (Company)", auth_url)
     st.caption(f"Redirect URI used: {REDIRECT_URI}")
     st.stop()
 
@@ -1064,15 +1113,24 @@ access_token = token_result.get("access_token", "")
 if not access_token:
     st.error("No access token found. Please sign in again.")
     st.session_state.pop("token_result", None)
+    clear_token_cache()
     st.stop()
 
 try:
     me = get_me(access_token)
     signed_in_email = get_user_email(me)
 except Exception as e:
-    st.error("Could not validate signed-in user.")
+    st.error("Microsoft token expired or invalid. Please sign in again.")
     st.code(str(e))
     st.session_state.pop("token_result", None)
+    clear_token_cache()
+    auth_url = app.get_authorization_request_url(
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI,
+        prompt="select_account",
+        response_mode="query",
+    )
+    st.link_button("Sign in again with Microsoft", auth_url)
     st.stop()
 
 if not is_allowed_user(me):
@@ -1084,8 +1142,9 @@ if not is_allowed_user(me):
 st.sidebar.success(f"Logged in as {signed_in_email}")
 st.success(f"✅ Signed in as {signed_in_email}")
 
-if st.button("🚪 Sign out"):
+if st.button("Sign out"):
     st.session_state.pop("token_result", None)
+    clear_token_cache()
     clear_query_params_compat()
     st.rerun()
 
