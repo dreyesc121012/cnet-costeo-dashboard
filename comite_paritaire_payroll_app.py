@@ -172,21 +172,29 @@ def parse_week_range_cell(value, fallback_year=2026):
     if len(parts) < 2:
         return pd.NaT, pd.NaT
 
-    start_txt = parts[0]
-    end_txt = parts[1]
+    def parse_part(p):
+        p = clean_text(p)
+        if not p:
+            return pd.NaT
 
-    start_dt = pd.to_datetime(
-        f"{start_txt}/{fallback_year}",
-        format="%d/%m/%Y",
-        errors="coerce",
-    )
-    end_dt = pd.to_datetime(
-        f"{end_txt}/{fallback_year}",
-        format="%d/%m/%Y",
-        errors="coerce",
-    )
+        dt = pd.to_datetime(f"{p}/{fallback_year}", format="%d/%m/%Y", errors="coerce")
+        if pd.notna(dt):
+            return pd.Timestamp(dt).normalize()
 
-    return start_dt, end_dt
+        dt = pd.to_datetime(f"{p}-{fallback_year}", errors="coerce", dayfirst=True)
+        if pd.notna(dt):
+            return pd.Timestamp(dt).normalize()
+
+        dt = pd.to_datetime(p, errors="coerce", dayfirst=True)
+        if pd.notna(dt):
+            dt = pd.Timestamp(dt)
+            if dt.year < 2000:
+                dt = pd.Timestamp(year=fallback_year, month=dt.month, day=dt.day)
+            return dt.normalize()
+
+        return pd.NaT
+
+    return parse_part(parts[0]), parse_part(parts[1])
 
 
 def parse_input_date(value, fallback_year=2026):
@@ -392,44 +400,46 @@ def find_input_sheet_name(excel_file: pd.ExcelFile):
 
 def normalize_week_range_text(value) -> str:
     """
-    Normalizes a week range like:
-    03/01 - 09/01
-    03/01-09/01
-    03-Jan - 09-Jan
+    Normalizes week range values so DATA column K can match IMPUT column L.
 
-    This is used to match DATA column K with IMPUT column L.
+    Examples:
+    03/01 - 09/01   -> 03/01-09/01
+    03/01-09/01     -> 03/01-09/01
+    03-Jan - 09-Jan -> 03/01-09/01
     """
     txt = clean_text(value)
     if not txt:
         return ""
 
-    txt = txt.replace("–", "-").replace("—", "-")
-    txt = txt.replace(" ", "")
+    txt = txt.replace("–", "-").replace("—", "-").replace(" ", "")
 
-    # Try numeric dd/mm-dd/mm format first
-    if "-" in txt:
-        parts = txt.split("-")
-        if len(parts) >= 2:
-            left = parts[0]
-            right = parts[1]
+    if "-" not in txt:
+        return txt.upper()
 
-            def norm_part(p):
-                p = clean_text(p).replace(" ", "")
-                # If it is like 03/01
-                dt = pd.to_datetime(p + "/2026", format="%d/%m/%Y", errors="coerce")
-                if pd.notna(dt):
-                    return pd.Timestamp(dt).strftime("%d/%m")
+    parts = txt.split("-")
+    if len(parts) < 2:
+        return txt.upper()
 
-                # If it is like 03-Jan
-                dt = pd.to_datetime(p + "-2026", errors="coerce", dayfirst=True)
-                if pd.notna(dt):
-                    return pd.Timestamp(dt).strftime("%d/%m")
+    def norm_part(p):
+        p = clean_text(p).replace(" ", "")
+        if not p:
+            return ""
 
-                return p.upper()
+        dt = pd.to_datetime(p + "/2026", format="%d/%m/%Y", errors="coerce")
+        if pd.notna(dt):
+            return pd.Timestamp(dt).strftime("%d/%m")
 
-            return norm_part(left) + "-" + norm_part(right)
+        dt = pd.to_datetime(p + "-2026", errors="coerce", dayfirst=True)
+        if pd.notna(dt):
+            return pd.Timestamp(dt).strftime("%d/%m")
 
-    return txt.upper()
+        dt = pd.to_datetime(p, errors="coerce", dayfirst=True)
+        if pd.notna(dt):
+            return pd.Timestamp(dt).strftime("%d/%m")
+
+        return p.upper()
+
+    return norm_part(parts[0]) + "-" + norm_part(parts[1])
 
 
 def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> dict:
@@ -628,10 +638,13 @@ def load_selected_excel_files_regular(
                 # DATA column K has the week range.
                 # Example: 03/01 - 09/01 means:
                 # L = Saturday 03-Jan, M = Sunday 04-Jan, ... R = Friday 09-Jan.
-                # DATA L:R are the real week day cells.
+                # DATA L:R are the daily cells where we read worked hours or codes V / SD / H.
                 week_lookup_key = week_range_text
 
-                # Read DATA L:R cells for this employee/class/week.
+                # The committee report starts on Sunday, January 4.
+                # If DATA K starts with Saturday 03-Jan, use Sunday 04-Jan as the report date.
+                report_date = week_start_from_excel + pd.Timedelta(days=1)
+
                 week_values = []
                 for col_idx in range(DAY_COL_START, DAY_COL_END_EXCLUSIVE):
                     cell_value = r.iloc[col_idx] if len(r) > col_idx else ""
@@ -640,13 +653,14 @@ def load_selected_excel_files_regular(
                 week_letters = [clean_text(v).upper() for v in week_values]
                 visible_special_detected = any(letter in {"V", "SD", "H"} for letter in week_letters)
 
+                # Regular hours come ONLY from numeric values in DATA L:R.
+                # If a DATA cell is V, SD, or H, it is not counted as regular.
                 regular_hours = 0.0
                 regular_numeric_values = []
 
                 for v in week_values:
                     txt = clean_text(v).upper()
 
-                    # If DATA shows V / SD / H, this day is NOT regular worked hours.
                     if txt in {"V", "SD", "H"}:
                         continue
 
@@ -660,8 +674,9 @@ def load_selected_excel_files_regular(
                 conge_trav_hours = 0.0
                 maladie_hours = 0.0
 
-                # Pull special values from INPUT/IMPUT using:
-                # Employee + Class + Week range
+                # INPUT / IMPUT lookup:
+                # Match by Employee + Class + Week Range.
+                # IMPUT L = week range / FECHA.
                 input_v_hours = get_special_hours(
                     special_hours_lookup,
                     employee,
@@ -685,9 +700,9 @@ def load_selected_excel_files_regular(
                 )
 
                 # FINAL RULES:
-                # IMPUT M / V  -> conge_hours
-                # IMPUT N / SD -> maladie_hours
-                # IMPUT O / H  -> conge_trav_hours
+                # DATA L:R contains V  -> take IMPUT M hours and put in conge_hours
+                # DATA L:R contains SD -> take IMPUT N hours and put in maladie_hours
+                # DATA L:R contains H  -> take IMPUT O hours and put in conge_trav_hours
                 if "V" in week_letters:
                     conge_hours += input_v_hours
 
@@ -699,8 +714,6 @@ def load_selected_excel_files_regular(
 
                 special_hours_total = conge_hours + maladie_hours + conge_trav_hours + suppl_hours
 
-                # Do NOT subtract special hours automatically unless the special letter is visible.
-                # This prevents wrong deductions when a row exists in IMPUT but the DATA week did not mark V/SD/H.
                 total_hours_for_week = (
                     regular_hours
                     + suppl_hours
@@ -719,7 +732,7 @@ def load_selected_excel_files_regular(
                     "excel_week_start": week_start_from_excel,
                     "excel_week_end": week_end_from_excel,
                     "special_lookup_date": week_lookup_key,
-                    "date": week_start_from_excel,
+                    "date": report_date,
                     "vendor_company": vendor,
                     "employee": employee,
                     "employee_class": employee_class,
@@ -754,25 +767,31 @@ def load_selected_excel_files_regular(
 # ============================================================
 def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Weekly summary rule:
+    FINAL RULE FOR THIS REPORT:
 
-    1) DATA L:R numeric values are regular worked hours.
-    2) V / SD / H are separated into Congé / Maladie / Congé Travaillé.
-    3) Overtime is NOT used in this report.
-    4) If the same employee has more than 40 regular worked hours in the same week
-       across multiple classes, the excess goes to Suppl. hours.
-    5) Suppl. hours are paid using the Class A rate when Class A exists for that employee/week.
+    - Overtime is NOT used.
+    - If one employee has more than 40 regular worked hours in the same committee week,
+      the excess goes to Suppl. hours.
+    - The Suppl. excess is assigned to the Class A row when Class A exists.
+    - Suppl. is paid using the rate of the row where it is assigned multiplied by 1.5.
+      Therefore, when Class A exists, the Suppl. uses Class A rate x 1.5.
 
     Example:
-    Sylvia Tremblay, week ending 2026-01-31:
-      Class A = 10.00
-      Class B = 33.50
-      Total worked = 43.50
+        Sylvia Tremblay / week 2026-01-31
+        Class A = 10.00
+        Class B = 33.50
+        Total = 43.50
 
-    Result:
-      Regular total = 40.00
-      Suppl. = 3.50, assigned to Class A
-      Overtime = 0.00
+        Excess over 40 = 3.50
+
+        Final:
+        Class A:
+            regular_hours = 10.00
+            suppl_hours = 3.50
+        Class B:
+            regular_hours = 30.00
+            suppl_hours = 0.00
+        overtime_hours = 0.00
     """
 
     grouped = (
@@ -792,49 +811,58 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     grouped["regular_hours_original"] = grouped["regular_hours"]
+
+    # Overtime is not used in this report.
     grouped["overtime_hours"] = 0.0
 
-    for (vendor, employee, week_label), idx_values in grouped.groupby(
-        ["vendor_company", "employee", "week_label"], dropna=False
-    ).groups.items():
+    # Convert hours above 40 per employee/week into Suppl.
+    employee_week_groups = grouped.groupby(
+        ["vendor_company", "employee", "week_label"],
+        dropna=False
+    ).groups
 
-        idx = list(idx_values)
-        total_worked_regular = float(grouped.loc[idx, "regular_hours"].sum())
+    for (vendor, employee, week_label), idx_values in employee_week_groups.items():
+        idx_list = list(idx_values)
 
-        if total_worked_regular <= OVERTIME_WEEKLY_THRESHOLD:
+        total_regular_worked = float(grouped.loc[idx_list, "regular_hours"].sum())
+
+        if total_regular_worked <= OVERTIME_WEEKLY_THRESHOLD:
             continue
 
-        excess = round(total_worked_regular - OVERTIME_WEEKLY_THRESHOLD, 2)
+        excess_hours = round(total_regular_worked - OVERTIME_WEEKLY_THRESHOLD, 2)
 
-        class_a_idx = [
-            i for i in idx
+        # Suppl. must use Class A rate when Class A exists.
+        class_a_indexes = [
+            i for i in idx_list
             if normalize_text(grouped.at[i, "employee_class"]) == "class a"
         ]
 
-        suppl_target_idx = class_a_idx[0] if class_a_idx else idx[0]
+        suppl_target_idx = class_a_indexes[0] if class_a_indexes else idx_list[0]
 
+        # Put excess in Suppl. on Class A row.
         grouped.at[suppl_target_idx, "suppl_hours"] = (
-            float(grouped.at[suppl_target_idx, "suppl_hours"]) + excess
+            float(grouped.at[suppl_target_idx, "suppl_hours"]) + excess_hours
         )
 
-        non_target_idx = [i for i in idx if i != suppl_target_idx]
-        reduction_order = non_target_idx + [suppl_target_idx]
+        # Reduce regular hours so total regular for the employee/week becomes 40.
+        # Reduce other classes first, preserving Class A regular hours as much as possible.
+        reduction_order = [i for i in idx_list if i != suppl_target_idx] + [suppl_target_idx]
 
-        remaining = excess
+        remaining_to_reduce = excess_hours
 
         for i in reduction_order:
-            if remaining <= 0:
+            if remaining_to_reduce <= 0:
                 break
 
             current_regular = float(grouped.at[i, "regular_hours"])
-            take = min(current_regular, remaining)
+            reduction = min(current_regular, remaining_to_reduce)
 
-            grouped.at[i, "regular_hours"] = current_regular - take
-            remaining -= take
+            grouped.at[i, "regular_hours"] = current_regular - reduction
+            remaining_to_reduce -= reduction
 
     grouped["regular_pay"] = grouped["regular_hours"] * grouped["hourly_rate"]
     grouped["overtime_pay"] = 0.0
-    grouped["suppl_pay"] = grouped["suppl_hours"] * grouped["hourly_rate"]
+    grouped["suppl_pay"] = grouped["suppl_hours"] * grouped["hourly_rate"] * OVERTIME_MULTIPLIER
     grouped["conge_pay"] = grouped["conge_hours"] * grouped["hourly_rate"]
     grouped["conge_trav_pay"] = grouped["conge_trav_hours"] * grouped["hourly_rate"]
     grouped["maladie_pay"] = grouped["maladie_hours"] * grouped["hourly_rate"]
@@ -1434,5 +1462,5 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Loader diagnostics:", st.session_state.get("regular_loader_diagnostics", []))
     st.write("Final source columns:", list(filtered_df.columns))
     st.write("Weekly summary columns:", list(weekly_summary.columns))
-    st.write("Special hours rule:", "DATA L:R triggers V/SD/H. IMPUT M(V)=Congé, N(SD)=Maladie, O(H)=Congé Travaillé. Match by Employee + Class + Week range.")
-    st.write("Suppl. rule:", "Over 40 regular worked hours per employee/week becomes Suppl.; Overtime is not used. Suppl. is assigned to Class A rate when Class A exists.")
+    st.write("Special hours rule:", "DATA L:R reads worked hours by class. If DATA L:R has V/SD/H, IMPUT M(V)=Congé, N(SD)=Maladie, O(H)=Congé Travaillé. Match by Employee + Class + IMPUT L week range.")
+    st.write("Suppl. rule:", "Over 40 regular worked hours per employee/week becomes Suppl.; Overtime is not used. Suppl. is assigned to Class A when available and paid at Class A rate x 1.5.")
