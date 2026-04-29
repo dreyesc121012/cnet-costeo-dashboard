@@ -73,16 +73,16 @@ DATA_START_ROW = 4           # Excel row 5
 INPUT_COL_EMPLOYEE_NAME = 1   # B
 INPUT_COL_EMPLOYEE_CLASS = 8  # I
 INPUT_COL_DATE = 11           # L = FECHA
-INPUT_COL_L = 12              # M = L
-INPUT_COL_SD = 13             # N = SD
-INPUT_COL_H = 14              # O = H
+INPUT_COL_V = 12              # M = V  -> Congé
+INPUT_COL_SD = 13             # N = SD -> Maladie
+INPUT_COL_H = 14              # O = H  -> Congé Travaillé
 
 ROW_ORDER = [
     ("Régulier", "regular_hours"),
     ("Overtime", "overtime_hours"),
     ("Suppl.", "suppl_hours"),
     ("Congé", "conge_hours"),
-    ("Congé Travaillé", "conge_tral_hours"),
+    ("Congé Travaillé", "conge_trav_hours"),
     ("Maladie", "maladie_hours"),
 ]
 
@@ -397,19 +397,19 @@ def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> d
     B = Employee
     I = Class
     L = Date / FECHA
-    M = L
+    M = V
     N = SD
     O = H
 
-    L  -> Congé
-    H  -> Congé Travaillé
+    V  -> Congé
+    H  -> Congé
     SD -> Maladie
 
     IMPORTANT:
     The value in M/N/O is taken exactly as it appears.
-    Example: if Input says L = 8, Congé = 8.
-             if Input says H = 5, Congé Travaillé = 5.
-    It is NOT multiplied by the number of L / SD / H letters in DATA.
+    Example: if Input says V = 8, Congé = 8.
+             if Input says V = 5, Congé = 5.
+    It is NOT multiplied by the number of V letters in DATA.
     """
 
     sheet_name = find_input_sheet_name(excel_file)
@@ -445,15 +445,15 @@ def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> d
 
         date_key = pd.Timestamp(date_value).normalize()
 
-        l_hours = pd.to_numeric(row.iloc[INPUT_COL_L], errors="coerce") if len(row) > INPUT_COL_L else 0.0
+        v_hours = pd.to_numeric(row.iloc[INPUT_COL_V], errors="coerce") if len(row) > INPUT_COL_V else 0.0
         sd_hours = pd.to_numeric(row.iloc[INPUT_COL_SD], errors="coerce") if len(row) > INPUT_COL_SD else 0.0
         h_hours = pd.to_numeric(row.iloc[INPUT_COL_H], errors="coerce") if len(row) > INPUT_COL_H else 0.0
 
-        l_hours = float(l_hours) if pd.notna(l_hours) else 0.0
+        v_hours = float(v_hours) if pd.notna(v_hours) else 0.0
         sd_hours = float(sd_hours) if pd.notna(sd_hours) else 0.0
         h_hours = float(h_hours) if pd.notna(h_hours) else 0.0
 
-        if l_hours == 0 and sd_hours == 0 and h_hours == 0:
+        if v_hours == 0 and sd_hours == 0 and h_hours == 0:
             continue
 
         rows_found += 1
@@ -466,12 +466,12 @@ def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> d
 
         if key not in by_employee:
             by_employee[key] = {
-                "L": 0.0,
+                "V": 0.0,
                 "SD": 0.0,
                 "H": 0.0,
             }
 
-        by_employee[key]["L"] += l_hours
+        by_employee[key]["V"] += v_hours
         by_employee[key]["SD"] += sd_hours
         by_employee[key]["H"] += h_hours
 
@@ -568,16 +568,16 @@ def load_selected_excel_files_regular(
                 if pd.isna(week_start_from_excel):
                     continue
 
-                # DATA 03/01 - 09/01 must look up L / SD / H in INPUT FECHA 10-Jan.
+                # DATA 03/01 - 09/01 must look up V / SD / H in INPUT FECHA 10-Jan.
                 special_lookup_date = week_start_from_excel + pd.Timedelta(days=7)
 
                 # Read all L:R cells for this DATA row.
                 # We calculate regular numeric hours as the sum of numeric cells ONLY.
                 # IMPORTANT:
-                # Sometimes Excel displays L / SD / H, but pandas receives the numeric cached value.
+                # Sometimes Excel displays V / SD / H, but pandas receives the numeric cached value.
                 # In that case, regular_hours can incorrectly include the special hours.
                 # To fix it:
-                #   1) Always read the L / SD / H value from Input/Imput once.
+                #   1) Always read the V / SD / H value from Input/Imput once.
                 #   2) If no visible letter was detected in DATA, subtract that special value from regular_hours.
                 week_values = []
                 for col_idx in range(DAY_COL_START, DAY_COL_END_EXCLUSIVE):
@@ -585,7 +585,7 @@ def load_selected_excel_files_regular(
                     week_values.append(cell_value)
 
                 week_letters = [clean_text(v).upper() for v in week_values]
-                visible_special_detected = any(letter in {"L", "SD", "H"} for letter in week_letters)
+                visible_special_detected = any(letter in {"V", "SD", "H"} for letter in week_letters)
 
                 regular_hours = 0.0
                 regular_numeric_values = []
@@ -593,8 +593,8 @@ def load_selected_excel_files_regular(
                 for v in week_values:
                     txt = clean_text(v).upper()
 
-                    # If pandas actually sees L / SD / H, never count it as regular.
-                    if txt in {"L", "SD", "H"}:
+                    # If pandas actually sees V / SD / H, never count it as regular.
+                    if txt in {"V", "SD", "H"}:
                         continue
 
                     numeric_value = pd.to_numeric(v, errors="coerce")
@@ -604,16 +604,16 @@ def load_selected_excel_files_regular(
 
                 suppl_hours = 0.0
                 conge_hours = 0.0
-                conge_tral_hours = 0.0
+                conge_trav_hours = 0.0
                 maladie_hours = 0.0
 
                 # Pull special values once from Input/Imput using employee + class + lookup date.
-                input_l_hours = get_special_hours(
+                input_v_hours = get_special_hours(
                     special_hours_lookup,
                     employee,
                     employee_class,
                     special_lookup_date,
-                    "L",
+                    "V",
                 )
                 input_h_hours = get_special_hours(
                     special_hours_lookup,
@@ -630,23 +630,23 @@ def load_selected_excel_files_regular(
                     "SD",
                 )
 
-                # L goes to Congé. H goes to Congé Travaillé. SD goes to Maladie.
+                # V goes to Congé. SD goes to Maladie. H goes to Congé Travaillé.
                 # If DATA visibly contains the letters, use them as triggers.
                 # If DATA does not visibly contain them because Excel/pandas returned cached numbers,
                 # use the Input/Imput value as the trigger.
-                if "L" in week_letters or input_l_hours > 0:
-                    conge_hours += input_l_hours
-
-                if "H" in week_letters or input_h_hours > 0:
-                    conge_trav_hours += input_h_hours
+                if "V" in week_letters or input_v_hours > 0:
+                    conge_hours += input_v_hours
 
                 if "SD" in week_letters or input_sd_hours > 0:
                     maladie_hours += input_sd_hours
 
-                special_hours_total = conge_hours + maladie_hours + conge_tral_hours + suppl_hours
+                if "H" in week_letters or input_h_hours > 0:
+                    conge_trav_hours += input_h_hours
+
+                special_hours_total = conge_hours + maladie_hours + conge_trav_hours + suppl_hours
 
                 # Critical correction:
-                # If pandas did not see visible L / SD / H, but Input/Imput has special hours,
+                # If pandas did not see visible V / SD / H, but Input/Imput has special hours,
                 # those special hours may already be included in the numeric cached values.
                 # Subtract them from regular_hours so regular shows only real worked numeric hours.
                 if not visible_special_detected and special_hours_total > 0:
@@ -656,7 +656,7 @@ def load_selected_excel_files_regular(
                     regular_hours
                     + suppl_hours
                     + conge_hours
-                    + conge_tral_hours
+                    + conge_trav_hours
                     + maladie_hours
                 )
 
@@ -679,7 +679,7 @@ def load_selected_excel_files_regular(
                     "excel_cell_value": " | ".join([clean_text(v) for v in week_values if clean_text(v)]),
                     "regular_numeric_values": " | ".join([str(x) for x in regular_numeric_values]),
                     "visible_special_detected": visible_special_detected,
-                    "input_l_hours": input_l_hours,
+                    "input_v_hours": input_v_hours,
                     "input_h_hours": input_h_hours,
                     "input_sd_hours": input_sd_hours,
                     "special_hours_total": special_hours_total,
@@ -688,7 +688,7 @@ def load_selected_excel_files_regular(
                     "regular_hours": regular_hours,
                     "suppl_hours": suppl_hours,
                     "conge_hours": conge_hours,
-                    "conge_tral_hours": conge_tral_hours,
+                    "conge_trav_hours": conge_trav_hours,
                     "maladie_hours": maladie_hours,
                 })
 
@@ -710,7 +710,7 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
             regular_hours_original=("regular_hours", "sum"),
             suppl_hours=("suppl_hours", "sum"),
             conge_hours=("conge_hours", "sum"),
-            conge_tral_hours=("conge_tral_hours", "sum"),
+            conge_trav_hours=("conge_trav_hours", "sum"),
             maladie_hours=("maladie_hours", "sum"),
             hourly_rate=("hourly_rate", "mean"),
             source_month_folder=("source_month_folder", "first"),
@@ -732,7 +732,7 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     grouped["overtime_pay"] = grouped["overtime_hours"] * grouped["hourly_rate"] * OVERTIME_MULTIPLIER
     grouped["suppl_pay"] = grouped["suppl_hours"] * grouped["hourly_rate"]
     grouped["conge_pay"] = grouped["conge_hours"] * grouped["hourly_rate"]
-    grouped["conge_trav_pay"] = grouped["conge_tral_hours"] * grouped["hourly_rate"]
+    grouped["conge_trav_pay"] = grouped["conge_trav_hours"] * grouped["hourly_rate"]
     grouped["maladie_pay"] = grouped["maladie_hours"] * grouped["hourly_rate"]
 
     grouped["total_pay"] = (
@@ -749,7 +749,7 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
         + grouped["overtime_hours"]
         + grouped["suppl_hours"]
         + grouped["conge_hours"]
-        + grouped["conge_tral_hours"]
+        + grouped["conge_trav_hours"]
         + grouped["maladie_hours"]
     )
 
@@ -1158,7 +1158,7 @@ for c in [
     "regular_hours",
     "suppl_hours",
     "conge_hours",
-    "conge_tral_hours",
+    "conge_trav_hours",
     "maladie_hours",
 ]:
     df[c] = to_num_series(df[c])
@@ -1249,7 +1249,7 @@ summary_view_cols = [
     "overtime_hours",
     "suppl_hours",
     "conge_hours",
-    "conge_tral_hours",
+    "conge_trav_hours",
     "maladie_hours",
     "total_hours",
     "hourly_rate",
@@ -1288,7 +1288,7 @@ preview_cols = [
     "excel_cell_value",
     "regular_numeric_values",
     "visible_special_detected",
-    "input_l_hours",
+    "input_v_hours",
     "input_h_hours",
     "input_sd_hours",
     "special_hours_total",
@@ -1296,7 +1296,7 @@ preview_cols = [
     "regular_hours",
     "suppl_hours",
     "conge_hours",
-    "conge_tral_hours",
+    "conge_trav_hours",
     "maladie_hours",
     "hourly_rate",
     "week_label",
@@ -1330,5 +1330,5 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Loader diagnostics:", st.session_state.get("regular_loader_diagnostics", []))
     st.write("Final source columns:", list(filtered_df.columns))
     st.write("Weekly summary columns:", list(weekly_summary.columns))
-    st.write("Special hours rule:", "L goes to Congé. H goes to Congé Travaillé. SD goes to Maladie. The value is taken once from Input/Imput, not multiplied by the number of letters.")
+    st.write("Special hours rule:", "V goes to Congé. SD goes to Maladie. H goes to Congé Travaillé. The value is taken once from Input/Imput, not multiplied by the number of letters.")
     st.write("Overtime condition:", "regular worked hours over 40 in the same committee week are overtime at 1.5x")
