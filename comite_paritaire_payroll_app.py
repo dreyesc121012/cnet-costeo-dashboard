@@ -73,9 +73,9 @@ DATA_START_ROW = 4           # Excel row 5
 INPUT_COL_EMPLOYEE_NAME = 1   # B
 INPUT_COL_EMPLOYEE_CLASS = 8  # I
 INPUT_COL_DATE = 11           # L = FECHA
-INPUT_COL_V = 12              # M = V  -> Congé
-INPUT_COL_SD = 13             # N = SD -> Maladie
-INPUT_COL_H = 14              # O = H  -> Congé Travaillé
+INPUT_COL_V = 12              # M = V
+INPUT_COL_SD = 13             # N = SD
+INPUT_COL_H = 14              # O = H
 
 ROW_ORDER = [
     ("Régulier", "regular_hours"),
@@ -189,35 +189,41 @@ def parse_week_range_cell(value, fallback_year=2026):
 
 
 def parse_input_date(value, fallback_year=2026):
+    """
+    Robust parser for INPUT/IMPUT FECHA.
+    Forces year 2026 when text like 10-Jan has no year.
+    """
     if pd.isna(value):
         return pd.NaT
 
     if isinstance(value, (pd.Timestamp, datetime)):
-        return pd.Timestamp(value).normalize()
+        parsed = pd.Timestamp(value)
+        if parsed.year < 2000:
+            parsed = pd.Timestamp(year=fallback_year, month=parsed.month, day=parsed.day)
+        return parsed.normalize()
 
     txt = clean_text(value)
     if not txt:
         return pd.NaT
 
-    parsed = pd.to_datetime(txt, errors="coerce")
+    txt_norm = txt.replace("–", "-").replace("—", "-").strip()
+    has_year = any(str(y) in txt_norm for y in range(2000, 2051))
 
+    # If the FECHA cell says 10-Jan, 17-Jan, etc., force the payroll year.
+    if not has_year:
+        for candidate in (f"{txt_norm}-{fallback_year}", f"{txt_norm}/{fallback_year}"):
+            parsed = pd.to_datetime(candidate, dayfirst=True, errors="coerce")
+            if pd.notna(parsed):
+                return pd.Timestamp(parsed).normalize()
+
+    parsed = pd.to_datetime(txt_norm, dayfirst=True, errors="coerce")
     if pd.notna(parsed):
         parsed = pd.Timestamp(parsed)
-        if parsed.year < 2000:
+        if not has_year or parsed.year < 2000:
             parsed = pd.Timestamp(year=fallback_year, month=parsed.month, day=parsed.day)
         return parsed.normalize()
 
-    parsed = pd.to_datetime(f"{txt}-{fallback_year}", errors="coerce")
-    if pd.notna(parsed):
-        return pd.Timestamp(parsed).normalize()
-
-    parsed = pd.to_datetime(f"{txt}/{fallback_year}", dayfirst=True, errors="coerce")
-    if pd.notna(parsed):
-        return pd.Timestamp(parsed).normalize()
-
     return pd.NaT
-
-
 def assign_committee_week(date_value: pd.Timestamp, start_date: pd.Timestamp, num_weeks: int = 24):
     d = pd.to_datetime(date_value)
 
@@ -483,22 +489,27 @@ def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> d
 
 
 def get_special_hours(special_lookup: dict, employee: str, employee_class: str, lookup_date, code: str) -> float:
+    """
+    Get V, SD, or H hours from INPUT/IMPUT.
+
+    First tries employee + class + date.
+    Then tries employee + date, ignoring class, to fix hidden spaces or class text mismatch.
+    """
     date_key = pd.Timestamp(lookup_date).normalize()
-
-    key = (
-        normalize_text(employee),
-        normalize_text(employee_class),
-        date_key,
-    )
-
+    employee_key = normalize_text(employee)
+    class_key = normalize_text(employee_class)
     by_employee = special_lookup.get("by_employee", {})
 
-    if key in by_employee:
-        return float(by_employee[key].get(code, 0.0))
+    exact_key = (employee_key, class_key, date_key)
+    if exact_key in by_employee:
+        return float(by_employee[exact_key].get(code, 0.0))
 
-    return 0.0
+    total = 0.0
+    for (emp_k, cls_k, dt_k), values in by_employee.items():
+        if emp_k == employee_key and dt_k == date_key:
+            total += float(values.get(code, 0.0))
 
-
+    return total
 # ============================================================
 # DATA LOADING
 # ============================================================
@@ -630,10 +641,10 @@ def load_selected_excel_files_regular(
                     "SD",
                 )
 
-                # V goes to Congé. SD goes to Maladie. H goes to Congé Travaillé.
-                # If DATA visibly contains the letters, use them as triggers.
-                # If DATA does not visibly contain them because Excel/pandas returned cached numbers,
-                # use the Input/Imput value as the trigger.
+                # FINAL RULES:
+                # INPUT column M (V)  -> Congé
+                # INPUT column N (SD) -> Maladie
+                # INPUT column O (H)  -> Congé Travaillé
                 if "V" in week_letters or input_v_hours > 0:
                     conge_hours += input_v_hours
 
@@ -642,7 +653,6 @@ def load_selected_excel_files_regular(
 
                 if "H" in week_letters or input_h_hours > 0:
                     conge_trav_hours += input_h_hours
-
                 special_hours_total = conge_hours + maladie_hours + conge_trav_hours + suppl_hours
 
                 # Critical correction:
@@ -1330,5 +1340,5 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Loader diagnostics:", st.session_state.get("regular_loader_diagnostics", []))
     st.write("Final source columns:", list(filtered_df.columns))
     st.write("Weekly summary columns:", list(weekly_summary.columns))
-    st.write("Special hours rule:", "V goes to Congé. SD goes to Maladie. H goes to Congé Travaillé. The value is taken once from Input/Imput, not multiplied by the number of letters.")
+    st.write("Special hours rule:", "V and H go to Congé. SD goes to Maladie. The value is taken once from Input/Imput, not multiplied by the number of letters.")
     st.write("Overtime condition:", "regular worked hours over 40 in the same committee week are overtime at 1.5x")
