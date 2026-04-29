@@ -50,10 +50,13 @@ SCOPES = ["User.Read", "Files.Read.All", "Sites.Read.All"]
 # BUSINESS RULES
 # ============================================================
 SHEET_DATA = "DATA"
+SHEET_INPUT_CANDIDATES = ["INPUT", "IMPUT", "Input", "Imput", "input", "imput"]
 TYPE_OF_WORK_DEFAULT = "REGULAR"
 DEFAULT_CLASS_WHEN_NO_CLASS = "Class A"
 FIRST_COMMITTEE_WEEK_START_DEFAULT = pd.Timestamp("2026-01-04")
 REER_PER_HOUR = 0.45
+OVERTIME_WEEKLY_THRESHOLD = 40.0
+OVERTIME_MULTIPLIER = 1.5
 
 # Excel layout requested
 # A = Vendor Company
@@ -79,6 +82,10 @@ DATA_START_ROW = 4           # Excel row 5
 
 ROW_ORDER = [
     ("Régulier", "regular_hours"),
+    ("Overtime", "overtime_hours"),
+    ("Vacation Day", "vacation_hours"),
+    ("Sick Day", "sick_hours"),
+    ("Holiday", "holiday_hours"),
     ("Suppl.", "suppl_hours"),
     ("Congé", "conge_hours"),
     ("Congé Travaillé", "conge_trav_hours"),
@@ -306,6 +313,55 @@ def is_folder_item(item: dict) -> bool:
 # ============================================================
 # NEW DATA LOADING FOR THIS FILE FORMAT
 # ============================================================
+def find_input_sheet_name(excel_file: pd.ExcelFile):
+    for sheet_name in excel_file.sheet_names:
+        if normalize_text(sheet_name) in {"input", "imput"}:
+            return sheet_name
+    return None
+
+
+def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> dict:
+    """
+    Reads the Input/Imput sheet.
+    Expected columns by position:
+    L = Date
+    M = V / Vacation Day hours
+    N = SD / Sick Day hours
+    O = H / Holiday hours
+    Returns: {date: {"V": hours, "SD": hours, "H": hours}}
+    """
+    sheet_name = find_input_sheet_name(excel_file)
+    if sheet_name is None:
+        return {}
+
+    try:
+        input_raw = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, header=None)
+    except Exception:
+        return {}
+
+    lookup = {}
+    for _, row in input_raw.iterrows():
+        if len(row) <= 14:
+            continue
+
+        date_value = pd.to_datetime(row.iloc[11], errors="coerce")  # L
+        if pd.isna(date_value):
+            continue
+
+        date_key = pd.Timestamp(date_value).normalize()
+        v_hours = pd.to_numeric(row.iloc[12], errors="coerce") if len(row) > 12 else 0.0  # M
+        sd_hours = pd.to_numeric(row.iloc[13], errors="coerce") if len(row) > 13 else 0.0  # N
+        h_hours = pd.to_numeric(row.iloc[14], errors="coerce") if len(row) > 14 else 0.0  # O
+
+        lookup[date_key] = {
+            "V": float(v_hours) if pd.notna(v_hours) else 0.0,
+            "SD": float(sd_hours) if pd.notna(sd_hours) else 0.0,
+            "H": float(h_hours) if pd.notna(h_hours) else 0.0,
+        }
+
+    return lookup
+
+
 def load_selected_excel_files_regular(access_token: str, drive_id: str, selected_files: list[dict], month_name_map: dict) -> pd.DataFrame:
     all_rows = []
     diagnostics = []
@@ -328,6 +384,7 @@ def load_selected_excel_files_regular(access_token: str, drive_id: str, selected
                 st.warning(f"Could not read {file_name}: sheet 'DATA' not found. Available sheets: {excel_file.sheet_names}")
                 continue
 
+            special_hours_lookup = build_special_hours_lookup(file_bytes, excel_file)
             raw = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_to_use, header=None)
 
             # Row 4 has day labels. Row 5+ has employee data.
@@ -341,6 +398,7 @@ def load_selected_excel_files_regular(access_token: str, drive_id: str, selected
                 "source_month_folder": source_month,
                 "sheet": sheet_to_use,
                 "day_headers_L_R": [clean_text(x) for x in day_headers],
+                "input_special_hours_dates_found": len(special_hours_lookup),
             })
 
             for _, r in data.iterrows():
@@ -359,13 +417,36 @@ def load_selected_excel_files_regular(access_token: str, drive_id: str, selected
                     continue
 
                 for offset, col_idx in enumerate(range(DAY_COL_START, DAY_COL_END_EXCLUSIVE)):
-                    hours = pd.to_numeric(r.iloc[col_idx], errors="coerce") if len(r) > col_idx else 0.0
-                    if pd.isna(hours) or float(hours) == 0:
-                        continue
-
+                    cell_value = r.iloc[col_idx] if len(r) > col_idx else 0.0
+                    cell_text = clean_text(cell_value).upper()
                     day_code = clean_text(day_headers[offset]).upper()
                     day_name = DAY_MAP.get(day_code, day_code if day_code else "")
                     work_date = week_start_from_excel + pd.Timedelta(days=offset)
+                    work_date_key = pd.Timestamp(work_date).normalize()
+
+                    regular_hours = 0.0
+                    vacation_hours = 0.0
+                    sick_hours = 0.0
+                    holiday_hours = 0.0
+
+                    if cell_text in {"V", "SD", "H"}:
+                        special_values = special_hours_lookup.get(work_date_key, {})
+                        if cell_text == "V":
+                            # V = Vacation Day / Congé
+                            vacation_hours = float(special_values.get("V", 0.0))
+                        elif cell_text == "SD":
+                            # SD = Sick Day / Maladie
+                            sick_hours = float(special_values.get("SD", 0.0))
+                        elif cell_text == "H":
+                            # H = Holiday / Congé
+                            holiday_hours = float(special_values.get("H", 0.0))
+                    else:
+                        numeric_hours = pd.to_numeric(cell_value, errors="coerce")
+                        regular_hours = float(numeric_hours) if pd.notna(numeric_hours) else 0.0
+
+                    total_hours_for_day = regular_hours + vacation_hours + sick_hours + holiday_hours
+                    if total_hours_for_day == 0:
+                        continue
 
                     all_rows.append({
                         "source_month_folder": source_month,
@@ -379,10 +460,14 @@ def load_selected_excel_files_regular(access_token: str, drive_id: str, selected
                         "employee_class": employee_class,
                         "type_of_work": TYPE_OF_WORK_DEFAULT,
                         "day": day_name,
-                        "hours": float(hours),
+                        "excel_cell_value": cell_text if cell_text else cell_value,
+                        "hours": total_hours_for_day,
                         "hourly_rate": rate,
-                        "total_pay": float(hours) * rate,
-                        "regular_hours": float(hours),
+                        "total_pay": total_hours_for_day * rate,
+                        "regular_hours": regular_hours,
+                        "vacation_hours": vacation_hours,
+                        "sick_hours": sick_hours,
+                        "holiday_hours": holiday_hours,
                         "suppl_hours": 0.0,
                         "conge_hours": 0.0,
                         "conge_trav_hours": 0.0,
@@ -401,12 +486,14 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     grouped = (
         df.groupby(["vendor_company", "employee", "employee_class", "week_label"], dropna=False)
         .agg(
-            regular_hours=("regular_hours", "sum"),
+            regular_hours_original=("regular_hours", "sum"),
+            vacation_hours=("vacation_hours", "sum"),
+            sick_hours=("sick_hours", "sum"),
+            holiday_hours=("holiday_hours", "sum"),
             suppl_hours=("suppl_hours", "sum"),
             conge_hours=("conge_hours", "sum"),
             conge_trav_hours=("conge_trav_hours", "sum"),
             maladie_hours=("maladie_hours", "sum"),
-            total_pay=("total_pay", "sum"),
             hourly_rate=("hourly_rate", "mean"),
             source_month_folder=("source_month_folder", "first"),
             source_file=("source_file", "first"),
@@ -415,9 +502,44 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
         .sort_values(["vendor_company", "employee", "week_label"])
     )
 
+    # OVERTIME CONDITION:
+    # If regular worked hours are more than 40 in the same committee week,
+    # the excess becomes overtime and is paid at 1.5x.
+    grouped["overtime_hours"] = (grouped["regular_hours_original"] - OVERTIME_WEEKLY_THRESHOLD).clip(lower=0)
+    grouped["regular_hours"] = grouped["regular_hours_original"].clip(upper=OVERTIME_WEEKLY_THRESHOLD)
+
+    grouped["regular_pay"] = grouped["regular_hours"] * grouped["hourly_rate"]
+    grouped["overtime_pay"] = grouped["overtime_hours"] * grouped["hourly_rate"] * OVERTIME_MULTIPLIER
+    grouped["vacation_pay"] = grouped["vacation_hours"] * grouped["hourly_rate"]
+    grouped["sick_pay"] = grouped["sick_hours"] * grouped["hourly_rate"]
+    grouped["holiday_pay"] = grouped["holiday_hours"] * grouped["hourly_rate"]
+
+    # French committee-style columns for the Employee Summary:
+    # V = Vacation Day -> Congé
+    # SD = Sick Day -> Maladie
+    # H = Holiday -> Holiday column and also included in Congé total for committee review
+    grouped["suppl_hours"] = grouped["suppl_hours"]
+    grouped["conge_hours"] = grouped["conge_hours"] + grouped["vacation_hours"] + grouped["holiday_hours"]
+    grouped["maladie_hours"] = grouped["maladie_hours"] + grouped["sick_hours"]
+    grouped["conge_trav_hours"] = grouped["conge_trav_hours"]
+
+    grouped["total_pay"] = (
+        grouped["regular_pay"]
+        + grouped["overtime_pay"]
+        + grouped["vacation_pay"]
+        + grouped["sick_pay"]
+        + grouped["holiday_pay"]
+    )
+
     grouped["total_hours"] = (
-        grouped["regular_hours"] + grouped["suppl_hours"] + grouped["conge_hours"] + grouped["conge_trav_hours"] + grouped["maladie_hours"]
+        grouped["regular_hours"]
+        + grouped["overtime_hours"]
+        + grouped["suppl_hours"]
+        + grouped["conge_hours"]
+        + grouped["conge_trav_hours"]
+        + grouped["maladie_hours"]
     ).round(2)
+
     grouped["reer"] = (grouped["total_hours"] * REER_PER_HOUR).round(2)
     grouped["total_with_reer"] = (grouped["total_pay"] + grouped["reer"]).round(2)
 
@@ -785,7 +907,7 @@ df["employee"] = safe_text_series(df["employee"])
 df["employee_class"] = safe_text_series(df["employee_class"]).replace({"": DEFAULT_CLASS_WHEN_NO_CLASS})
 df["type_of_work"] = TYPE_OF_WORK_DEFAULT
 
-for c in ["hours", "hourly_rate", "total_pay", "regular_hours", "suppl_hours", "conge_hours", "conge_trav_hours", "maladie_hours"]:
+for c in ["hours", "hourly_rate", "total_pay", "regular_hours", "vacation_hours", "sick_hours", "holiday_hours", "suppl_hours", "conge_hours", "conge_trav_hours", "maladie_hours"]:
     df[c] = to_num_series(df[c])
 
 df = df.dropna(subset=["date"]).copy()
@@ -859,15 +981,36 @@ col5.metric("PRÉLÈVEMENT TOTAL DÛ", format_money(prelevement_total_du))
 
 st.subheader("Employee summary")
 summary_view_cols = [
-    "vendor_company", "employee", "employee_class", "week_label", "regular_hours",
-    "total_hours", "hourly_rate", "total_pay", "reer", "total_with_reer",
+    "vendor_company",
+    "employee",
+    "employee_class",
+    "week_label",
+    "regular_hours",
+    "overtime_hours",
+    "suppl_hours",
+    "conge_hours",
+    "conge_trav_hours",
+    "maladie_hours",
+    "vacation_hours",
+    "sick_hours",
+    "holiday_hours",
+    "total_hours",
+    "hourly_rate",
+    "regular_pay",
+    "overtime_pay",
+    "vacation_pay",
+    "sick_pay",
+    "holiday_pay",
+    "total_pay",
+    "reer",
+    "total_with_reer",
 ]
 dataframe_with_2_decimals(weekly_summary[[c for c in summary_view_cols if c in weekly_summary.columns]])
 
 st.subheader("Filtered source data")
 preview_cols = [
     "source_month_folder", "source_file", "excel_week_range", "excel_week_start", "excel_week_end", "date", "day", "vendor_company", "employee",
-    "employee_class", "type_of_work", "hours", "hourly_rate", "total_pay", "week_label",
+    "employee_class", "type_of_work", "excel_cell_value", "hours", "regular_hours", "vacation_hours", "sick_hours", "holiday_hours", "suppl_hours", "conge_hours", "conge_trav_hours", "maladie_hours", "hourly_rate", "total_pay", "week_label",
 ]
 dataframe_with_2_decimals(filtered_df[[c for c in preview_cols if c in filtered_df.columns]])
 
@@ -895,3 +1038,4 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Loader diagnostics:", st.session_state.get("regular_loader_diagnostics", []))
     st.write("Final source columns:", list(filtered_df.columns))
     st.write("Weekly summary columns:", list(weekly_summary.columns))
+    st.write("Overtime condition:", "regular worked hours over 40 in the same committee week are overtime at 1.5x")
