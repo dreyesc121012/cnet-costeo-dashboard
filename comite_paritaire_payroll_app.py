@@ -417,6 +417,8 @@ def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> d
     if sheet_name is None:
         return {
             "by_employee": {},
+            "by_employee_date": {},
+            "by_date": {},
             "sheet_found": None,
             "rows_found": 0,
         }
@@ -426,11 +428,15 @@ def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> d
     except Exception:
         return {
             "by_employee": {},
+            "by_employee_date": {},
+            "by_date": {},
             "sheet_found": sheet_name,
             "rows_found": 0,
         }
 
     by_employee = {}
+    by_employee_date = {}
+    by_date = {}
     rows_found = 0
 
     for idx in range(1, input_raw.shape[0]):
@@ -475,8 +481,25 @@ def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> d
         by_employee[key]["SD"] += sd_hours
         by_employee[key]["H"] += h_hours
 
+        # Fallback 1: match employee + date, ignoring class.
+        key_employee_date = (normalize_text(employee), date_key)
+        if key_employee_date not in by_employee_date:
+            by_employee_date[key_employee_date] = {"V": 0.0, "SD": 0.0, "H": 0.0}
+        by_employee_date[key_employee_date]["V"] += v_hours
+        by_employee_date[key_employee_date]["SD"] += sd_hours
+        by_employee_date[key_employee_date]["H"] += h_hours
+
+        # Fallback 2: match only date. Used only if exact employee/class is not found.
+        if date_key not in by_date:
+            by_date[date_key] = {"V": 0.0, "SD": 0.0, "H": 0.0}
+        by_date[date_key]["V"] += v_hours
+        by_date[date_key]["SD"] += sd_hours
+        by_date[date_key]["H"] += h_hours
+
     return {
         "by_employee": by_employee,
+        "by_employee_date": by_employee_date,
+        "by_date": by_date,
         "sheet_found": sheet_name,
         "rows_found": rows_found,
     }
@@ -485,16 +508,22 @@ def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> d
 def get_special_hours(special_lookup: dict, employee: str, employee_class: str, lookup_date, code: str) -> float:
     date_key = pd.Timestamp(lookup_date).normalize()
 
-    key = (
-        normalize_text(employee),
-        normalize_text(employee_class),
-        date_key,
-    )
-
+    # 1) Exact match: employee + class + date
+    exact_key = (normalize_text(employee), normalize_text(employee_class), date_key)
     by_employee = special_lookup.get("by_employee", {})
+    if exact_key in by_employee:
+        return float(by_employee[exact_key].get(code, 0.0))
 
-    if key in by_employee:
-        return float(by_employee[key].get(code, 0.0))
+    # 2) Fallback: employee + date, ignoring class
+    employee_date_key = (normalize_text(employee), date_key)
+    by_employee_date = special_lookup.get("by_employee_date", {})
+    if employee_date_key in by_employee_date:
+        return float(by_employee_date[employee_date_key].get(code, 0.0))
+
+    # 3) Last fallback: date only
+    by_date = special_lookup.get("by_date", {})
+    if date_key in by_date:
+        return float(by_date[date_key].get(code, 0.0))
 
     return 0.0
 
@@ -546,6 +575,8 @@ def load_selected_excel_files_regular(
                 "day_headers_L_R": [clean_text(x) for x in day_headers],
                 "input_sheet_found": special_hours_lookup.get("sheet_found"),
                 "input_rows_found": special_hours_lookup.get("rows_found", 0),
+                "input_exact_keys": len(special_hours_lookup.get("by_employee", {})),
+                "input_employee_date_keys": len(special_hours_lookup.get("by_employee_date", {})),
             })
 
             for _, r in data.iterrows():
@@ -621,6 +652,16 @@ def load_selected_excel_files_regular(
                         special_lookup_date,
                         "SD",
                     )
+
+                # IMPORTANT FIX:
+                # Some Excel files visually show V / SD / H in DATA, but pandas may read
+                # the underlying cached numeric value from the cell. In that case, the
+                # special hours can get incorrectly included inside regular_hours.
+                # Example: Antony De Jesus shows regular 10 because 8 congé was included
+                # inside regular. Correct result: regular 2 + congé 8.
+                special_total = conge_hours + conge_trav_hours + maladie_hours
+                if special_total > 0 and regular_hours >= special_total:
+                    regular_hours = max(0.0, regular_hours - special_total)
 
                 total_hours_for_week = (
                     regular_hours
