@@ -508,16 +508,7 @@ def load_selected_excel_files_regular(
     selected_files: list[dict],
     month_name_map: dict,
 ) -> pd.DataFrame:
-    """
-    FINAL RULES:
-    - regular_hours = only numeric cells from DATA columns L:R.
-    - V/H/SD letters are triggers only.
-    - If V appears one or more times, Congé gets exactly the value from Input/Imput column M.
-    - If H appears one or more times, Congé gets exactly the value from Input/Imput column O.
-    - If SD appears one or more times, Maladie gets exactly the value from Input/Imput column N.
-    - The Input/Imput lookup date is DATA week_start + 7 days.
-      Example DATA 03/01 - 09/01 -> Input FECHA 10-Jan.
-    """
+
     all_rows = []
     diagnostics = []
 
@@ -573,28 +564,39 @@ def load_selected_excel_files_regular(
 
                 if not vendor and not employee:
                     continue
+
                 if pd.isna(week_start_from_excel):
                     continue
 
                 # DATA 03/01 - 09/01 must look up V / SD / H in INPUT FECHA 10-Jan.
-                special_lookup_date = pd.Timestamp(week_start_from_excel + pd.Timedelta(days=7)).normalize()
+                special_lookup_date = week_start_from_excel + pd.Timedelta(days=7)
 
-                # Read DATA L:R cells exactly.
+                # Read all L:R cells for this DATA row.
+                # We calculate regular numeric hours as the sum of numeric cells ONLY.
+                # IMPORTANT:
+                # Sometimes Excel displays V / SD / H, but pandas receives the numeric cached value.
+                # In that case, regular_hours can incorrectly include the special hours.
+                # To fix it:
+                #   1) Always read the V / SD / H value from Input/Imput once.
+                #   2) If no visible letter was detected in DATA, subtract that special value from regular_hours.
                 week_values = []
                 for col_idx in range(DAY_COL_START, DAY_COL_END_EXCLUSIVE):
                     cell_value = r.iloc[col_idx] if len(r) > col_idx else ""
                     week_values.append(cell_value)
 
                 week_letters = [clean_text(v).upper() for v in week_values]
+                visible_special_detected = any(letter in {"V", "SD", "H"} for letter in week_letters)
 
-                # REGULAR HOURS: only numeric values from L:R.
-                # V / SD / H must never be converted into regular hours.
-                regular_numeric_values = []
                 regular_hours = 0.0
+                regular_numeric_values = []
+
                 for v in week_values:
                     txt = clean_text(v).upper()
+
+                    # If pandas actually sees V / SD / H, never count it as regular.
                     if txt in {"V", "SD", "H"}:
                         continue
+
                     numeric_value = pd.to_numeric(v, errors="coerce")
                     if pd.notna(numeric_value):
                         regular_numeric_values.append(float(numeric_value))
@@ -605,23 +607,50 @@ def load_selected_excel_files_regular(
                 conge_trav_hours = 0.0
                 maladie_hours = 0.0
 
-                special_key = (
-                    normalize_text(employee),
-                    normalize_text(employee_class),
+                # Pull special values once from Input/Imput using employee + class + lookup date.
+                input_v_hours = get_special_hours(
+                    special_hours_lookup,
+                    employee,
+                    employee_class,
                     special_lookup_date,
+                    "V",
                 )
-                special_values = special_hours_lookup.get("by_employee", {}).get(special_key, {})
+                input_h_hours = get_special_hours(
+                    special_hours_lookup,
+                    employee,
+                    employee_class,
+                    special_lookup_date,
+                    "H",
+                )
+                input_sd_hours = get_special_hours(
+                    special_hours_lookup,
+                    employee,
+                    employee_class,
+                    special_lookup_date,
+                    "SD",
+                )
 
-                # SPECIAL HOURS: take the value exactly once from Input/Imput.
-                # No multiplication by number of letters in DATA.
-                if "V" in week_letters:
-                    conge_hours += float(special_values.get("V", 0.0))
+                # V and H go to Congé. SD goes to Maladie.
+                # If DATA visibly contains the letters, use them as triggers.
+                # If DATA does not visibly contain them because Excel/pandas returned cached numbers,
+                # use the Input/Imput value as the trigger.
+                if "V" in week_letters or input_v_hours > 0:
+                    conge_hours += input_v_hours
 
-                if "H" in week_letters:
-                    conge_hours += float(special_values.get("H", 0.0))
+                if "H" in week_letters or input_h_hours > 0:
+                    conge_hours += input_h_hours
 
-                if "SD" in week_letters:
-                    maladie_hours += float(special_values.get("SD", 0.0))
+                if "SD" in week_letters or input_sd_hours > 0:
+                    maladie_hours += input_sd_hours
+
+                special_hours_total = conge_hours + maladie_hours + conge_trav_hours + suppl_hours
+
+                # Critical correction:
+                # If pandas did not see visible V / SD / H, but Input/Imput has special hours,
+                # those special hours may already be included in the numeric cached values.
+                # Subtract them from regular_hours so regular shows only real worked numeric hours.
+                if not visible_special_detected and special_hours_total > 0:
+                    regular_hours = max(0.0, regular_hours - special_hours_total)
 
                 total_hours_for_week = (
                     regular_hours
@@ -649,8 +678,11 @@ def load_selected_excel_files_regular(
                     "day": "Week Total",
                     "excel_cell_value": " | ".join([clean_text(v) for v in week_values if clean_text(v)]),
                     "regular_numeric_values": " | ".join([str(x) for x in regular_numeric_values]),
-                    "special_lookup_key": f"{normalize_text(employee)} | {normalize_text(employee_class)} | {special_lookup_date.strftime('%Y-%m-%d')}",
-                    "special_values_found": str(special_values),
+                    "visible_special_detected": visible_special_detected,
+                    "input_v_hours": input_v_hours,
+                    "input_h_hours": input_h_hours,
+                    "input_sd_hours": input_sd_hours,
+                    "special_hours_total": special_hours_total,
                     "hours": total_hours_for_week,
                     "hourly_rate": rate,
                     "regular_hours": regular_hours,
@@ -1255,8 +1287,11 @@ preview_cols = [
     "type_of_work",
     "excel_cell_value",
     "regular_numeric_values",
-    "special_lookup_key",
-    "special_values_found",
+    "visible_special_detected",
+    "input_v_hours",
+    "input_h_hours",
+    "input_sd_hours",
+    "special_hours_total",
     "hours",
     "regular_hours",
     "suppl_hours",
