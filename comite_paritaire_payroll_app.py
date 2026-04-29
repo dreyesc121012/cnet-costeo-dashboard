@@ -64,8 +64,8 @@ COL_EMPLOYEE_CLASS = 8       # I
 COL_WEEK_RANGE = 10          # K, example: 03/01 - 09/01
 COL_RATE = 19                # T
 
-DAY_COL_START = 11           # L
-DAY_COL_END_EXCLUSIVE = 18   # R included
+DAY_COL_START = 15           # P = SAT (first daily cell in DATA)
+DAY_COL_END_EXCLUSIVE = 22   # V included = FRI
 DAY_HEADER_ROW = 3           # Excel row 4
 DATA_START_ROW = 4           # Excel row 5
 
