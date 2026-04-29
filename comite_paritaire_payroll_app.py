@@ -395,27 +395,45 @@ def find_input_sheet_name(excel_file: pd.ExcelFile):
     return None
 
 
+def normalize_week_range_key(value) -> str:
+    """
+    Normalizes FECHA / Week number text like:
+    03/01 - 09/01, 03/01-09/01, 03/01 – 09/01
+    so DATA column K and IMPUT column L can match exactly.
+    """
+    txt = clean_text(value)
+    txt = txt.replace("–", "-").replace("—", "-")
+    parts = [p.strip() for p in txt.split("-")]
+    if len(parts) >= 2:
+        return f"{parts[0]} - {parts[1]}".lower()
+    return txt.lower()
+
+
+# ============================================================
+# SPECIAL HOURS INPUT / IMPUT
+# ============================================================
+def find_input_sheet_name(excel_file: pd.ExcelFile):
+    for sheet_name in excel_file.sheet_names:
+        if normalize_text(sheet_name) in {"input", "imput"}:
+            return sheet_name
+    return None
+
+
 def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> dict:
     """
     Reads Input/Imput sheet.
 
-    Expected:
+    Expected columns:
     B = Employee
     I = Class
-    L = Date / FECHA
-    M = V
-    N = SD
-    O = H
-
-    V  -> Congé
-    H  -> Congé
-    SD -> Maladie
+    L = FECHA or Week range
+    M = V  -> Congé
+    N = SD -> Maladie
+    O = H  -> Congé Travaillé
 
     IMPORTANT:
-    The value in M/N/O is taken exactly as it appears.
-    Example: if Input says V = 8, Congé = 8.
-             if Input says V = 5, Congé = 5.
-    It is NOT multiplied by the number of V letters in DATA.
+    The match is employee + class + week range.
+    It DOES NOT ignore class, because Antony Class A and Class B can have different hours.
     """
 
     sheet_name = find_input_sheet_name(excel_file)
@@ -423,6 +441,7 @@ def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> d
     if sheet_name is None:
         return {
             "by_employee": {},
+            "by_week_range": {},
             "sheet_found": None,
             "rows_found": 0,
         }
@@ -432,11 +451,13 @@ def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> d
     except Exception:
         return {
             "by_employee": {},
+            "by_week_range": {},
             "sheet_found": sheet_name,
             "rows_found": 0,
         }
 
     by_employee = {}
+    by_week_range = {}
     rows_found = 0
 
     for idx in range(1, input_raw.shape[0]):
@@ -444,12 +465,12 @@ def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> d
 
         employee = clean_text(row.iloc[INPUT_COL_EMPLOYEE_NAME]) if len(row) > INPUT_COL_EMPLOYEE_NAME else ""
         employee_class = normalize_class(row.iloc[INPUT_COL_EMPLOYEE_CLASS]) if len(row) > INPUT_COL_EMPLOYEE_CLASS else DEFAULT_CLASS_WHEN_NO_CLASS
-        date_value = parse_input_date(row.iloc[INPUT_COL_DATE] if len(row) > INPUT_COL_DATE else pd.NaT)
+        fecha_raw = row.iloc[INPUT_COL_DATE] if len(row) > INPUT_COL_DATE else ""
+        fecha_key = normalize_week_range_key(fecha_raw)
+        date_value = parse_input_date(fecha_raw)
 
-        if not employee or pd.isna(date_value):
+        if not employee:
             continue
-
-        date_key = pd.Timestamp(date_value).normalize()
 
         v_hours = pd.to_numeric(row.iloc[INPUT_COL_V], errors="coerce") if len(row) > INPUT_COL_V else 0.0
         sd_hours = pd.to_numeric(row.iloc[INPUT_COL_SD], errors="coerce") if len(row) > INPUT_COL_SD else 0.0
@@ -464,52 +485,71 @@ def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> d
 
         rows_found += 1
 
-        key = (
-            normalize_text(employee),
-            normalize_text(employee_class),
-            date_key,
-        )
+        values = {"V": v_hours, "SD": sd_hours, "H": h_hours}
 
-        if key not in by_employee:
-            by_employee[key] = {
-                "V": 0.0,
-                "SD": 0.0,
-                "H": 0.0,
-            }
+        # Main matching method: Employee + Class + FECHA text / week range.
+        if fecha_key:
+            key_range = (
+                normalize_text(employee),
+                normalize_text(employee_class),
+                fecha_key,
+            )
+            if key_range not in by_week_range:
+                by_week_range[key_range] = {"V": 0.0, "SD": 0.0, "H": 0.0}
+            by_week_range[key_range]["V"] += values["V"]
+            by_week_range[key_range]["SD"] += values["SD"]
+            by_week_range[key_range]["H"] += values["H"]
 
-        by_employee[key]["V"] += v_hours
-        by_employee[key]["SD"] += sd_hours
-        by_employee[key]["H"] += h_hours
+        # Backup matching method: Employee + Class + parsed date.
+        if pd.notna(date_value):
+            date_key = pd.Timestamp(date_value).normalize()
+            key_date = (
+                normalize_text(employee),
+                normalize_text(employee_class),
+                date_key,
+            )
+            if key_date not in by_employee:
+                by_employee[key_date] = {"V": 0.0, "SD": 0.0, "H": 0.0}
+            by_employee[key_date]["V"] += values["V"]
+            by_employee[key_date]["SD"] += values["SD"]
+            by_employee[key_date]["H"] += values["H"]
 
     return {
         "by_employee": by_employee,
+        "by_week_range": by_week_range,
         "sheet_found": sheet_name,
         "rows_found": rows_found,
     }
 
 
-def get_special_hours(special_lookup: dict, employee: str, employee_class: str, lookup_date, code: str) -> float:
+def get_special_hours(special_lookup: dict, employee: str, employee_class: str, lookup_value, code: str) -> float:
     """
-    Get V, SD, or H hours from INPUT/IMPUT.
+    Gets V, SD, or H hours from INPUT/IMPUT.
 
-    First tries employee + class + date.
-    Then tries employee + date, ignoring class, to fix hidden spaces or class text mismatch.
+    Priority:
+    1) employee + class + week range text, for example 03/01 - 09/01
+    2) employee + class + parsed date
+
+    It NEVER ignores class. This avoids Class A taking Class B hours.
     """
-    date_key = pd.Timestamp(lookup_date).normalize()
     employee_key = normalize_text(employee)
     class_key = normalize_text(employee_class)
+
+    by_week_range = special_lookup.get("by_week_range", {})
+    week_key = normalize_week_range_key(lookup_value)
+    exact_range_key = (employee_key, class_key, week_key)
+    if exact_range_key in by_week_range:
+        return float(by_week_range[exact_range_key].get(code, 0.0))
+
     by_employee = special_lookup.get("by_employee", {})
+    parsed_date = parse_input_date(lookup_value)
+    if pd.notna(parsed_date):
+        exact_date_key = (employee_key, class_key, pd.Timestamp(parsed_date).normalize())
+        if exact_date_key in by_employee:
+            return float(by_employee[exact_date_key].get(code, 0.0))
 
-    exact_key = (employee_key, class_key, date_key)
-    if exact_key in by_employee:
-        return float(by_employee[exact_key].get(code, 0.0))
+    return 0.0
 
-    total = 0.0
-    for (emp_k, cls_k, dt_k), values in by_employee.items():
-        if emp_k == employee_key and dt_k == date_key:
-            total += float(values.get(code, 0.0))
-
-    return total
 # ============================================================
 # DATA LOADING
 # ============================================================
@@ -579,8 +619,9 @@ def load_selected_excel_files_regular(
                 if pd.isna(week_start_from_excel):
                     continue
 
-                # DATA 03/01 - 09/01 must look up V / SD / H in INPUT FECHA 10-Jan.
-                special_lookup_date = week_start_from_excel + pd.Timedelta(days=7)
+                # DATA column K must match INPUT/IMPUT column L (FECHA / Week range).
+                # Example: DATA K = 03/01 - 09/01 matches IMPUT L = 03/01 - 09/01.
+                special_lookup_date = week_range_text
 
                 # Read all L:R cells for this DATA row.
                 # We calculate regular numeric hours as the sum of numeric cells ONLY.
