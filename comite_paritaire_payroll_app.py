@@ -634,27 +634,36 @@ def load_selected_excel_files_regular(
                     continue
 
                 all_rows.append({
-                    "source_month_folder": source_month,
-                    "source_file": file_name,
-                    "excel_week_range": week_range_text,
-                    "excel_week_start": week_start_from_excel,
-                    "excel_week_end": week_end_from_excel,
-                    "special_lookup_date": special_lookup_date,
-                    "date": week_start_from_excel,
-                    "vendor_company": vendor,
-                    "employee": employee,
-                    "employee_class": employee_class,
-                    "type_of_work": TYPE_OF_WORK_DEFAULT,
-                    "day": "Week Total",
-                    "excel_cell_value": " | ".join([clean_text(v) for v in week_values if clean_text(v)]),
-                    "hours": total_hours_for_week,
-                    "hourly_rate": rate,
-                    "regular_hours": regular_hours,
-                    "suppl_hours": suppl_hours,
-                    "conge_hours": conge_hours,
-                    "conge_trav_hours": conge_trav_hours,
-                    "maladie_hours": maladie_hours,
-                })
+    "source_month_folder": source_month,
+    "source_file": file_name,
+    "excel_week_range": week_range_text,
+    "excel_week_start": week_start_from_excel,
+    "excel_week_end": week_end_from_excel,
+    "special_lookup_date": special_lookup_date,
+    "date": work_date,
+    "vendor_company": vendor,
+    "employee": employee,
+    "employee_class": employee_class,
+    "type_of_work": TYPE_OF_WORK_DEFAULT,
+    "day": day_name,
+    "excel_cell_value": cell_text if cell_text else cell_value,
+
+    # Total del día
+    "hours": total_hours_for_day,
+
+    # IMPORTANTE: regular solo debe ser número normal, NO V/SD/H
+    "regular_hours": regular_hours,
+
+    # V y H van aquí
+    "conge_hours": conge_hours,
+
+    # SD va aquí
+    "maladie_hours": maladie_hours,
+
+    "suppl_hours": suppl_hours,
+    "conge_trav_hours": conge_trav_hours,
+    "hourly_rate": rate,
+})
 
         except Exception as e:
             st.warning(f"Could not read {file_name}: {e}")
