@@ -464,37 +464,39 @@ def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> d
 
         rows_found += 1
 
-        key = (
+        values = {"V": v_hours, "SD": sd_hours, "H": h_hours}
+
+        # Exact match: employee + class + date
+        key_exact = (
             normalize_text(employee),
             normalize_text(employee_class),
             date_key,
         )
 
-        if key not in by_employee:
-            by_employee[key] = {
-                "V": 0.0,
-                "SD": 0.0,
-                "H": 0.0,
-            }
+        if key_exact not in by_employee:
+            by_employee[key_exact] = {"V": 0.0, "SD": 0.0, "H": 0.0}
 
-        by_employee[key]["V"] += v_hours
-        by_employee[key]["SD"] += sd_hours
-        by_employee[key]["H"] += h_hours
+        for k in ["V", "SD", "H"]:
+            by_employee[key_exact][k] += values[k]
 
-        # Fallback 1: match employee + date, ignoring class.
-        key_employee_date = (normalize_text(employee), date_key)
+        # Fallback match: employee + date
+        key_employee_date = (
+            normalize_text(employee),
+            date_key,
+        )
+
         if key_employee_date not in by_employee_date:
             by_employee_date[key_employee_date] = {"V": 0.0, "SD": 0.0, "H": 0.0}
-        by_employee_date[key_employee_date]["V"] += v_hours
-        by_employee_date[key_employee_date]["SD"] += sd_hours
-        by_employee_date[key_employee_date]["H"] += h_hours
 
-        # Fallback 2: match only date. Used only if exact employee/class is not found.
+        for k in ["V", "SD", "H"]:
+            by_employee_date[key_employee_date][k] += values[k]
+
+        # Diagnostic fallback: date only
         if date_key not in by_date:
             by_date[date_key] = {"V": 0.0, "SD": 0.0, "H": 0.0}
-        by_date[date_key]["V"] += v_hours
-        by_date[date_key]["SD"] += sd_hours
-        by_date[date_key]["H"] += h_hours
+
+        for k in ["V", "SD", "H"]:
+            by_date[date_key][k] += values[k]
 
     return {
         "by_employee": by_employee,
@@ -508,22 +510,27 @@ def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> d
 def get_special_hours(special_lookup: dict, employee: str, employee_class: str, lookup_date, code: str) -> float:
     date_key = pd.Timestamp(lookup_date).normalize()
 
-    # 1) Exact match: employee + class + date
-    exact_key = (normalize_text(employee), normalize_text(employee_class), date_key)
+    # First try exact match: employee + class + date.
+    key_exact = (
+        normalize_text(employee),
+        normalize_text(employee_class),
+        date_key,
+    )
+
     by_employee = special_lookup.get("by_employee", {})
-    if exact_key in by_employee:
-        return float(by_employee[exact_key].get(code, 0.0))
+    if key_exact in by_employee:
+        return float(by_employee[key_exact].get(code, 0.0))
 
-    # 2) Fallback: employee + date, ignoring class
-    employee_date_key = (normalize_text(employee), date_key)
+    # Fallback: employee + date.
+    # This helps when Class text is slightly different between DATA and Input/Imput.
+    key_employee_date = (
+        normalize_text(employee),
+        date_key,
+    )
+
     by_employee_date = special_lookup.get("by_employee_date", {})
-    if employee_date_key in by_employee_date:
-        return float(by_employee_date[employee_date_key].get(code, 0.0))
-
-    # 3) Last fallback: date only
-    by_date = special_lookup.get("by_date", {})
-    if date_key in by_date:
-        return float(by_date[date_key].get(code, 0.0))
+    if key_employee_date in by_employee_date:
+        return float(by_employee_date[key_employee_date].get(code, 0.0))
 
     return 0.0
 
@@ -575,8 +582,6 @@ def load_selected_excel_files_regular(
                 "day_headers_L_R": [clean_text(x) for x in day_headers],
                 "input_sheet_found": special_hours_lookup.get("sheet_found"),
                 "input_rows_found": special_hours_lookup.get("rows_found", 0),
-                "input_exact_keys": len(special_hours_lookup.get("by_employee", {})),
-                "input_employee_date_keys": len(special_hours_lookup.get("by_employee_date", {})),
             })
 
             for _, r in data.iterrows():
@@ -624,44 +629,59 @@ def load_selected_excel_files_regular(
                 maladie_hours = 0.0
 
                 # IMPORTANT:
-                # If V appears once or multiple times in DATA, the value is taken once from INPUT/IMPUT.
-                # It is NOT multiplied by how many V letters appear in the week.
-                if "V" in week_letters:
-                    conge_hours += get_special_hours(
-                        special_hours_lookup,
-                        employee,
-                        employee_class,
-                        special_lookup_date,
-                        "V",
-                    )
+                # If V / H / SD appears once or multiple times in DATA, the value is taken once from INPUT/IMPUT.
+                # It is NOT multiplied by how many V / H / SD letters appear in the week.
+                #
+                # Some Excel files display V / H / SD visually, but pandas may read the underlying numeric value.
+                # In that case the special value can accidentally be included in regular_hours.
+                # The correction below moves that value out of regular_hours and into Congé/Maladie.
+                v_from_input = get_special_hours(
+                    special_hours_lookup,
+                    employee,
+                    employee_class,
+                    special_lookup_date,
+                    "V",
+                )
+                h_from_input = get_special_hours(
+                    special_hours_lookup,
+                    employee,
+                    employee_class,
+                    special_lookup_date,
+                    "H",
+                )
+                sd_from_input = get_special_hours(
+                    special_hours_lookup,
+                    employee,
+                    employee_class,
+                    special_lookup_date,
+                    "SD",
+                )
 
-                if "H" in week_letters:
-                    conge_hours += get_special_hours(
-                        special_hours_lookup,
-                        employee,
-                        employee_class,
-                        special_lookup_date,
-                        "H",
-                    )
+                has_v_marker = "V" in week_letters or v_from_input > 0
+                has_h_marker = "H" in week_letters or h_from_input > 0
+                has_sd_marker = "SD" in week_letters or sd_from_input > 0
 
-                if "SD" in week_letters:
-                    maladie_hours += get_special_hours(
-                        special_hours_lookup,
-                        employee,
-                        employee_class,
-                        special_lookup_date,
-                        "SD",
-                    )
+                if has_v_marker:
+                    conge_hours += v_from_input
 
-                # IMPORTANT FIX:
-                # Some Excel files visually show V / SD / H in DATA, but pandas may read
-                # the underlying cached numeric value from the cell. In that case, the
-                # special hours can get incorrectly included inside regular_hours.
-                # Example: Antony De Jesus shows regular 10 because 8 congé was included
-                # inside regular. Correct result: regular 2 + congé 8.
-                special_total = conge_hours + conge_trav_hours + maladie_hours
-                if special_total > 0 and regular_hours >= special_total:
-                    regular_hours = max(0.0, regular_hours - special_total)
+                    # If DATA did not read the V as text, it may have read the value as numeric.
+                    # Example: regular_hours becomes 10 instead of 2 because it included the 8 from Input.
+                    if "V" not in week_letters and v_from_input > 0 and regular_hours >= v_from_input:
+                        regular_hours -= v_from_input
+
+                if has_h_marker:
+                    conge_hours += h_from_input
+
+                    if "H" not in week_letters and h_from_input > 0 and regular_hours >= h_from_input:
+                        regular_hours -= h_from_input
+
+                if has_sd_marker:
+                    maladie_hours += sd_from_input
+
+                    if "SD" not in week_letters and sd_from_input > 0 and regular_hours >= sd_from_input:
+                        regular_hours -= sd_from_input
+
+                regular_hours = max(0.0, regular_hours)
 
                 total_hours_for_week = (
                     regular_hours
