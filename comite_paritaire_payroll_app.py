@@ -16,11 +16,11 @@ st.set_page_config(page_title="CNET Regular Hours Report", layout="wide")
 
 LOGO_PATH = "cnet_logo.png"
 
-top_left, top_right = st.columns([1, 4])
-with top_left:
+col_logo, col_title = st.columns([1, 4])
+with col_logo:
     if os.path.exists(LOGO_PATH):
         st.image(LOGO_PATH, width=220)
-with top_right:
+with col_title:
     st.title("CNET Regular Hours Report")
 
 # ============================================================
@@ -44,6 +44,7 @@ LOGIN_HINT = str(st.secrets.get("LOGIN_HINT", "")).strip()
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 SCOPES = ["User.Read", "Files.Read.All", "Sites.Read.All"]
+CACHE_FILE = "token_cache.json"
 
 # ============================================================
 # BUSINESS RULES
@@ -52,30 +53,46 @@ SHEET_DATA = "DATA"
 TYPE_OF_WORK_DEFAULT = "REGULAR"
 DEFAULT_CLASS_WHEN_NO_CLASS = "Class A"
 
+# Tu reporte parte del 04-Jan-2026 y va por semana.
 FIRST_COMMITTEE_WEEK_START_DEFAULT = pd.Timestamp("2026-01-04")
 REER_PER_HOUR = 0.45
 OVERTIME_WEEKLY_THRESHOLD = 40.0
 OVERTIME_MULTIPLIER = 1.5
+FALLBACK_YEAR = 2026
 
-# DATA sheet layout
-COL_VENDOR_COMPANY = 0       # A
-COL_EMPLOYEE_NAME = 1        # B
-COL_EMPLOYEE_CLASS = 8       # I
-COL_WEEK_RANGE = 10          # K, example: 03/01 - 09/01
-COL_RATE = 19                # T
+# ============================================================
+# DATA SHEET LAYOUT
+# ============================================================
+# Columnas en DATA con index 0-based.
+COL_VENDOR_COMPANY = 0       # A = Company Pay
+COL_EMPLOYEE_NAME = 1        # B = Name
+COL_EMPLOYEE_CLASS = 8       # I = Classe
+COL_WEEK_RANGE = 10          # K = Week number, ejemplo: 03/01 - 09/01
+COL_RATE = 19                # T = Hourly rate
 
-DAY_COL_START = 15           # P = SAT (first daily cell in DATA)
-DAY_COL_END_EXCLUSIVE = 22   # V included = FRI
+# RANGO DIARIO EN DATA: L:R
+# L = SA, M = SU, N = MO, O = TUE, P = WED, Q = TH, R = FRI
+DAY_COL_START = 11           # L
+DAY_COL_END_EXCLUSIVE = 18   # R included
 DAY_HEADER_ROW = 3           # Excel row 4
 DATA_START_ROW = 4           # Excel row 5
 
-# INPUT / IMPUT sheet layout
+# ============================================================
+# INPUT / IMPUT SHEET LAYOUT
+# ============================================================
+# Hoja INPUT/IMPUT:
+# B = employee
+# I = class
+# L = FECHA / week range / fecha del periodo
+# M = V  -> Congé
+# N = SD -> Maladie
+# O = H  -> Congé Travaillé
 INPUT_COL_EMPLOYEE_NAME = 1   # B
 INPUT_COL_EMPLOYEE_CLASS = 8  # I
 INPUT_COL_DATE = 11           # L = FECHA
-INPUT_COL_V = 12              # M = V
-INPUT_COL_SD = 13             # N = SD
-INPUT_COL_H = 14              # O = H
+INPUT_COL_V = 12              # M = V = Congé
+INPUT_COL_SD = 13             # N = SD = Maladie
+INPUT_COL_H = 14              # O = H = Congé Travaillé
 
 ROW_ORDER = [
     ("Régulier", "regular_hours"),
@@ -86,18 +103,8 @@ ROW_ORDER = [
     ("Maladie", "maladie_hours"),
 ]
 
-DAY_MAP = {
-    "SA": "Saturday", "SAT": "Saturday", "SATURDAY": "Saturday", "SAM": "Saturday", "SAMEDI": "Saturday",
-    "SU": "Sunday", "SUN": "Sunday", "SUNDAY": "Sunday", "DIM": "Sunday", "DIMANCHE": "Sunday",
-    "MO": "Monday", "MON": "Monday", "MONDAY": "Monday", "LUN": "Monday", "LUNDI": "Monday",
-    "TU": "Tuesday", "TUE": "Tuesday", "TUESDAY": "Tuesday", "MAR": "Tuesday", "MARDI": "Tuesday",
-    "WE": "Wednesday", "WED": "Wednesday", "WEDNESDAY": "Wednesday", "MER": "Wednesday", "MERCREDI": "Wednesday",
-    "TH": "Thursday", "THU": "Thursday", "THURSDAY": "Thursday", "JEU": "Thursday", "JEUDI": "Thursday",
-    "FR": "Friday", "FRI": "Friday", "FRIDAY": "Friday", "VEN": "Friday", "VENDREDI": "Friday",
-}
-
 # ============================================================
-# HELPERS
+# TEXT / DATE HELPERS
 # ============================================================
 def normalize_text(s: str) -> str:
     s = "" if s is None else str(s)
@@ -160,85 +167,95 @@ def normalize_class(x) -> str:
     return txt
 
 
-def parse_week_range_cell(value, fallback_year=2026):
+def normalize_week_range_text(value) -> str:
+    txt = clean_text(value)
+    txt = txt.replace("–", "-").replace("—", "-")
+    txt = txt.replace(" ", "")
+    return txt
+
+
+def parse_single_day_month(value, fallback_year=FALLBACK_YEAR):
+    """Parsea valores como 03-Jan, 03/01, 10-Jan, datetime, etc."""
+    if pd.isna(value):
+        return pd.NaT
+
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return pd.Timestamp(value).normalize()
+
+    txt = clean_text(value)
+    if not txt:
+        return pd.NaT
+
+    txt = txt.replace("–", "-").replace("—", "-")
+
+    # Si viene con hora o fecha normal.
+    parsed = pd.to_datetime(txt, errors="coerce", dayfirst=True)
+    if pd.notna(parsed):
+        parsed = pd.Timestamp(parsed)
+        if parsed.year < 2000:
+            parsed = pd.Timestamp(year=fallback_year, month=parsed.month, day=parsed.day)
+        return parsed.normalize()
+
+    # 03-Jan + year
+    parsed = pd.to_datetime(f"{txt}-{fallback_year}", errors="coerce", dayfirst=True)
+    if pd.notna(parsed):
+        return pd.Timestamp(parsed).normalize()
+
+    # 03/01 + year, day/month
+    parsed = pd.to_datetime(f"{txt}/{fallback_year}", errors="coerce", dayfirst=True)
+    if pd.notna(parsed):
+        return pd.Timestamp(parsed).normalize()
+
+    return pd.NaT
+
+
+def parse_week_range_cell(value, fallback_year=FALLBACK_YEAR):
+    """Parsea K = 03/01 - 09/01 o 03-Jan - 09-Jan."""
     txt = clean_text(value)
     if not txt:
         return pd.NaT, pd.NaT
 
     txt = txt.replace("–", "-").replace("—", "-")
     parts = [p.strip() for p in txt.split("-")]
-
     if len(parts) < 2:
         return pd.NaT, pd.NaT
 
-    start_txt = parts[0]
-    end_txt = parts[1]
+    start_dt = parse_single_day_month(parts[0], fallback_year)
+    end_dt = parse_single_day_month(parts[1], fallback_year)
 
-    start_dt = pd.to_datetime(
-        f"{start_txt}/{fallback_year}",
-        format="%d/%m/%Y",
-        errors="coerce",
-    )
-    end_dt = pd.to_datetime(
-        f"{end_txt}/{fallback_year}",
-        format="%d/%m/%Y",
-        errors="coerce",
-    )
+    # Corrección para rangos que cruzan año, si aplica.
+    if pd.notna(start_dt) and pd.notna(end_dt) and end_dt < start_dt:
+        end_dt = end_dt + pd.DateOffset(years=1)
 
     return start_dt, end_dt
 
 
-def parse_input_date(value, fallback_year=2026):
-    """
-    Robust parser for INPUT/IMPUT FECHA.
-    Forces year 2026 when text like 10-Jan has no year.
-    """
-    if pd.isna(value):
-        return pd.NaT
-
-    if isinstance(value, (pd.Timestamp, datetime)):
-        parsed = pd.Timestamp(value)
-        if parsed.year < 2000:
-            parsed = pd.Timestamp(year=fallback_year, month=parsed.month, day=parsed.day)
-        return parsed.normalize()
-
+def parse_input_date_or_range(value, fallback_year=FALLBACK_YEAR):
+    """Devuelve date_key y week_range_key. Soporta FECHA como fecha única o rango."""
     txt = clean_text(value)
     if not txt:
-        return pd.NaT
+        return pd.NaT, ""
 
-    txt_norm = txt.replace("–", "-").replace("—", "-").strip()
-    has_year = any(str(y) in txt_norm for y in range(2000, 2051))
+    if "-" in txt or "–" in txt or "—" in txt:
+        start_dt, end_dt = parse_week_range_cell(txt, fallback_year)
+        if pd.notna(start_dt) and pd.notna(end_dt):
+            return start_dt, normalize_week_range_text(txt)
 
-    # If the FECHA cell says 10-Jan, 17-Jan, etc., force the payroll year.
-    if not has_year:
-        for candidate in (f"{txt_norm}-{fallback_year}", f"{txt_norm}/{fallback_year}"):
-            parsed = pd.to_datetime(candidate, dayfirst=True, errors="coerce")
-            if pd.notna(parsed):
-                return pd.Timestamp(parsed).normalize()
+    dt = parse_single_day_month(value, fallback_year)
+    return dt, ""
 
-    parsed = pd.to_datetime(txt_norm, dayfirst=True, errors="coerce")
-    if pd.notna(parsed):
-        parsed = pd.Timestamp(parsed)
-        if not has_year or parsed.year < 2000:
-            parsed = pd.Timestamp(year=fallback_year, month=parsed.month, day=parsed.day)
-        return parsed.normalize()
 
-    return pd.NaT
 def assign_committee_week(date_value: pd.Timestamp, start_date: pd.Timestamp, num_weeks: int = 24):
     d = pd.to_datetime(date_value)
-
     if pd.isna(d):
         return None, None
 
     for i in range(num_weeks):
         week_start = start_date + timedelta(days=i * 7)
         week_end = week_start + timedelta(days=6)
-
         if week_start <= d <= week_end:
             return week_start, week_end
-
     return None, None
-
 
 # ============================================================
 # QUERY PARAM HELPERS
@@ -247,20 +264,14 @@ def get_query_params_compat() -> dict:
     try:
         qp = st.query_params
         out = {}
-
         for k in qp.keys():
             v = qp.get(k)
             out[k] = v[0] if isinstance(v, list) and v else str(v) if v is not None else ""
-
         return out
-
     except Exception:
         try:
             qp = st.experimental_get_query_params()
-            return {
-                k: (v[0] if isinstance(v, list) and v else str(v))
-                for k, v in qp.items()
-            }
+            return {k: (v[0] if isinstance(v, list) and v else str(v)) for k, v in qp.items()}
         except Exception:
             return {}
 
@@ -274,36 +285,25 @@ def clear_query_params_compat():
         except Exception:
             pass
 
-
 # ============================================================
-# MSAL / AUTH
+# MSAL / AUTH WITH CACHE
 # ============================================================
-CACHE_FILE = "token_cache.json"
-
-def load_token_cache():
+def load_cache():
     cache = msal.SerializableTokenCache()
-    try:
-        if os.path.exists(CACHE_FILE):
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r") as f:
                 cache.deserialize(f.read())
-    except Exception:
-        pass
+        except Exception:
+            pass
     return cache
 
-def save_token_cache(cache):
-    try:
-        if cache.has_state_changed:
-            with open(CACHE_FILE, "w", encoding="utf-8") as f:
-                f.write(cache.serialize())
-    except Exception:
-        pass
 
-def clear_token_cache():
-    try:
-        if os.path.exists(CACHE_FILE):
-            os.remove(CACHE_FILE)
-    except Exception:
-        pass
+def save_cache(cache):
+    if cache.has_state_changed:
+        with open(CACHE_FILE, "w") as f:
+            f.write(cache.serialize())
+
 
 def get_msal_app(cache):
     return msal.ConfidentialClientApplication(
@@ -320,10 +320,8 @@ def get_me(access_token: str) -> dict:
         headers={"Authorization": f"Bearer {access_token}"},
         timeout=60,
     )
-
     if r.status_code != 200:
         raise RuntimeError(f"Graph /me error {r.status_code}\n{r.text}")
-
     return r.json()
 
 
@@ -334,28 +332,20 @@ def get_user_email(me: dict) -> str:
 def is_allowed_user(me: dict) -> bool:
     if not ALLOWED_DOMAIN:
         return True
-
     email = get_user_email(me)
     return email.endswith(f"@{ALLOWED_DOMAIN}")
-
 
 # ============================================================
 # GRAPH / SHAREPOINT HELPERS
 # ============================================================
 def graph_get(url: str, access_token: str) -> requests.Response:
-    return requests.get(
-        url,
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=60,
-    )
+    return requests.get(url, headers={"Authorization": f"Bearer {access_token}"}, timeout=60)
 
 
 def graph_get_json(url: str, access_token: str) -> dict:
     r = graph_get(url, access_token)
-
     if r.status_code != 200:
         raise RuntimeError(f"Graph error {r.status_code}\n{r.text}")
-
     return r.json()
 
 
@@ -369,49 +359,40 @@ def resolve_shared_link(access_token: str, shared_url: str) -> dict:
     share_id = make_share_id(shared_url)
     meta_url = f"https://graph.microsoft.com/v1.0/shares/{share_id}/driveItem"
     meta = graph_get(meta_url, access_token)
-
     if meta.status_code != 200:
         raise RuntimeError(
             f"Error resolving shared link: {meta.status_code}\n{meta.text}\n\n"
             "TIP: Use SharePoint/OneDrive → Share → Copy link within your organization."
         )
-
     return meta.json()
 
 
 def download_item_bytes(access_token: str, drive_id: str, item_id: str) -> bytes:
     content_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
     r = graph_get(content_url, access_token)
-
     if r.status_code != 200:
         raise RuntimeError(f"Error downloading file: {r.status_code}\n{r.text}")
-
     return r.content
 
 
 def list_children_all(access_token: str, drive_id: str, folder_item_id: str):
     url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{folder_item_id}/children?$top=200"
     all_items = []
-
     while url:
         data = graph_get_json(url, access_token)
         all_items.extend(data.get("value", []))
         url = data.get("@odata.nextLink")
-
     return all_items
 
 
 def is_excel_name(name: str) -> bool:
     n = (name or "").lower()
-    return not n.startswith("~$") and (
-        n.endswith(".xlsx") or n.endswith(".xlsm") or n.endswith(".xls")
-    )
+    return not n.startswith("~$") and (n.endswith(".xlsx") or n.endswith(".xlsm") or n.endswith(".xls"))
 
 
 def is_folder_item(item: dict) -> bool:
     return "folder" in item
 
-
 # ============================================================
 # SPECIAL HOURS INPUT / IMPUT
 # ============================================================
@@ -422,68 +403,38 @@ def find_input_sheet_name(excel_file: pd.ExcelFile):
     return None
 
 
-def normalize_week_range_key(value) -> str:
-    """
-    Normalizes FECHA / Week number text like:
-    03/01 - 09/01, 03/01-09/01, 03/01 – 09/01
-    so DATA column K and IMPUT column L can match exactly.
-    """
-    txt = clean_text(value)
-    txt = txt.replace("–", "-").replace("—", "-")
-    parts = [p.strip() for p in txt.split("-")]
-    if len(parts) >= 2:
-        return f"{parts[0]} - {parts[1]}".lower()
-    return txt.lower()
-
-
-# ============================================================
-# SPECIAL HOURS INPUT / IMPUT
-# ============================================================
-def find_input_sheet_name(excel_file: pd.ExcelFile):
-    for sheet_name in excel_file.sheet_names:
-        if normalize_text(sheet_name) in {"input", "imput"}:
-            return sheet_name
-    return None
+def add_lookup_value(bucket: dict, key: tuple, code: str, value: float):
+    if key not in bucket:
+        bucket[key] = {"V": 0.0, "SD": 0.0, "H": 0.0}
+    bucket[key][code] += float(value or 0.0)
 
 
 def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> dict:
     """
-    Reads Input/Imput sheet.
+    Lee la hoja INPUT/IMPUT.
 
-    Expected columns:
-    B = Employee
-    I = Class
-    L = FECHA or Week range
-    M = V  -> Congé
-    N = SD -> Maladie
-    O = H  -> Congé Travaillé
+    Columnas:
+      B = employee
+      I = class
+      L = FECHA / week range
+      M = V  -> Congé
+      N = SD -> Maladie
+      O = H  -> Congé Travaillé
 
-    IMPORTANT:
-    The match is employee + class + week range.
-    It DOES NOT ignore class, because Antony Class A and Class B can have different hours.
+    IMPORTANTE:
+      Solo se usa si DATA L:R tiene la letra V, SD o H.
+      No multiplica por cantidad de letras. Toma una vez el valor de INPUT/IMPUT.
     """
-
     sheet_name = find_input_sheet_name(excel_file)
-
     if sheet_name is None:
-        return {
-            "by_employee": {},
-            "by_week_range": {},
-            "sheet_found": None,
-            "rows_found": 0,
-        }
+        return {"by_date": {}, "by_week_range": {}, "sheet_found": None, "rows_found": 0}
 
     try:
         input_raw = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, header=None)
     except Exception:
-        return {
-            "by_employee": {},
-            "by_week_range": {},
-            "sheet_found": sheet_name,
-            "rows_found": 0,
-        }
+        return {"by_date": {}, "by_week_range": {}, "sheet_found": sheet_name, "rows_found": 0}
 
-    by_employee = {}
+    by_date = {}
     by_week_range = {}
     rows_found = 0
 
@@ -492,9 +443,8 @@ def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> d
 
         employee = clean_text(row.iloc[INPUT_COL_EMPLOYEE_NAME]) if len(row) > INPUT_COL_EMPLOYEE_NAME else ""
         employee_class = normalize_class(row.iloc[INPUT_COL_EMPLOYEE_CLASS]) if len(row) > INPUT_COL_EMPLOYEE_CLASS else DEFAULT_CLASS_WHEN_NO_CLASS
-        fecha_raw = row.iloc[INPUT_COL_DATE] if len(row) > INPUT_COL_DATE else ""
-        fecha_key = normalize_week_range_key(fecha_raw)
-        date_value = parse_input_date(fecha_raw)
+        date_cell = row.iloc[INPUT_COL_DATE] if len(row) > INPUT_COL_DATE else pd.NaT
+        date_key, week_range_key = parse_input_date_or_range(date_cell)
 
         if not employee:
             continue
@@ -511,82 +461,71 @@ def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> d
             continue
 
         rows_found += 1
+        emp_key = (normalize_text(employee), normalize_text(employee_class))
 
-        values = {"V": v_hours, "SD": sd_hours, "H": h_hours}
+        if pd.notna(date_key):
+            dk = pd.Timestamp(date_key).normalize()
+            if v_hours:
+                add_lookup_value(by_date, emp_key + (dk,), "V", v_hours)
+            if sd_hours:
+                add_lookup_value(by_date, emp_key + (dk,), "SD", sd_hours)
+            if h_hours:
+                add_lookup_value(by_date, emp_key + (dk,), "H", h_hours)
 
-        # Main matching method: Employee + Class + FECHA text / week range.
-        if fecha_key:
-            key_range = (
-                normalize_text(employee),
-                normalize_text(employee_class),
-                fecha_key,
-            )
-            if key_range not in by_week_range:
-                by_week_range[key_range] = {"V": 0.0, "SD": 0.0, "H": 0.0}
-            by_week_range[key_range]["V"] += values["V"]
-            by_week_range[key_range]["SD"] += values["SD"]
-            by_week_range[key_range]["H"] += values["H"]
-
-        # Backup matching method: Employee + Class + parsed date.
-        if pd.notna(date_value):
-            date_key = pd.Timestamp(date_value).normalize()
-            key_date = (
-                normalize_text(employee),
-                normalize_text(employee_class),
-                date_key,
-            )
-            if key_date not in by_employee:
-                by_employee[key_date] = {"V": 0.0, "SD": 0.0, "H": 0.0}
-            by_employee[key_date]["V"] += values["V"]
-            by_employee[key_date]["SD"] += values["SD"]
-            by_employee[key_date]["H"] += values["H"]
+        if week_range_key:
+            if v_hours:
+                add_lookup_value(by_week_range, emp_key + (week_range_key,), "V", v_hours)
+            if sd_hours:
+                add_lookup_value(by_week_range, emp_key + (week_range_key,), "SD", sd_hours)
+            if h_hours:
+                add_lookup_value(by_week_range, emp_key + (week_range_key,), "H", h_hours)
 
     return {
-        "by_employee": by_employee,
+        "by_date": by_date,
         "by_week_range": by_week_range,
         "sheet_found": sheet_name,
         "rows_found": rows_found,
     }
 
 
-def get_special_hours(special_lookup: dict, employee: str, employee_class: str, lookup_value, code: str) -> float:
+def get_special_hours(special_lookup: dict, employee: str, employee_class: str, week_range_text, week_start, code: str) -> float:
     """
-    Gets V, SD, or H hours from INPUT/IMPUT.
-
-    Priority:
-    1) employee + class + week range text, for example 03/01 - 09/01
-    2) employee + class + parsed date
-
-    It NEVER ignores class. This avoids Class A taking Class B hours.
+    Busca las horas en INPUT/IMPUT por empleado + clase.
+    Prioridad:
+      1) Coincidir con week range de DATA columna K.
+      2) Coincidir con la fecha inicial de la semana de DATA.
+      3) Coincidir con cualquier fecha dentro de la semana DATA L:R.
     """
-    employee_key = normalize_text(employee)
-    class_key = normalize_text(employee_class)
+    emp_key = (normalize_text(employee), normalize_text(employee_class))
+    week_key = normalize_week_range_text(week_range_text)
 
-    by_week_range = special_lookup.get("by_week_range", {})
-    week_key = normalize_week_range_key(lookup_value)
-    exact_range_key = (employee_key, class_key, week_key)
-    if exact_range_key in by_week_range:
-        return float(by_week_range[exact_range_key].get(code, 0.0))
+    by_week = special_lookup.get("by_week_range", {})
+    if week_key and emp_key + (week_key,) in by_week:
+        return float(by_week[emp_key + (week_key,)].get(code, 0.0))
 
-    by_employee = special_lookup.get("by_employee", {})
-    parsed_date = parse_input_date(lookup_value)
-    if pd.notna(parsed_date):
-        exact_date_key = (employee_key, class_key, pd.Timestamp(parsed_date).normalize())
-        if exact_date_key in by_employee:
-            return float(by_employee[exact_date_key].get(code, 0.0))
+    by_date = special_lookup.get("by_date", {})
+    start = pd.Timestamp(week_start).normalize()
+
+    # Primero fecha inicial del rango K.
+    if emp_key + (start,) in by_date:
+        val = float(by_date[emp_key + (start,)].get(code, 0.0))
+        if val:
+            return val
+
+    # Luego cualquier fecha dentro de L:R.
+    for i in range(7):
+        d = start + pd.Timedelta(days=i)
+        if emp_key + (d,) in by_date:
+            val = float(by_date[emp_key + (d,)].get(code, 0.0))
+            if val:
+                return val
 
     return 0.0
 
 # ============================================================
 # DATA LOADING
 # ============================================================
-def load_selected_excel_files_regular(
-    access_token: str,
-    drive_id: str,
-    selected_files: list[dict],
-    month_name_map: dict,
-) -> pd.DataFrame:
-
+def load_selected_excel_files_regular(access_token: str, drive_id: str, selected_files: list[dict], month_name_map: dict) -> pd.DataFrame:
     all_rows = []
     diagnostics = []
 
@@ -605,10 +544,7 @@ def load_selected_excel_files_regular(
                     break
 
             if sheet_to_use is None:
-                st.warning(
-                    f"Could not read {file_name}: sheet DATA not found. "
-                    f"Available sheets: {excel_file.sheet_names}"
-                )
+                st.warning(f"Could not read {file_name}: sheet DATA not found. Available sheets: {excel_file.sheet_names}")
                 continue
 
             special_hours_lookup = build_special_hours_lookup(file_bytes, excel_file)
@@ -624,6 +560,7 @@ def load_selected_excel_files_regular(
                 "day_headers_L_R": [clean_text(x) for x in day_headers],
                 "input_sheet_found": special_hours_lookup.get("sheet_found"),
                 "input_rows_found": special_hours_lookup.get("rows_found", 0),
+                "rule": "DATA K = week range. DATA L:R = daily values. INPUT M=V/Congé, N=SD/Maladie, O=H/Congé Travaillé.",
             })
 
             for _, r in data.iterrows():
@@ -631,51 +568,36 @@ def load_selected_excel_files_regular(
                 employee = clean_text(r.iloc[COL_EMPLOYEE_NAME]) if len(r) > COL_EMPLOYEE_NAME else ""
                 employee_class = normalize_class(r.iloc[COL_EMPLOYEE_CLASS]) if len(r) > COL_EMPLOYEE_CLASS else DEFAULT_CLASS_WHEN_NO_CLASS
                 week_range_text = clean_text(r.iloc[COL_WEEK_RANGE]) if len(r) > COL_WEEK_RANGE else ""
-
-                week_start_from_excel, week_end_from_excel = parse_week_range_cell(
-                    week_range_text,
-                    fallback_year=2026,
-                )
+                week_start_from_excel, week_end_from_excel = parse_week_range_cell(week_range_text)
 
                 rate = pd.to_numeric(r.iloc[COL_RATE], errors="coerce") if len(r) > COL_RATE else 0.0
                 rate = float(rate) if pd.notna(rate) else 0.0
 
                 if not vendor and not employee:
                     continue
-
                 if pd.isna(week_start_from_excel):
                     continue
 
-                # DATA column K must match INPUT/IMPUT column L (FECHA / Week range).
-                # Example: DATA K = 03/01 - 09/01 matches IMPUT L = 03/01 - 09/01.
-                special_lookup_date = week_range_text
-
-                # Read all L:R cells for this DATA row.
-                # We calculate regular numeric hours as the sum of numeric cells ONLY.
-                # IMPORTANT:
-                # Sometimes Excel displays V / SD / H, but pandas receives the numeric cached value.
-                # In that case, regular_hours can incorrectly include the special hours.
-                # To fix it:
-                #   1) Always read the V / SD / H value from Input/Imput once.
-                #   2) If no visible letter was detected in DATA, subtract that special value from regular_hours.
                 week_values = []
                 for col_idx in range(DAY_COL_START, DAY_COL_END_EXCLUSIVE):
                     cell_value = r.iloc[col_idx] if len(r) > col_idx else ""
                     week_values.append(cell_value)
 
+                # Leer DATA L:R.
+                # Números = horas regulares.
+                # Letras V, H, SD = buscar horas en IMPUT.
                 week_letters = [clean_text(v).upper() for v in week_values]
-                visible_special_detected = any(letter in {"V", "SD", "H"} for letter in week_letters)
+                has_v = "V" in week_letters
+                has_sd = "SD" in week_letters
+                has_h = "H" in week_letters
 
                 regular_hours = 0.0
                 regular_numeric_values = []
 
                 for v in week_values:
                     txt = clean_text(v).upper()
-
-                    # If pandas actually sees V / SD / H, never count it as regular.
                     if txt in {"V", "SD", "H"}:
                         continue
-
                     numeric_value = pd.to_numeric(v, errors="coerce")
                     if pd.notna(numeric_value):
                         regular_numeric_values.append(float(numeric_value))
@@ -686,58 +608,24 @@ def load_selected_excel_files_regular(
                 conge_trav_hours = 0.0
                 maladie_hours = 0.0
 
-                # Pull special values once from Input/Imput using employee + class + lookup date.
-                input_v_hours = get_special_hours(
-                    special_hours_lookup,
-                    employee,
-                    employee_class,
-                    special_lookup_date,
-                    "V",
-                )
-                input_h_hours = get_special_hours(
-                    special_hours_lookup,
-                    employee,
-                    employee_class,
-                    special_lookup_date,
-                    "H",
-                )
-                input_sd_hours = get_special_hours(
-                    special_hours_lookup,
-                    employee,
-                    employee_class,
-                    special_lookup_date,
-                    "SD",
-                )
+                input_v_hours = 0.0
+                input_sd_hours = 0.0
+                input_h_hours = 0.0
 
-                # FINAL RULES:
-                # INPUT column M (V)  -> Congé
-                # INPUT column N (SD) -> Maladie
-                # INPUT column O (H)  -> Congé Travaillé
-                if "V" in week_letters or input_v_hours > 0:
+                # SOLO si DATA L:R tiene la letra, entonces busca en IMPUT.
+                if has_v:
+                    input_v_hours = get_special_hours(special_hours_lookup, employee, employee_class, week_range_text, week_start_from_excel, "V")
                     conge_hours += input_v_hours
 
-                if "SD" in week_letters or input_sd_hours > 0:
+                if has_sd:
+                    input_sd_hours = get_special_hours(special_hours_lookup, employee, employee_class, week_range_text, week_start_from_excel, "SD")
                     maladie_hours += input_sd_hours
 
-                if "H" in week_letters or input_h_hours > 0:
+                if has_h:
+                    input_h_hours = get_special_hours(special_hours_lookup, employee, employee_class, week_range_text, week_start_from_excel, "H")
                     conge_trav_hours += input_h_hours
-                special_hours_total = conge_hours + maladie_hours + conge_trav_hours + suppl_hours
 
-                # Critical correction:
-                # If pandas did not see visible V / SD / H, but Input/Imput has special hours,
-                # those special hours may already be included in the numeric cached values.
-                # Subtract them from regular_hours so regular shows only real worked numeric hours.
-                if not visible_special_detected and special_hours_total > 0:
-                    regular_hours = max(0.0, regular_hours - special_hours_total)
-
-                total_hours_for_week = (
-                    regular_hours
-                    + suppl_hours
-                    + conge_hours
-                    + conge_trav_hours
-                    + maladie_hours
-                )
-
+                total_hours_for_week = regular_hours + suppl_hours + conge_hours + conge_trav_hours + maladie_hours
                 if total_hours_for_week == 0:
                     continue
 
@@ -747,20 +635,20 @@ def load_selected_excel_files_regular(
                     "excel_week_range": week_range_text,
                     "excel_week_start": week_start_from_excel,
                     "excel_week_end": week_end_from_excel,
-                    "special_lookup_date": special_lookup_date,
                     "date": week_start_from_excel,
                     "vendor_company": vendor,
                     "employee": employee,
                     "employee_class": employee_class,
                     "type_of_work": TYPE_OF_WORK_DEFAULT,
                     "day": "Week Total",
-                    "excel_cell_value": " | ".join([clean_text(v) for v in week_values if clean_text(v)]),
+                    "excel_cell_value_L_R": " | ".join([clean_text(v) for v in week_values if clean_text(v)]),
                     "regular_numeric_values": " | ".join([str(x) for x in regular_numeric_values]),
-                    "visible_special_detected": visible_special_detected,
+                    "has_v": has_v,
+                    "has_sd": has_sd,
+                    "has_h": has_h,
                     "input_v_hours": input_v_hours,
-                    "input_h_hours": input_h_hours,
                     "input_sd_hours": input_sd_hours,
-                    "special_hours_total": special_hours_total,
+                    "input_h_hours": input_h_hours,
                     "hours": total_hours_for_week,
                     "hourly_rate": rate,
                     "regular_hours": regular_hours,
@@ -776,7 +664,6 @@ def load_selected_excel_files_regular(
     df = pd.DataFrame(all_rows)
     st.session_state["regular_loader_diagnostics"] = diagnostics
     return df
-
 
 # ============================================================
 # WEEKLY SUMMARY
@@ -798,13 +685,8 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
         .sort_values(["vendor_company", "employee", "week_label"])
     )
 
-    grouped["overtime_hours"] = (
-        grouped["regular_hours_original"] - OVERTIME_WEEKLY_THRESHOLD
-    ).clip(lower=0)
-
-    grouped["regular_hours"] = grouped["regular_hours_original"].clip(
-        upper=OVERTIME_WEEKLY_THRESHOLD
-    )
+    grouped["overtime_hours"] = (grouped["regular_hours_original"] - OVERTIME_WEEKLY_THRESHOLD).clip(lower=0)
+    grouped["regular_hours"] = grouped["regular_hours_original"].clip(upper=OVERTIME_WEEKLY_THRESHOLD)
 
     grouped["regular_pay"] = grouped["regular_hours"] * grouped["hourly_rate"]
     grouped["overtime_pay"] = grouped["overtime_hours"] * grouped["hourly_rate"] * OVERTIME_MULTIPLIER
@@ -839,13 +721,11 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
 
     return grouped
 
-
 # ============================================================
 # EXPORT HELPERS
 # ============================================================
 def create_employee_report_blocks(weekly_df: pd.DataFrame, vendor_company: str):
     report_data = []
-
     vendor_df = weekly_df[weekly_df["vendor_company"] == vendor_company].copy()
     employees = sorted(vendor_df["employee"].dropna().unique().tolist())
     week_labels = sorted(vendor_df["week_label"].dropna().unique().tolist())
@@ -873,21 +753,13 @@ def create_employee_report_blocks(weekly_df: pd.DataFrame, vendor_company: str):
         for label, col_name in ROW_ORDER:
             row_values = []
             row_total = 0.0
-
             for wk in week_labels:
                 val = emp_df.loc[emp_df["week_label"] == wk, col_name].sum() if col_name in emp_df.columns else 0.0
                 val = round(float(val), 2)
                 row_values.append(val)
                 row_total += val
-
             total_hours_employee += row_total
-            block["rows"].append(
-                {
-                    "label": label,
-                    "week_values": row_values,
-                    "row_total": round(row_total, 2),
-                }
-            )
+            block["rows"].append({"label": label, "week_values": row_values, "row_total": round(row_total, 2)})
 
         for wk in week_labels:
             pay_val = emp_df.loc[emp_df["week_label"] == wk, "total_pay"].sum()
@@ -898,7 +770,6 @@ def create_employee_report_blocks(weekly_df: pd.DataFrame, vendor_company: str):
         block["total_pay"] = round(total_pay_employee, 2)
         block["reer_amount"] = round(total_hours_employee * REER_PER_HOUR, 2)
         block["total_with_reer"] = round(block["total_pay"] + block["reer_amount"], 2)
-
         report_data.append(block)
 
     return report_data
@@ -1043,50 +914,45 @@ def export_regular_hours_report(weekly_df: pd.DataFrame, start_date_value) -> By
     output.seek(0)
     return output
 
-
 # ============================================================
-# AUTH FLOW - AUTO REFRESH TOKEN
+# AUTH FLOW
 # ============================================================
-cache = load_token_cache()
+cache = load_cache()
 app = get_msal_app(cache)
 params = get_query_params_compat()
 
-with st.sidebar:
-    if st.button("Refresh Microsoft Login"):
-        st.session_state.pop("token_result", None)
-        clear_token_cache()
-        clear_query_params_compat()
-        st.rerun()
+if st.sidebar.button("Refresh Microsoft Login"):
+    st.session_state.pop("token_result", None)
+    clear_query_params_compat()
+    try:
+        if os.path.exists(CACHE_FILE):
+            os.remove(CACHE_FILE)
+    except Exception:
+        pass
+    st.rerun()
 
 if "token_result" not in st.session_state:
     accounts = app.get_accounts()
     if accounts:
         result = app.acquire_token_silent(SCOPES, account=accounts[0])
-        save_token_cache(cache)
         if result and "access_token" in result:
             st.session_state.token_result = result
+            save_cache(cache)
 
 if "token_result" not in st.session_state:
     code = params.get("code")
 
     if code:
-        result = app.acquire_token_by_authorization_code(
-            code=code,
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI,
-        )
-        save_token_cache(cache)
-
+        result = app.acquire_token_by_authorization_code(code=code, scopes=SCOPES, redirect_uri=REDIRECT_URI)
         if "access_token" in result:
             st.session_state.token_result = result
+            save_cache(cache)
             clear_query_params_compat()
             st.rerun()
-
         st.error("Could not obtain access token.")
         st.code(str(result))
         st.stop()
 
-if "token_result" not in st.session_state:
     st.warning("You are not signed in to Microsoft 365 / SharePoint.")
 
     extra_qp = {}
@@ -1102,35 +968,23 @@ if "token_result" not in st.session_state:
         response_mode="query",
         extra_query_parameters=extra_qp,
     )
-
-    st.link_button("Sign in with Microsoft (Company)", auth_url)
+    st.link_button("🔐 Sign in with Microsoft (Company)", auth_url)
     st.caption(f"Redirect URI used: {REDIRECT_URI}")
     st.stop()
 
-token_result = st.session_state.token_result
-access_token = token_result.get("access_token", "")
-
+access_token = st.session_state.token_result.get("access_token", "")
 if not access_token:
     st.error("No access token found. Please sign in again.")
     st.session_state.pop("token_result", None)
-    clear_token_cache()
     st.stop()
 
 try:
     me = get_me(access_token)
     signed_in_email = get_user_email(me)
 except Exception as e:
-    st.error("Microsoft token expired or invalid. Please sign in again.")
+    st.error("Could not validate signed-in user.")
     st.code(str(e))
     st.session_state.pop("token_result", None)
-    clear_token_cache()
-    auth_url = app.get_authorization_request_url(
-        scopes=SCOPES,
-        redirect_uri=REDIRECT_URI,
-        prompt="select_account",
-        response_mode="query",
-    )
-    st.link_button("Sign in again with Microsoft", auth_url)
     st.stop()
 
 if not is_allowed_user(me):
@@ -1144,10 +998,8 @@ st.success(f"✅ Signed in as {signed_in_email}")
 
 if st.button("Sign out"):
     st.session_state.pop("token_result", None)
-    clear_token_cache()
     clear_query_params_compat()
     st.rerun()
-
 
 # ============================================================
 # RESOLVE ROOT FOLDER
@@ -1178,7 +1030,6 @@ except Exception as e:
 
 folders = [x for x in root_children if is_folder_item(x)]
 folders.sort(key=lambda x: normalize_text(x.get("name", "")))
-
 root_excel_files = [x for x in root_children if is_excel_name(x.get("name", ""))]
 
 all_excel_files = []
@@ -1186,19 +1037,12 @@ folder_name_map = {}
 
 if folders:
     folder_names = [f["name"] for f in folders]
-
-    selected_folder_names = st.sidebar.multiselect(
-        "Select folder(s)",
-        folder_names,
-        default=folder_names[:1],
-    )
-
+    selected_folder_names = st.sidebar.multiselect("Select folder(s)", folder_names, default=folder_names[:1])
     selected_folders = [f for f in folders if f["name"] in selected_folder_names]
 
     for folder_info in selected_folders:
         folder_id = folder_info["id"]
         folder_name = folder_info["name"]
-
         try:
             children = list_children_all(access_token, drive_id, folder_id)
         except Exception as e:
@@ -1207,7 +1051,6 @@ if folders:
 
         excels = [x for x in children if is_excel_name(x.get("name", ""))]
         excels.sort(key=lambda x: normalize_text(x.get("name", "")))
-
         for item in excels:
             item_copy = dict(item)
             item_copy["display_name"] = f"{folder_name} | {item_copy['name']}"
@@ -1227,19 +1070,13 @@ if not all_excel_files:
     st.stop()
 
 excel_display_names = [f["display_name"] for f in all_excel_files]
-
-selected_excel_display_names = st.sidebar.multiselect(
-    "Select Excel file(s)",
-    excel_display_names,
-    default=excel_display_names,
-)
+selected_excel_display_names = st.sidebar.multiselect("Select Excel file(s)", excel_display_names, default=excel_display_names)
 
 if not selected_excel_display_names:
     st.info("Please select at least one Excel file.")
     st.stop()
 
 selected_excel_files = [f for f in all_excel_files if f["display_name"] in selected_excel_display_names]
-
 
 # ============================================================
 # LOAD DATA
@@ -1250,31 +1087,20 @@ if raw_df.empty:
     st.error("No valid data could be loaded from the selected Excel files.")
     st.stop()
 
-
 # ============================================================
 # CLEANING + FILTERS
 # ============================================================
 df = raw_df.copy()
-
 df["date"] = pd.to_datetime(df["date"], errors="coerce")
 df["vendor_company"] = safe_text_series(df["vendor_company"])
 df["employee"] = safe_text_series(df["employee"])
 df["employee_class"] = safe_text_series(df["employee_class"]).replace({"": DEFAULT_CLASS_WHEN_NO_CLASS})
 df["type_of_work"] = TYPE_OF_WORK_DEFAULT
 
-for c in [
-    "hours",
-    "hourly_rate",
-    "regular_hours",
-    "suppl_hours",
-    "conge_hours",
-    "conge_trav_hours",
-    "maladie_hours",
-]:
+for c in ["hours", "hourly_rate", "regular_hours", "suppl_hours", "conge_hours", "conge_trav_hours", "maladie_hours"]:
     df[c] = to_num_series(df[c])
 
 df = df.dropna(subset=["date"]).copy()
-
 if df.empty:
     st.warning("No rows with valid dates were found. Check week number in column K.")
     st.stop()
@@ -1297,7 +1123,6 @@ start_date = st.sidebar.date_input("First committee week start date", value=FIRS
 num_weeks = st.sidebar.number_input("Number of weeks", min_value=1, max_value=24, value=4)
 
 filtered_df = df.copy()
-
 if selected_vendors:
     filtered_df = filtered_df[filtered_df["vendor_company"].isin(selected_vendors)]
 if selected_classes:
@@ -1308,14 +1133,9 @@ if selected_types:
     filtered_df = filtered_df[filtered_df["type_of_work"].isin(selected_types)]
 
 start_date_dt = pd.to_datetime(start_date)
-
-filtered_df[["week_start", "week_end"]] = filtered_df["date"].apply(
-    lambda x: pd.Series(assign_committee_week(x, start_date_dt, num_weeks))
-)
-
+filtered_df[["week_start", "week_end"]] = filtered_df["date"].apply(lambda x: pd.Series(assign_committee_week(x, start_date_dt, num_weeks)))
 filtered_df["week_start"] = pd.to_datetime(filtered_df["week_start"], errors="coerce")
 filtered_df["week_end"] = pd.to_datetime(filtered_df["week_end"], errors="coerce")
-
 filtered_df = filtered_df[filtered_df["week_start"].notna()].copy()
 filtered_df["week_label"] = filtered_df["week_end"].dt.strftime("%Y-%m-%d")
 
@@ -1324,7 +1144,6 @@ if filtered_df.empty:
     st.stop()
 
 weekly_summary = build_weekly_summary(filtered_df)
-
 
 # ============================================================
 # TOP SUMMARY
@@ -1337,96 +1156,48 @@ prelevement_total_du = round(total_with_reer_all + levy_1pct, 2)
 total_hours_all = round(float(weekly_summary["total_hours"].sum()), 2)
 
 col1, col2, col3, col4, col5 = st.columns(5)
-
 col1.metric("TOTAL HOURS", f"{total_hours_all:,.2f}")
 col2.metric("TOTAL DES GAINS", format_money(total_gains_all))
 col3.metric("TOTAL REER", format_money(total_reer_all))
 col4.metric("TOTAL GAINS + REER", format_money(total_with_reer_all))
 col5.metric("PRÉLÈVEMENT TOTAL DÛ", format_money(prelevement_total_du))
 
-
 # ============================================================
 # EMPLOYEE SUMMARY
 # ============================================================
 st.subheader("Employee summary")
-
 summary_view_cols = [
-    "vendor_company",
-    "employee",
-    "employee_class",
-    "week_label",
-    "regular_hours",
-    "overtime_hours",
-    "suppl_hours",
-    "conge_hours",
-    "conge_trav_hours",
-    "maladie_hours",
-    "total_hours",
-    "hourly_rate",
-    "regular_pay",
-    "overtime_pay",
-    "suppl_pay",
-    "conge_pay",
-    "conge_trav_pay",
-    "maladie_pay",
-    "total_pay",
-    "reer",
-    "total_with_reer",
+    "vendor_company", "employee", "employee_class", "week_label",
+    "regular_hours", "overtime_hours", "suppl_hours", "conge_hours",
+    "conge_trav_hours", "maladie_hours", "total_hours", "hourly_rate",
+    "regular_pay", "overtime_pay", "suppl_pay", "conge_pay",
+    "conge_trav_pay", "maladie_pay", "total_pay", "reer", "total_with_reer",
 ]
-
 dataframe_with_2_decimals(weekly_summary[[c for c in summary_view_cols if c in weekly_summary.columns]])
-
 
 # ============================================================
 # SOURCE PREVIEW
 # ============================================================
 st.subheader("Filtered source data")
-
 preview_cols = [
-    "source_month_folder",
-    "source_file",
-    "excel_week_range",
-    "excel_week_start",
-    "excel_week_end",
-    "special_lookup_date",
-    "date",
-    "day",
-    "vendor_company",
-    "employee",
-    "employee_class",
-    "type_of_work",
-    "excel_cell_value",
-    "regular_numeric_values",
-    "visible_special_detected",
-    "input_v_hours",
-    "input_h_hours",
-    "input_sd_hours",
-    "special_hours_total",
-    "hours",
-    "regular_hours",
-    "suppl_hours",
-    "conge_hours",
-    "conge_trav_hours",
-    "maladie_hours",
-    "hourly_rate",
-    "week_label",
+    "source_month_folder", "source_file", "excel_week_range", "excel_week_start", "excel_week_end",
+    "date", "day", "vendor_company", "employee", "employee_class", "type_of_work",
+    "excel_cell_value_L_R", "regular_numeric_values", "has_v", "has_sd", "has_h",
+    "input_v_hours", "input_sd_hours", "input_h_hours", "hours", "regular_hours", "suppl_hours",
+    "conge_hours", "conge_trav_hours", "maladie_hours", "hourly_rate", "week_label",
 ]
-
 dataframe_with_2_decimals(filtered_df[[c for c in preview_cols if c in filtered_df.columns]])
-
 
 # ============================================================
 # EXPORT
 # ============================================================
 report_file = export_regular_hours_report(weekly_summary, start_date)
-
 st.download_button(
     label="Download Regular Hours Excel Report",
     data=report_file,
     file_name="regular_hours_report.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
-
 
 # ============================================================
 # DIAGNOSTICS
@@ -1440,5 +1211,5 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Loader diagnostics:", st.session_state.get("regular_loader_diagnostics", []))
     st.write("Final source columns:", list(filtered_df.columns))
     st.write("Weekly summary columns:", list(weekly_summary.columns))
-    st.write("Special hours rule:", "V and H go to Congé. SD goes to Maladie. The value is taken once from Input/Imput, not multiplied by the number of letters.")
-    st.write("Overtime condition:", "regular worked hours over 40 in the same committee week are overtime at 1.5x")
+    st.write("SPECIAL HOURS RULE:", "DATA L:R only. If DATA has V/SD/H, lookup INPUT/IMPUT using employee + class + DATA K week range. INPUT M=V/Congé, N=SD/Maladie, O=H/Congé Travaillé.")
+    st.write("Overtime condition:", "Regular worked hours over 40 in the same committee week are overtime at 1.5x")
