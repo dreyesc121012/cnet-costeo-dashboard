@@ -1249,8 +1249,9 @@ total_gains_all = round(float(weekly_summary["total_pay"].sum()), 2)
 total_reer_all = round(float(weekly_summary["reer"].sum()), 2)
 total_with_reer_all = round(float(weekly_summary["total_with_reer"].sum()), 2)
 levy_1pct = round(total_with_reer_all * 0.01, 2)
-prelevement_total_du = round(total_with_reer_all + levy_1pct, 2)
 
+# NUEVA LOGICA
+prelevement_total_du = round(total_reer_all + levy_1pct, 2)
 
 # ============================================================
 # METRICS
