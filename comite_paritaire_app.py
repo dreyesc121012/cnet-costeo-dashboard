@@ -691,7 +691,10 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     grouped["conge_trav_pay"] = grouped["conge_trav_hours"] * grouped["rate"]
     grouped["maladie_pay"] = grouped["maladie_hours"] * grouped["rate"]
 
-    grouped["total_pay"] = (
+# =========================
+# PAY CALCULATION
+# =========================
+grouped["total_pay"] = (
     grouped["regular_pay"] +
     grouped["suppl_pay"] +
     grouped["conge_pay"] +
@@ -699,17 +702,19 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     grouped["maladie_pay"]
 )
 
-# SOLO AQUÍ redondeas
+# redondeo SOLO al final
 grouped["total_pay"] = grouped["total_pay"].round(2)
 
-    # =========================
-    # REER
-    # =========================
-    grouped["reer"] = (grouped["committee_hours"] * REER_PER_HOUR).round(2)
+# =========================
+# REER
+# =========================
+grouped["reer"] = (
+    grouped["committee_hours"] * REER_PER_HOUR
+).round(2)
 
-    grouped["total_with_reer"] = (
-        grouped["total_pay"] + grouped["reer"]
-    ).round(2)
+grouped["total_with_reer"] = (
+    grouped["total_pay"] + grouped["reer"]
+).round(2)
 
     # =========================
     # ACCRUALS (NO CAMBIO)
