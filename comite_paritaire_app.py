@@ -692,12 +692,15 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     grouped["maladie_pay"] = grouped["maladie_hours"] * grouped["rate"]
 
     grouped["total_pay"] = (
-        grouped["regular_pay"] +
-        grouped["suppl_pay"] +
-        grouped["conge_pay"] +
-        grouped["conge_trav_pay"] +
-        grouped["maladie_pay"]
-    ).round(2)
+    grouped["regular_pay"] +
+    grouped["suppl_pay"] +
+    grouped["conge_pay"] +
+    grouped["conge_trav_pay"] +
+    grouped["maladie_pay"]
+)
+
+# SOLO AQUÍ redondeas
+grouped["total_pay"] = grouped["total_pay"].round(2)
 
     # =========================
     # REER
