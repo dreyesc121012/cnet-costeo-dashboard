@@ -1285,7 +1285,12 @@ summary_view_cols = [
 ]
 summary_view_cols = [c for c in summary_view_cols if c in weekly_summary.columns]
 
-dataframe_with_2_decimals(weekly_summary[summary_view_cols])
+display_df = weekly_summary.copy()
+
+# Limitar horas regulares a 40 SOLO PARA MOSTRAR
+display_df["regular_hours"] = display_df["regular_hours"].clip(upper=40)
+
+dataframe_with_2_decimals(display_df[summary_view_cols])
 
 
 # ============================================================
