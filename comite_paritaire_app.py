@@ -47,16 +47,9 @@ SCOPES = ["User.Read", "Files.Read.All", "Sites.Read.All"]
 CLASS_A_RATE_BEFORE_MAR_4_2026 = 21.57
 CLASS_A_RATE_FROM_MAR_4_2026 = 23.25
 RATE_CHANGE_DATE = pd.Timestamp("2026-03-04")
-
 REER_PER_HOUR = 0.45
-
 MALADIE_ACCRUAL_FACTOR = 0.0244
 MALADIE_THRESHOLD_HOURS = 280.0
-
-VACATION_ACCRUAL_RATE = 0.06
-INITIAL_VACATION_CYCLE_START = pd.Timestamp("2026-01-04")
-INITIAL_VACATION_CYCLE_END = pd.Timestamp("2027-04-30")
-NEXT_VACATION_CYCLE_FIRST_START = pd.Timestamp("2027-05-01")
 
 ROW_ORDER = [
     ("Régulier", "regular_hours"),
@@ -65,7 +58,6 @@ ROW_ORDER = [
     ("Congé Travaillé", "conge_trav_hours"),
     ("Maladie", "maladie_hours"),
     ("Banque maladie accumulée", "maladie_accrued_hours"),
-    ("Banque vacances accumulée", "vacation_accrued_amount"),
 ]
 
 
@@ -148,30 +140,6 @@ def get_maladie_cycle_start(date_value):
 
 def get_maladie_cycle_end(date_value):
     start = get_maladie_cycle_start(date_value)
-    return pd.Timestamp(year=start.year + 1, month=4, day=30)
-
-
-def get_vacation_cycle_start(date_value):
-    d = pd.to_datetime(date_value)
-
-    if INITIAL_VACATION_CYCLE_START <= d <= INITIAL_VACATION_CYCLE_END:
-        return INITIAL_VACATION_CYCLE_START
-
-    if d >= NEXT_VACATION_CYCLE_FIRST_START:
-        if d.month >= 5:
-            return pd.Timestamp(year=d.year, month=5, day=1)
-        return pd.Timestamp(year=d.year - 1, month=5, day=1)
-
-    return INITIAL_VACATION_CYCLE_START
-
-
-def get_vacation_cycle_end(date_value):
-    d = pd.to_datetime(date_value)
-
-    if INITIAL_VACATION_CYCLE_START <= d <= INITIAL_VACATION_CYCLE_END:
-        return INITIAL_VACATION_CYCLE_END
-
-    start = get_vacation_cycle_start(d)
     return pd.Timestamp(year=start.year + 1, month=4, day=30)
 
 
@@ -494,6 +462,15 @@ def calculate_committee_hours_row(
 
 
 def build_maladie_accrual(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Accrual cycle:
+    - May 1 to April 30
+    Special request:
+    - Current cycle can start from 2026-01-04 for your reporting setup
+    Rule:
+    - Employee must work first 280 hours in cycle
+    - Only hours after 280 accrue at 2.44%
+    """
     work_df = df.copy()
 
     work_df["hours_worked_for_accrual"] = (
@@ -505,6 +482,7 @@ def build_maladie_accrual(df: pd.DataFrame) -> pd.DataFrame:
     work_df["cycle_start"] = work_df["date"].apply(get_maladie_cycle_start)
     work_df["cycle_end"] = work_df["date"].apply(get_maladie_cycle_end)
 
+    # Special handling for the partial initial cycle the user wants from Jan 4, 2026
     jan4_2026 = pd.Timestamp("2026-01-04")
     apr30_2026 = pd.Timestamp("2026-04-30")
     may1_2026 = pd.Timestamp("2026-05-01")
@@ -578,45 +556,6 @@ def build_maladie_accrual(df: pd.DataFrame) -> pd.DataFrame:
     return weekly_accrual
 
 
-def build_vacation_accrual(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Vacation accrual rules:
-    - First special cycle: 2026-01-04 to 2027-04-30
-    - Then recurring cycles: May 1 to April 30
-    - Accrual starts immediately from the beginning of the cycle
-    - Accrual base = total_pay
-    - Rate = 6%
-    - Payment may happen later, but accumulation is immediate
-    """
-    work_df = df.copy()
-
-    work_df["vac_cycle_start"] = work_df["date"].apply(get_vacation_cycle_start)
-    work_df["vac_cycle_end"] = work_df["date"].apply(get_vacation_cycle_end)
-
-    work_df = work_df.sort_values(
-        ["vendor_company", "employee", "date", "source_file"]
-    ).copy()
-
-    # Accumulate immediately from cycle start
-    work_df["vacation_accrued_row"] = (
-        to_num_series(work_df["total_pay"]) * VACATION_ACCRUAL_RATE
-    ).round(2)
-
-    weekly_accrual = (
-        work_df.groupby(["vendor_company", "employee", "week_label"], dropna=False)
-        .agg(
-            vacation_accrued_amount=("vacation_accrued_row", "sum")
-        )
-        .reset_index()
-    )
-
-    weekly_accrual["vacation_accrued_amount"] = to_num_series(
-        weekly_accrual["vacation_accrued_amount"]
-    ).round(2)
-
-    return weekly_accrual
-
-
 def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
@@ -649,7 +588,7 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
             conge_hours_raw=("conge_raw", "sum"),
             conge_trav_hours_raw=("conge_trav_raw", "sum"),
             maladie_hours_raw=("maladie_raw", "sum"),
-            source_total_pay=("total_pay", "sum"),
+            total_pay=("total_pay", "sum"),
             hourly_rate_min=("hourly_rate", "min"),
             has_flat_case=("flat_case", "any"),
             committee_hours=("committee_hours_row", "sum"),
@@ -668,102 +607,43 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     grouped["conge_hours_raw"] = to_num_series(grouped["conge_hours_raw"])
     grouped["conge_trav_hours_raw"] = to_num_series(grouped["conge_trav_hours_raw"])
     grouped["maladie_hours_raw"] = to_num_series(grouped["maladie_hours_raw"])
-    grouped["source_total_pay"] = to_num_series(grouped["source_total_pay"])
+    grouped["total_pay"] = to_num_series(grouped["total_pay"])
     grouped["hourly_rate_min"] = to_num_series(grouped["hourly_rate_min"])
     grouped["committee_hours"] = to_num_series(grouped["committee_hours"])
     grouped["min_applicable_rate"] = to_num_series(grouped["min_applicable_rate"])
     grouped["max_applicable_rate"] = to_num_series(grouped["max_applicable_rate"])
 
-    # ============================================================
-    # SPECIAL HOURS
-    # ============================================================
+    grouped["suppl_hours"] = grouped["suppl_hours_raw"]
     grouped["conge_hours"] = grouped["conge_hours_raw"]
     grouped["conge_trav_hours"] = grouped["conge_trav_hours_raw"]
     grouped["maladie_hours"] = grouped["maladie_hours_raw"]
 
-    # ============================================================
-    # OVERTIME / SUPPL RULE
-    # More than 40 hours per employee/week goes to Suppl.
-    # Suppl. is paid at 1.5x.
-    # ============================================================
-    grouped["auto_overtime_hours"] = (
-        grouped["committee_hours"] - 40
-    ).clip(lower=0)
-
-    grouped["suppl_hours"] = (
-        grouped["suppl_hours_raw"] + grouped["auto_overtime_hours"]
+    special_total = (
+        grouped["suppl_hours"] +
+        grouped["conge_hours"] +
+        grouped["conge_trav_hours"] +
+        grouped["maladie_hours"]
     )
 
-    grouped["regular_hours"] = (
-        grouped["committee_hours"] - grouped["suppl_hours"]
-    ).clip(lower=0).clip(upper=40)
+    grouped["regular_hours"] = (grouped["committee_hours"] - special_total).clip(lower=0)
+    grouped["reer"] = (grouped["committee_hours"] * REER_PER_HOUR).round(2)
+    grouped["total_with_reer"] = (grouped["total_pay"] + grouped["reer"]).round(2)
 
-    # ============================================================
-    # PAY CALCULATION
-    # ============================================================
-    grouped["rate"] = grouped["max_applicable_rate"]
-
-    grouped["regular_pay"] = grouped["regular_hours"] * grouped["rate"]
-    grouped["suppl_pay"] = grouped["suppl_hours"] * grouped["rate"] * 1.5
-    grouped["conge_pay"] = grouped["conge_hours"] * grouped["rate"]
-    grouped["conge_trav_pay"] = grouped["conge_trav_hours"] * grouped["rate"]
-    grouped["maladie_pay"] = grouped["maladie_hours"] * grouped["rate"]
-
-    grouped["total_pay"] = (
-        grouped["regular_pay"] +
-        grouped["suppl_pay"] +
-        grouped["conge_pay"] +
-        grouped["conge_trav_pay"] +
-        grouped["maladie_pay"]
-    )
-
-    grouped["total_pay"] = grouped["total_pay"].round(2)
-
-    # ============================================================
-    # REER
-    # ============================================================
-    grouped["reer"] = (
-        grouped["committee_hours"] * REER_PER_HOUR
-    ).round(2)
-
-    grouped["total_with_reer"] = (
-        grouped["total_pay"] + grouped["reer"]
-    ).round(2)
-
-    # ============================================================
-    # MALADIE ACCRUAL
-    # ============================================================
-    weekly_maladie_accrual = build_maladie_accrual(df)
+    weekly_accrual = build_maladie_accrual(df)
 
     grouped = grouped.merge(
-        weekly_maladie_accrual,
+        weekly_accrual,
         on=["vendor_company", "employee", "week_label"],
         how="left"
     )
 
-    grouped["maladie_accrued_hours"] = to_num_series(
-        grouped["maladie_accrued_hours"]
-    ).round(2)
-
-    # ============================================================
-    # VACATION ACCRUAL
-    # ============================================================
-    vacation_weekly_accrual = build_vacation_accrual(df)
-
-    grouped = grouped.merge(
-        vacation_weekly_accrual,
-        on=["vendor_company", "employee", "week_label"],
-        how="left"
-    )
-
-    grouped["vacation_accrued_amount"] = to_num_series(
-        grouped["vacation_accrued_amount"]
-    ).round(2)
+    grouped["maladie_accrued_hours"] = to_num_series(grouped["maladie_accrued_hours"]).round(2)
 
     numeric_cols = grouped.select_dtypes(include=["number"]).columns
     grouped[numeric_cols] = grouped[numeric_cols].round(2)
 
     return grouped
+
 
 # ============================================================
 # EXPORT HELPERS
@@ -1317,13 +1197,13 @@ summary_view_cols = [
     "vendor_company",
     "employee",
     "week_label",
+    "committee_hours",
     "regular_hours",
     "suppl_hours",
     "conge_hours",
     "conge_trav_hours",
     "maladie_hours",
     "maladie_accrued_hours",
-    "vacation_accrued_amount",
     "total_pay",
     "reer",
     "total_with_reer",
@@ -1389,8 +1269,6 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Class A from rate change date:", CLASS_A_RATE_FROM_MAR_4_2026)
     st.write("Maladie factor:", MALADIE_ACCRUAL_FACTOR)
     st.write("Maladie threshold hours:", MALADIE_THRESHOLD_HOURS)
-    st.write("Vacation accrual rate:", VACATION_ACCRUAL_RATE)
-    st.write("Initial vacation cycle start:", str(INITIAL_VACATION_CYCLE_START.date()))
-    st.write("Initial vacation cycle end:", str(INITIAL_VACATION_CYCLE_END.date()))
     st.write("Final source columns:", list(filtered_df.columns))
     st.write("Weekly summary columns:", list(weekly_summary.columns))
+    
