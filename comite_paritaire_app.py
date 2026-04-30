@@ -649,51 +649,68 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
             conge_hours_raw=("conge_raw", "sum"),
             conge_trav_hours_raw=("conge_trav_raw", "sum"),
             maladie_hours_raw=("maladie_raw", "sum"),
-            total_pay=("total_pay", "sum"),
-            hourly_rate_min=("hourly_rate", "min"),
-            has_flat_case=("flat_case", "any"),
+            source_total_pay=("total_pay", "sum"),
             committee_hours=("committee_hours_row", "sum"),
-            min_applicable_rate=("applicable_class_a_rate", "min"),
             max_applicable_rate=("applicable_class_a_rate", "max"),
-            source_month_folder=("source_month_folder", "first"),
-            source_file=("source_file", "first"),
-            province=("province", "first"),
         )
         .reset_index()
-        .sort_values(["vendor_company", "employee", "week_label"])
     )
 
-    grouped["raw_hours_sum"] = to_num_series(grouped["raw_hours_sum"])
-    grouped["suppl_hours_raw"] = to_num_series(grouped["suppl_hours_raw"])
-    grouped["conge_hours_raw"] = to_num_series(grouped["conge_hours_raw"])
-    grouped["conge_trav_hours_raw"] = to_num_series(grouped["conge_trav_hours_raw"])
-    grouped["maladie_hours_raw"] = to_num_series(grouped["maladie_hours_raw"])
-    grouped["total_pay"] = to_num_series(grouped["total_pay"])
-    grouped["hourly_rate_min"] = to_num_series(grouped["hourly_rate_min"])
-    grouped["committee_hours"] = to_num_series(grouped["committee_hours"])
-    grouped["min_applicable_rate"] = to_num_series(grouped["min_applicable_rate"])
-    grouped["max_applicable_rate"] = to_num_series(grouped["max_applicable_rate"])
+    for c in grouped.columns:
+        if c not in ["vendor_company", "employee", "week_label"]:
+            grouped[c] = to_num_series(grouped[c])
 
-    grouped["suppl_hours"] = grouped["suppl_hours_raw"]
+    # =========================
+    # SPECIAL HOURS
+    # =========================
     grouped["conge_hours"] = grouped["conge_hours_raw"]
     grouped["conge_trav_hours"] = grouped["conge_trav_hours_raw"]
     grouped["maladie_hours"] = grouped["maladie_hours_raw"]
 
-    special_total = (
-        grouped["suppl_hours"] +
-        grouped["conge_hours"] +
-        grouped["conge_trav_hours"] +
-        grouped["maladie_hours"]
+    # =========================
+    # 🔴 OVERTIME LOGIC (FIX)
+    # =========================
+    grouped["auto_overtime_hours"] = (grouped["committee_hours"] - 40).clip(lower=0)
+
+    grouped["suppl_hours"] = (
+        grouped["suppl_hours_raw"] + grouped["auto_overtime_hours"]
     )
 
-    grouped["regular_hours"] = (grouped["committee_hours"] - special_total).clip(lower=0)
+    grouped["regular_hours"] = (
+        grouped["committee_hours"] - grouped["suppl_hours"]
+    ).clip(lower=0).clip(upper=40)
+
+    # =========================
+    # 💰 PAY CALCULATION (FIX)
+    # =========================
+    grouped["rate"] = grouped["max_applicable_rate"]
+
+    grouped["regular_pay"] = grouped["regular_hours"] * grouped["rate"]
+    grouped["suppl_pay"] = grouped["suppl_hours"] * grouped["rate"] * 1.5
+    grouped["conge_pay"] = grouped["conge_hours"] * grouped["rate"]
+    grouped["conge_trav_pay"] = grouped["conge_trav_hours"] * grouped["rate"]
+    grouped["maladie_pay"] = grouped["maladie_hours"] * grouped["rate"]
+
+    grouped["total_pay"] = (
+        grouped["regular_pay"] +
+        grouped["suppl_pay"] +
+        grouped["conge_pay"] +
+        grouped["conge_trav_pay"] +
+        grouped["maladie_pay"]
+    ).round(2)
+
+    # =========================
+    # REER
+    # =========================
     grouped["reer"] = (grouped["committee_hours"] * REER_PER_HOUR).round(2)
 
-    # NOTE:
-    # maladie_accrued_hours and vacation_accrued_amount are informational only.
-    # They do NOT increase total_pay or total_with_reer.
-    grouped["total_with_reer"] = (grouped["total_pay"] + grouped["reer"]).round(2)
+    grouped["total_with_reer"] = (
+        grouped["total_pay"] + grouped["reer"]
+    ).round(2)
 
+    # =========================
+    # ACCRUALS (NO CAMBIO)
+    # =========================
     weekly_maladie_accrual = build_maladie_accrual(df)
 
     grouped = grouped.merge(
@@ -701,8 +718,6 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
         on=["vendor_company", "employee", "week_label"],
         how="left"
     )
-
-    grouped["maladie_accrued_hours"] = to_num_series(grouped["maladie_accrued_hours"]).round(2)
 
     vacation_weekly_accrual = build_vacation_accrual(df)
 
@@ -712,13 +727,7 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
         how="left"
     )
 
-    grouped["vacation_accrued_amount"] = to_num_series(grouped["vacation_accrued_amount"]).round(2)
-
-    numeric_cols = grouped.select_dtypes(include=["number"]).columns
-    grouped[numeric_cols] = grouped[numeric_cols].round(2)
-
     return grouped
-
 
 # ============================================================
 # EXPORT HELPERS
