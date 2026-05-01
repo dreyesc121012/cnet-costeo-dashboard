@@ -1,3 +1,4 @@
+import base64
 import os
 from io import BytesIO
 from datetime import timedelta, datetime
@@ -620,7 +621,7 @@ def load_selected_excel_files_regular(
             special_hours_lookup = build_special_hours_lookup(file_bytes, excel_file)
             raw = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_to_use, header=None)
 
-            # DATA!C2 = Pay date vacance. Used only when DATA L:R contains V.
+            # Pay date vacance comes from DATA!C2 when DATA L:R contains V.
             pay_date_vacance_from_data = clean_text(raw.iat[1, 2]) if raw.shape[0] > 1 and raw.shape[1] > 2 else ""
 
             # Real Excel columns used for filters.
@@ -917,6 +918,7 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
         grouped["regular_pay"]
         + grouped["overtime_pay"]
         + grouped["suppl_pay"]
+        + grouped["vacances_pay"]
         + grouped["conge_pay"]
         + grouped["conge_trav_pay"]
         + grouped["maladie_pay"]
@@ -926,6 +928,7 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
         grouped["regular_hours"]
         + grouped["overtime_hours"]
         + grouped["suppl_hours"]
+        + grouped["vacances_hours"]
         + grouped["conge_hours"]
         + grouped["conge_trav_hours"]
         + grouped["maladie_hours"]
@@ -1338,6 +1341,7 @@ for c in [
     "regular_hours",
     "suppl_hours",
     "vacances_hours",
+    "pay_date_vacance",
     "conge_hours",
     "conge_trav_hours",
     "maladie_hours",
@@ -1552,7 +1556,6 @@ preview_cols = [
     "regular_hours",
     "suppl_hours",
     "vacances_hours",
-    "pay_date_vacance",
     "conge_hours",
     "conge_trav_hours",
     "maladie_hours",
@@ -1588,5 +1591,5 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Loader diagnostics:", st.session_state.get("regular_loader_diagnostics", []))
     st.write("Final source columns:", list(filtered_df.columns))
     st.write("Weekly summary columns:", list(weekly_summary.columns))
-    st.write("Special hours rule:", "DATA L:R reads worked hours by class. If DATA L:R has V/SD/H, IMPUT M(V)=Vacances, N(SD)=Maladie, O(H)=Congé Travaillé. Match by Employee + Class + IMPUT L week range. If V is found, Pay date vacance comes from DATA!C2.")
+    st.write("Special hours rule:", "DATA L:R reads worked hours by class. If DATA L:R has V, IMPUT M(V)=Vacances and Pay date vacance=DATA!C2. If DATA L:R has SD/H, IMPUT N(SD)=Maladie, O(H)=Congé Travaillé. Match by Employee + Class + IMPUT L week range.")
     st.write("Suppl. rule:", "Over 40 regular worked hours per employee/week becomes Suppl.; Overtime is not used. Suppl. is assigned to Class A when available and paid at Class A rate x 1.5.")
