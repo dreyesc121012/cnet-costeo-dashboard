@@ -1461,6 +1461,46 @@ dataframe_with_2_decimals(weekly_summary[[c for c in summary_view_cols if c in w
 
 
 # ============================================================
+# WEEKLY REGULAR PAY SUMMARY
+# ============================================================
+st.subheader("Weekly Regular Pay Summary")
+
+weekly_regular_pay_summary_base = weekly_summary.copy()
+
+# Separate regular hours by employee class.
+weekly_regular_pay_summary_base["class_a_hours"] = weekly_regular_pay_summary_base.apply(
+    lambda row: row["regular_hours"] if normalize_text(row["employee_class"]) == "class a" else 0.0,
+    axis=1,
+)
+
+weekly_regular_pay_summary_base["class_b_hours"] = weekly_regular_pay_summary_base.apply(
+    lambda row: row["regular_hours"] if normalize_text(row["employee_class"]) == "class b" else 0.0,
+    axis=1,
+)
+
+weekly_regular_pay_summary = (
+    weekly_regular_pay_summary_base
+    .groupby(["week_label"], dropna=False)
+    .agg(
+        class_a_hours=("class_a_hours", "sum"),
+        class_b_hours=("class_b_hours", "sum"),
+        regular_hours=("regular_hours", "sum"),
+        regular_pay=("regular_pay", "sum"),
+        total_pay=("total_pay", "sum"),
+        reer=("reer", "sum"),
+        total_with_reer=("total_with_reer", "sum"),
+    )
+    .reset_index()
+    .sort_values("week_label")
+)
+
+numeric_cols = weekly_regular_pay_summary.select_dtypes(include=["number"]).columns
+weekly_regular_pay_summary[numeric_cols] = weekly_regular_pay_summary[numeric_cols].round(2)
+
+dataframe_with_2_decimals(weekly_regular_pay_summary)
+
+
+# ============================================================
 # SOURCE PREVIEW
 # ============================================================
 st.subheader("Filtered source data")
