@@ -1465,33 +1465,35 @@ dataframe_with_2_decimals(weekly_summary[[c for c in summary_view_cols if c in w
 # ============================================================
 st.subheader("Weekly Regular Pay Summary")
 
-weekly_regular_pay_summary_base = weekly_summary.copy()
-
-# Separate regular hours by employee class.
-weekly_regular_pay_summary_base["class_a_hours"] = weekly_regular_pay_summary_base.apply(
-    lambda row: row["regular_hours"] if normalize_text(row["employee_class"]) == "class a" else 0.0,
-    axis=1,
-)
-
-weekly_regular_pay_summary_base["class_b_hours"] = weekly_regular_pay_summary_base.apply(
-    lambda row: row["regular_hours"] if normalize_text(row["employee_class"]) == "class b" else 0.0,
-    axis=1,
-)
-
 weekly_regular_pay_summary = (
-    weekly_regular_pay_summary_base
-    .groupby(["week_label"], dropna=False)
+    weekly_summary
+    .groupby(["employee", "week_label"], dropna=False)
     .agg(
-        class_a_hours=("class_a_hours", "sum"),
-        class_b_hours=("class_b_hours", "sum"),
+        class_a_hours=(
+            "regular_hours",
+            lambda x: weekly_summary.loc[x.index, "regular_hours"][
+                weekly_summary.loc[x.index, "employee_class"].apply(normalize_text) == "class a"
+            ].sum()
+        ),
+        class_b_hours=(
+            "regular_hours",
+            lambda x: weekly_summary.loc[x.index, "regular_hours"][
+                weekly_summary.loc[x.index, "employee_class"].apply(normalize_text) == "class b"
+            ].sum()
+        ),
         regular_hours=("regular_hours", "sum"),
+        suppl_hours=("suppl_hours", "sum"),
+        conge_hours=("conge_hours", "sum"),
+        conge_trav_hours=("conge_trav_hours", "sum"),
+        maladie_hours=("maladie_hours", "sum"),
+        total_hours=("total_hours", "sum"),
         regular_pay=("regular_pay", "sum"),
         total_pay=("total_pay", "sum"),
         reer=("reer", "sum"),
         total_with_reer=("total_with_reer", "sum"),
     )
     .reset_index()
-    .sort_values("week_label")
+    .sort_values(["employee", "week_label"])
 )
 
 numeric_cols = weekly_regular_pay_summary.select_dtypes(include=["number"]).columns
