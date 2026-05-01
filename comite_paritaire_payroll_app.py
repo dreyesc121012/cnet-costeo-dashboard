@@ -64,6 +64,10 @@ COL_EMPLOYEE_CLASS = 8       # I
 COL_WEEK_RANGE = 10          # K, example: 03/01 - 09/01
 COL_RATE = 19                # T
 
+# OPTIONAL FILTER COLUMNS - adjust indexes if your Excel uses different columns
+COL_PROVINCE = 2             # C
+COL_BUILDING = 3             # D
+
 # DATA: L:R = SA, SU, MO, TUE, WE, TH, FRI
 DAY_COL_START = 11           # L
 DAY_COL_END_EXCLUSIVE = 18   # R included
@@ -620,6 +624,10 @@ def load_selected_excel_files_regular(
                 employee = clean_text(r.iloc[COL_EMPLOYEE_NAME]) if len(r) > COL_EMPLOYEE_NAME else ""
                 employee_class = normalize_class(r.iloc[COL_EMPLOYEE_CLASS]) if len(r) > COL_EMPLOYEE_CLASS else DEFAULT_CLASS_WHEN_NO_CLASS
                 week_range_text = clean_text(r.iloc[COL_WEEK_RANGE]) if len(r) > COL_WEEK_RANGE else ""
+                province = clean_text(r.iloc[COL_PROVINCE]) if len(r) > COL_PROVINCE else ""
+                building = clean_text(r.iloc[COL_BUILDING]) if len(r) > COL_BUILDING else ""
+                if not building:
+                    building = vendor
 
                 week_start_from_excel, week_end_from_excel = parse_week_range_cell(
                     week_range_text,
@@ -728,6 +736,8 @@ def load_selected_excel_files_regular(
                 all_rows.append({
                     "source_month_folder": source_month,
                     "source_file": file_name,
+                    "province": province,
+                    "building": building,
                     "excel_week_range": week_range_text,
                     "excel_week_start": week_start_from_excel,
                     "excel_week_end": week_end_from_excel,
@@ -795,7 +805,7 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     """
 
     grouped = (
-        df.groupby(["vendor_company", "employee", "employee_class", "week_label"], dropna=False)
+        df.groupby(["vendor_company", "province", "building", "employee", "employee_class", "week_label"], dropna=False)
         .agg(
             regular_hours=("regular_hours", "sum"),
             suppl_hours=("suppl_hours", "sum"),
@@ -807,7 +817,7 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
             source_file=("source_file", "first"),
         )
         .reset_index()
-        .sort_values(["vendor_company", "employee", "week_label", "employee_class"])
+        .sort_values(["vendor_company", "province", "building", "employee", "week_label", "employee_class"])
     )
 
     grouped["regular_hours_original"] = grouped["regular_hours"]
@@ -817,11 +827,11 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
 
     # Convert hours above 40 per employee/week into Suppl.
     employee_week_groups = grouped.groupby(
-        ["vendor_company", "employee", "week_label"],
+        ["vendor_company", "province", "building", "employee", "week_label"],
         dropna=False
     ).groups
 
-    for (vendor, employee, week_label), idx_values in employee_week_groups.items():
+    for (vendor, province, building, employee, week_label), idx_values in employee_week_groups.items():
         idx_list = list(idx_values)
 
         total_regular_worked = float(grouped.loc[idx_list, "regular_hours"].sum())
@@ -912,6 +922,8 @@ def create_employee_report_blocks(weekly_df: pd.DataFrame, vendor_company: str):
             "employee": employee,
             "employee_class": emp_class,
             "vendor_company": vendor_company,
+            "province": emp_df["province"].dropna().astype(str).iloc[0] if "province" in emp_df.columns and not emp_df.empty else "",
+            "building": emp_df["building"].dropna().astype(str).iloc[0] if "building" in emp_df.columns and not emp_df.empty else "",
             "weeks": week_labels,
             "rows": [],
             "week_pay_totals": [],
@@ -1066,6 +1078,8 @@ def export_regular_hours_report(weekly_df: pd.DataFrame, start_date_value) -> By
 
                 summary_rows.append({
                     "Vendor Company": vendor,
+                    "Province": block.get("province", ""),
+                    "Building": block.get("building", ""),
                     "Employee": block["employee"],
                     "Employee Class": block["employee_class"],
                     "Total Hours": round(float(block["total_hours"]), 2),
@@ -1075,7 +1089,7 @@ def export_regular_hours_report(weekly_df: pd.DataFrame, start_date_value) -> By
                 })
 
             levy = round(grand_total_with_reer * 0.01, 2)
-            prelevement_total_du_vendor = round(grand_total_with_reer + levy, 2)
+            prelevement_total_du_vendor = round(grand_total_reer + levy, 2)
             top_col = 13
             ws.write(0, top_col, "TOTAL DES GAINS", header_fmt)
             ws.write_number(0, top_col + 1, round(grand_total_pay, 2), total_money_fmt)
@@ -1280,6 +1294,8 @@ df = raw_df.copy()
 
 df["date"] = pd.to_datetime(df["date"], errors="coerce")
 df["vendor_company"] = safe_text_series(df["vendor_company"])
+df["province"] = safe_text_series(df.get("province", ""))
+df["building"] = safe_text_series(df.get("building", ""))
 df["employee"] = safe_text_series(df["employee"])
 df["employee_class"] = safe_text_series(df["employee_class"]).replace({"": DEFAULT_CLASS_WHEN_NO_CLASS})
 df["type_of_work"] = TYPE_OF_WORK_DEFAULT
@@ -1303,6 +1319,12 @@ if df.empty:
 
 st.sidebar.header("🧷 Report Filters")
 
+all_provinces = sorted([p for p in df["province"].dropna().unique().tolist() if p])
+selected_provinces = st.sidebar.multiselect("Province", all_provinces, default=all_provinces)
+
+all_buildings = sorted([b for b in df["building"].dropna().unique().tolist() if b])
+selected_buildings = st.sidebar.multiselect("Building", all_buildings, default=all_buildings)
+
 all_vendors = sorted([v for v in df["vendor_company"].dropna().unique().tolist() if v])
 selected_vendors = st.sidebar.multiselect("Vendor Company", all_vendors, default=all_vendors)
 
@@ -1320,6 +1342,10 @@ num_weeks = st.sidebar.number_input("Number of weeks", min_value=1, max_value=24
 
 filtered_df = df.copy()
 
+if selected_provinces:
+    filtered_df = filtered_df[filtered_df["province"].isin(selected_provinces)]
+if selected_buildings:
+    filtered_df = filtered_df[filtered_df["building"].isin(selected_buildings)]
 if selected_vendors:
     filtered_df = filtered_df[filtered_df["vendor_company"].isin(selected_vendors)]
 if selected_classes:
@@ -1355,7 +1381,7 @@ total_gains_all = round(float(weekly_summary["total_pay"].sum()), 2)
 total_reer_all = round(float(weekly_summary["reer"].sum()), 2)
 total_with_reer_all = round(float(weekly_summary["total_with_reer"].sum()), 2)
 levy_1pct = round(total_with_reer_all * 0.01, 2)
-prelevement_total_du = round(total_with_reer_all + levy_1pct, 2)
+prelevement_total_du = round(total_reer_all + levy_1pct, 2)
 total_hours_all = round(float(weekly_summary["total_hours"].sum()), 2)
 
 col1, col2, col3, col4, col5 = st.columns(5)
@@ -1364,7 +1390,7 @@ col1.metric("TOTAL HOURS", f"{total_hours_all:,.2f}")
 col2.metric("TOTAL DES GAINS", format_money(total_gains_all))
 col3.metric("TOTAL REER", format_money(total_reer_all))
 col4.metric("TOTAL GAINS + REER", format_money(total_with_reer_all))
-col5.metric("PRÉLÈVEMENT TOTAL DÛ", format_money(prelevement_total_du))
+col5.metric("PRÉLÈVEMENT TOTAL DÛ (REER + 1%)", format_money(prelevement_total_du))
 
 
 # ============================================================
@@ -1374,6 +1400,8 @@ st.subheader("Employee summary")
 
 summary_view_cols = [
     "vendor_company",
+    "province",
+    "building",
     "employee",
     "employee_class",
     "week_label",
@@ -1407,6 +1435,8 @@ st.subheader("Filtered source data")
 preview_cols = [
     "source_month_folder",
     "source_file",
+    "province",
+    "building",
     "excel_week_range",
     "excel_week_start",
     "excel_week_end",
