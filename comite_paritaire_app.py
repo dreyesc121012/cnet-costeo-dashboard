@@ -506,28 +506,28 @@ def build_maladie_accrual(df: pd.DataFrame) -> pd.DataFrame:
     work_df["cycle_end"] = work_df["date"].apply(get_maladie_cycle_end)
 
     jan4_2026 = pd.Timestamp("2026-01-04")
-    apr30_2026 = pd.Timestamp("2026-04-30")
-    may1_2026 = pd.Timestamp("2026-05-01")
+    oct30_2026 = pd.Timestamp("2026-10-30")
+    nov1_2026 = pd.Timestamp("2026-11-01")
 
     work_df.loc[
-        (work_df["date"] >= jan4_2026) & (work_df["date"] <= apr30_2026),
+        (work_df["date"] >= jan4_2026) & (work_df["date"] <= oct30_2026),
         "cycle_start"
     ] = jan4_2026
 
     work_df.loc[
-        (work_df["date"] >= jan4_2026) & (work_df["date"] <= apr30_2026),
+        (work_df["date"] >= jan4_2026) & (work_df["date"] <= oct30_2026),
         "cycle_end"
-    ] = apr30_2026
+    ] = oct30_2026
 
     work_df.loc[
-        work_df["date"] >= may1_2026,
+        work_df["date"] >= nov1_2026,
         "cycle_start"
-    ] = work_df.loc[work_df["date"] >= may1_2026, "date"].apply(get_maladie_cycle_start)
+    ] = work_df.loc[work_df["date"] >= nov1_2026, "date"].apply(get_maladie_cycle_start)
 
     work_df.loc[
-        work_df["date"] >= may1_2026,
+        work_df["date"] >= nov1_2026,
         "cycle_end"
-    ] = work_df.loc[work_df["date"] >= may1_2026, "date"].apply(get_maladie_cycle_end)
+    ] = work_df.loc[work_df["date"] >= nov1_2026, "date"].apply(get_maladie_cycle_end)
 
     work_df = work_df.sort_values(
         ["vendor_company", "employee", "date", "source_file"]
