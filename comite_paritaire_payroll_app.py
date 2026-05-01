@@ -64,10 +64,6 @@ COL_EMPLOYEE_CLASS = 8       # I
 COL_WEEK_RANGE = 10          # K, example: 03/01 - 09/01
 COL_RATE = 19                # T
 
-# OPTIONAL FILTER COLUMNS - adjust indexes if your Excel uses different columns
-COL_PROVINCE = 2             # C
-COL_BUILDING = 3             # D
-
 # DATA: L:R = SA, SU, MO, TUE, WE, TH, FRI
 DAY_COL_START = 11           # L
 DAY_COL_END_EXCLUSIVE = 18   # R included
@@ -570,6 +566,23 @@ def get_special_hours(special_lookup: dict, employee: str, employee_class: str, 
     return 0.0
 
 
+def find_column_index_by_header(raw: pd.DataFrame, candidates: list[str], search_rows: int = 10):
+    """
+    Finds a column index from the Excel sheet by scanning the first rows.
+    Used for real Excel columns such as Building Province and building.
+    """
+    candidate_norms = [normalize_text(c) for c in candidates]
+
+    max_rows = min(search_rows, raw.shape[0])
+    for row_idx in range(max_rows):
+        for col_idx in range(raw.shape[1]):
+            cell_norm = normalize_text(raw.iat[row_idx, col_idx])
+            if cell_norm in candidate_norms:
+                return col_idx
+
+    return None
+
+
 # ============================================================
 # DATA LOADING
 # ============================================================
@@ -607,6 +620,17 @@ def load_selected_excel_files_regular(
             special_hours_lookup = build_special_hours_lookup(file_bytes, excel_file)
             raw = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_to_use, header=None)
 
+            # Real Excel columns used for filters.
+            # The code searches the DATA sheet headers instead of using manual fixed values.
+            building_province_col = find_column_index_by_header(
+                raw,
+                ["Building Province", "Province"],
+            )
+            building_col = find_column_index_by_header(
+                raw,
+                ["building", "Building", "Building Name"],
+            )
+
             day_headers = raw.iloc[DAY_HEADER_ROW, DAY_COL_START:DAY_COL_END_EXCLUSIVE].tolist()
             data = raw.iloc[DATA_START_ROW:].copy()
 
@@ -615,19 +639,19 @@ def load_selected_excel_files_regular(
                 "source_month_folder": source_month,
                 "sheet": sheet_to_use,
                 "day_headers_L_R": [clean_text(x) for x in day_headers],
+                "building_province_col_index": building_province_col,
+                "building_col_index": building_col,
                 "input_sheet_found": special_hours_lookup.get("sheet_found"),
                 "input_rows_found": special_hours_lookup.get("rows_found", 0),
             })
 
             for _, r in data.iterrows():
                 vendor = clean_text(r.iloc[COL_VENDOR_COMPANY]) if len(r) > COL_VENDOR_COMPANY else ""
+                building_province = clean_text(r.iloc[building_province_col]) if building_province_col is not None and len(r) > building_province_col else ""
+                building = clean_text(r.iloc[building_col]) if building_col is not None and len(r) > building_col else ""
                 employee = clean_text(r.iloc[COL_EMPLOYEE_NAME]) if len(r) > COL_EMPLOYEE_NAME else ""
                 employee_class = normalize_class(r.iloc[COL_EMPLOYEE_CLASS]) if len(r) > COL_EMPLOYEE_CLASS else DEFAULT_CLASS_WHEN_NO_CLASS
                 week_range_text = clean_text(r.iloc[COL_WEEK_RANGE]) if len(r) > COL_WEEK_RANGE else ""
-                province = clean_text(r.iloc[COL_PROVINCE]) if len(r) > COL_PROVINCE else ""
-                building = clean_text(r.iloc[COL_BUILDING]) if len(r) > COL_BUILDING else ""
-                if not building:
-                    building = vendor
 
                 week_start_from_excel, week_end_from_excel = parse_week_range_cell(
                     week_range_text,
@@ -736,14 +760,14 @@ def load_selected_excel_files_regular(
                 all_rows.append({
                     "source_month_folder": source_month,
                     "source_file": file_name,
-                    "province": province,
-                    "building": building,
                     "excel_week_range": week_range_text,
                     "excel_week_start": week_start_from_excel,
                     "excel_week_end": week_end_from_excel,
                     "special_lookup_date": week_lookup_key,
                     "date": report_date,
                     "vendor_company": vendor,
+                    "building_province": building_province,
+                    "building": building,
                     "employee": employee,
                     "employee_class": employee_class,
                     "type_of_work": TYPE_OF_WORK_DEFAULT,
@@ -805,7 +829,7 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     """
 
     grouped = (
-        df.groupby(["vendor_company", "province", "building", "employee", "employee_class", "week_label"], dropna=False)
+        df.groupby(["vendor_company", "building_province", "building", "employee", "employee_class", "week_label"], dropna=False)
         .agg(
             regular_hours=("regular_hours", "sum"),
             suppl_hours=("suppl_hours", "sum"),
@@ -817,7 +841,7 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
             source_file=("source_file", "first"),
         )
         .reset_index()
-        .sort_values(["vendor_company", "province", "building", "employee", "week_label", "employee_class"])
+        .sort_values(["vendor_company", "building_province", "building", "employee", "week_label", "employee_class"])
     )
 
     grouped["regular_hours_original"] = grouped["regular_hours"]
@@ -827,11 +851,11 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
 
     # Convert hours above 40 per employee/week into Suppl.
     employee_week_groups = grouped.groupby(
-        ["vendor_company", "province", "building", "employee", "week_label"],
+        ["vendor_company", "employee", "week_label"],
         dropna=False
     ).groups
 
-    for (vendor, province, building, employee, week_label), idx_values in employee_week_groups.items():
+    for (vendor, employee, week_label), idx_values in employee_week_groups.items():
         idx_list = list(idx_values)
 
         total_regular_worked = float(grouped.loc[idx_list, "regular_hours"].sum())
@@ -922,8 +946,6 @@ def create_employee_report_blocks(weekly_df: pd.DataFrame, vendor_company: str):
             "employee": employee,
             "employee_class": emp_class,
             "vendor_company": vendor_company,
-            "province": emp_df["province"].dropna().astype(str).iloc[0] if "province" in emp_df.columns and not emp_df.empty else "",
-            "building": emp_df["building"].dropna().astype(str).iloc[0] if "building" in emp_df.columns and not emp_df.empty else "",
             "weeks": week_labels,
             "rows": [],
             "week_pay_totals": [],
@@ -1078,8 +1100,6 @@ def export_regular_hours_report(weekly_df: pd.DataFrame, start_date_value) -> By
 
                 summary_rows.append({
                     "Vendor Company": vendor,
-                    "Province": block.get("province", ""),
-                    "Building": block.get("building", ""),
                     "Employee": block["employee"],
                     "Employee Class": block["employee_class"],
                     "Total Hours": round(float(block["total_hours"]), 2),
@@ -1088,7 +1108,7 @@ def export_regular_hours_report(weekly_df: pd.DataFrame, start_date_value) -> By
                     "Total with REER": round(float(block["total_with_reer"]), 2),
                 })
 
-            levy = round(grand_total_with_reer * 0.01, 2)
+            levy = round(grand_total_reer * 0.01, 2)
             prelevement_total_du_vendor = round(grand_total_reer + levy, 2)
             top_col = 13
             ws.write(0, top_col, "TOTAL DES GAINS", header_fmt)
@@ -1097,7 +1117,7 @@ def export_regular_hours_report(weekly_df: pd.DataFrame, start_date_value) -> By
             ws.write_number(1, top_col + 1, round(grand_total_reer, 2), total_money_fmt)
             ws.write(2, top_col, "TOTAL DES GAINS INCLUANT REER", header_fmt)
             ws.write_number(2, top_col + 1, round(grand_total_with_reer, 2), total_money_fmt)
-            ws.write(3, top_col, "X 1% (EMPLOYEUR ET EMPLOYÉS)", header_fmt)
+            ws.write(3, top_col, "X 1% REER", header_fmt)
             ws.write_number(3, top_col + 1, levy, total_money_fmt)
             ws.write(4, top_col, "PRÉLÈVEMENT TOTAL DÛ", header_fmt)
             ws.write_number(4, top_col + 1, prelevement_total_du_vendor, total_money_fmt)
@@ -1294,8 +1314,8 @@ df = raw_df.copy()
 
 df["date"] = pd.to_datetime(df["date"], errors="coerce")
 df["vendor_company"] = safe_text_series(df["vendor_company"])
-df["province"] = safe_text_series(df.get("province", ""))
-df["building"] = safe_text_series(df.get("building", ""))
+df["building_province"] = safe_text_series(df["building_province"]) if "building_province" in df.columns else ""
+df["building"] = safe_text_series(df["building"]) if "building" in df.columns else ""
 df["employee"] = safe_text_series(df["employee"])
 df["employee_class"] = safe_text_series(df["employee_class"]).replace({"": DEFAULT_CLASS_WHEN_NO_CLASS})
 df["type_of_work"] = TYPE_OF_WORK_DEFAULT
@@ -1319,11 +1339,19 @@ if df.empty:
 
 st.sidebar.header("🧷 Report Filters")
 
-all_provinces = sorted([p for p in df["province"].dropna().unique().tolist() if p])
-selected_provinces = st.sidebar.multiselect("Province", all_provinces, default=all_provinces)
+all_building_provinces = sorted([p for p in df["building_province"].dropna().unique().tolist() if p])
+selected_building_provinces = st.sidebar.multiselect(
+    "Building Province",
+    all_building_provinces,
+    default=all_building_provinces,
+)
 
 all_buildings = sorted([b for b in df["building"].dropna().unique().tolist() if b])
-selected_buildings = st.sidebar.multiselect("Building", all_buildings, default=all_buildings)
+selected_buildings = st.sidebar.multiselect(
+    "Building",
+    all_buildings,
+    default=all_buildings,
+)
 
 all_vendors = sorted([v for v in df["vendor_company"].dropna().unique().tolist() if v])
 selected_vendors = st.sidebar.multiselect("Vendor Company", all_vendors, default=all_vendors)
@@ -1342,10 +1370,12 @@ num_weeks = st.sidebar.number_input("Number of weeks", min_value=1, max_value=24
 
 filtered_df = df.copy()
 
-if selected_provinces:
-    filtered_df = filtered_df[filtered_df["province"].isin(selected_provinces)]
+if selected_building_provinces:
+    filtered_df = filtered_df[filtered_df["building_province"].isin(selected_building_provinces)]
+
 if selected_buildings:
     filtered_df = filtered_df[filtered_df["building"].isin(selected_buildings)]
+
 if selected_vendors:
     filtered_df = filtered_df[filtered_df["vendor_company"].isin(selected_vendors)]
 if selected_classes:
@@ -1380,17 +1410,20 @@ weekly_summary = build_weekly_summary(filtered_df)
 total_gains_all = round(float(weekly_summary["total_pay"].sum()), 2)
 total_reer_all = round(float(weekly_summary["reer"].sum()), 2)
 total_with_reer_all = round(float(weekly_summary["total_with_reer"].sum()), 2)
-levy_1pct = round(total_with_reer_all * 0.01, 2)
+
+# 1% is calculated only on REER.
+levy_1pct = round(total_reer_all * 0.01, 2)
+
+# PRÉLÈVEMENT TOTAL DÛ = REER + 1% of REER.
 prelevement_total_du = round(total_reer_all + levy_1pct, 2)
-total_hours_all = round(float(weekly_summary["total_hours"].sum()), 2)
 
 col1, col2, col3, col4, col5 = st.columns(5)
 
-col1.metric("TOTAL HOURS", f"{total_hours_all:,.2f}")
-col2.metric("TOTAL DES GAINS", format_money(total_gains_all))
-col3.metric("TOTAL REER", format_money(total_reer_all))
+col1.metric("TOTAL DES GAINS", format_money(total_gains_all))
+col2.metric("TOTAL REER", format_money(total_reer_all))
+col3.metric("1% REER", format_money(levy_1pct))
 col4.metric("TOTAL GAINS + REER", format_money(total_with_reer_all))
-col5.metric("PRÉLÈVEMENT TOTAL DÛ (REER + 1%)", format_money(prelevement_total_du))
+col5.metric("PRÉLÈVEMENT TOTAL DÛ (REER + 1% REER)", format_money(prelevement_total_du))
 
 
 # ============================================================
@@ -1400,7 +1433,7 @@ st.subheader("Employee summary")
 
 summary_view_cols = [
     "vendor_company",
-    "province",
+    "building_province",
     "building",
     "employee",
     "employee_class",
@@ -1435,8 +1468,6 @@ st.subheader("Filtered source data")
 preview_cols = [
     "source_month_folder",
     "source_file",
-    "province",
-    "building",
     "excel_week_range",
     "excel_week_start",
     "excel_week_end",
@@ -1444,6 +1475,8 @@ preview_cols = [
     "date",
     "day",
     "vendor_company",
+    "building_province",
+    "building",
     "employee",
     "employee_class",
     "type_of_work",
