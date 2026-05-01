@@ -1,4 +1,3 @@
-import base64
 import os
 from io import BytesIO
 from datetime import timedelta, datetime
@@ -82,8 +81,8 @@ ROW_ORDER = [
     ("Régulier", "regular_hours"),
     ("Overtime", "overtime_hours"),
     ("Suppl.", "suppl_hours"),
-    ("Congé", "conge_hours"),
     ("Vacances", "vacances_hours"),
+    ("Congé", "conge_hours"),
     ("Congé Travaillé", "conge_trav_hours"),
     ("Maladie", "maladie_hours"),
 ]
@@ -153,23 +152,6 @@ def dataframe_with_2_decimals(df: pd.DataFrame):
         for col in numeric_cols
     }
     st.dataframe(df, use_container_width=True, column_config=column_config)
-
-
-def first_non_empty(series: pd.Series) -> str:
-    for value in series:
-        txt = clean_text(value)
-        if txt:
-            return txt
-    return ""
-
-
-def format_excel_date(value) -> str:
-    if pd.isna(value):
-        return ""
-    dt = pd.to_datetime(value, errors="coerce")
-    if pd.notna(dt):
-        return pd.Timestamp(dt).strftime("%Y-%m-%d")
-    return clean_text(value)
 
 
 def normalize_class(x) -> str:
@@ -638,8 +620,8 @@ def load_selected_excel_files_regular(
             special_hours_lookup = build_special_hours_lookup(file_bytes, excel_file)
             raw = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_to_use, header=None)
 
-            # DATA!C2 is used as the vacation pay date when DATA L:R contains V.
-            data_c2_pay_date_vacance = format_excel_date(raw.iat[1, 2]) if raw.shape[0] > 1 and raw.shape[1] > 2 else ""
+            # DATA!C2 = Pay date vacance. Used only when DATA L:R contains V.
+            pay_date_vacance_from_data = clean_text(raw.iat[1, 2]) if raw.shape[0] > 1 and raw.shape[1] > 2 else ""
 
             # Real Excel columns used for filters.
             # The code searches the DATA sheet headers instead of using manual fixed values.
@@ -664,7 +646,6 @@ def load_selected_excel_files_regular(
                 "building_col_index": building_col,
                 "input_sheet_found": special_hours_lookup.get("sheet_found"),
                 "input_rows_found": special_hours_lookup.get("rows_found", 0),
-                "data_c2_pay_date_vacance": data_c2_pay_date_vacance,
             })
 
             for _, r in data.iterrows():
@@ -724,11 +705,11 @@ def load_selected_excel_files_regular(
                         regular_hours += float(numeric_value)
 
                 suppl_hours = 0.0
-                conge_hours = 0.0
                 vacances_hours = 0.0
+                pay_date_vacance = ""
+                conge_hours = 0.0
                 conge_trav_hours = 0.0
                 maladie_hours = 0.0
-                pay_date_vacance = ""
 
                 # INPUT / IMPUT lookup:
                 # Match by Employee + Class + Week Range.
@@ -757,12 +738,11 @@ def load_selected_excel_files_regular(
 
                 # FINAL RULES:
                 # DATA L:R contains V  -> take IMPUT M hours and put in vacances_hours
-                # DATA L:R contains V  -> Pay date vacance = DATA!C2
                 # DATA L:R contains SD -> take IMPUT N hours and put in maladie_hours
                 # DATA L:R contains H  -> take IMPUT O hours and put in conge_trav_hours
                 if "V" in week_letters:
                     vacances_hours += input_v_hours
-                    pay_date_vacance = data_c2_pay_date_vacance
+                    pay_date_vacance = pay_date_vacance_from_data
 
                 if "SD" in week_letters:
                     maladie_hours += input_sd_hours
@@ -770,13 +750,13 @@ def load_selected_excel_files_regular(
                 if "H" in week_letters:
                     conge_trav_hours += input_h_hours
 
-                special_hours_total = conge_hours + vacances_hours + maladie_hours + conge_trav_hours + suppl_hours
+                special_hours_total = vacances_hours + conge_hours + maladie_hours + conge_trav_hours + suppl_hours
 
                 total_hours_for_week = (
                     regular_hours
                     + suppl_hours
-                    + conge_hours
                     + vacances_hours
+                    + conge_hours
                     + conge_trav_hours
                     + maladie_hours
                 )
@@ -806,13 +786,13 @@ def load_selected_excel_files_regular(
                     "input_h_hours": input_h_hours,
                     "input_sd_hours": input_sd_hours,
                     "special_hours_total": special_hours_total,
-                    "pay_date_vacance": pay_date_vacance,
                     "hours": total_hours_for_week,
                     "hourly_rate": rate,
                     "regular_hours": regular_hours,
                     "suppl_hours": suppl_hours,
-                    "conge_hours": conge_hours,
                     "vacances_hours": vacances_hours,
+                    "pay_date_vacance": pay_date_vacance,
+                    "conge_hours": conge_hours,
                     "conge_trav_hours": conge_trav_hours,
                     "maladie_hours": maladie_hours,
                 })
@@ -862,12 +842,12 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
         .agg(
             regular_hours=("regular_hours", "sum"),
             suppl_hours=("suppl_hours", "sum"),
-            conge_hours=("conge_hours", "sum"),
             vacances_hours=("vacances_hours", "sum"),
+            pay_date_vacance=("pay_date_vacance", "first"),
+            conge_hours=("conge_hours", "sum"),
             conge_trav_hours=("conge_trav_hours", "sum"),
             maladie_hours=("maladie_hours", "sum"),
             hourly_rate=("hourly_rate", "mean"),
-            pay_date_vacance=("pay_date_vacance", first_non_empty),
             source_month_folder=("source_month_folder", "first"),
             source_file=("source_file", "first"),
         )
@@ -928,8 +908,8 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     grouped["regular_pay"] = grouped["regular_hours"] * grouped["hourly_rate"]
     grouped["overtime_pay"] = 0.0
     grouped["suppl_pay"] = grouped["suppl_hours"] * grouped["hourly_rate"] * OVERTIME_MULTIPLIER
-    grouped["conge_pay"] = grouped["conge_hours"] * grouped["hourly_rate"]
     grouped["vacances_pay"] = grouped["vacances_hours"] * grouped["hourly_rate"]
+    grouped["conge_pay"] = grouped["conge_hours"] * grouped["hourly_rate"]
     grouped["conge_trav_pay"] = grouped["conge_trav_hours"] * grouped["hourly_rate"]
     grouped["maladie_pay"] = grouped["maladie_hours"] * grouped["hourly_rate"]
 
@@ -938,7 +918,6 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
         + grouped["overtime_pay"]
         + grouped["suppl_pay"]
         + grouped["conge_pay"]
-        + grouped["vacances_pay"]
         + grouped["conge_trav_pay"]
         + grouped["maladie_pay"]
     )
@@ -948,7 +927,6 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
         + grouped["overtime_hours"]
         + grouped["suppl_hours"]
         + grouped["conge_hours"]
-        + grouped["vacances_hours"]
         + grouped["conge_trav_hours"]
         + grouped["maladie_hours"]
     )
@@ -1359,8 +1337,8 @@ for c in [
     "hourly_rate",
     "regular_hours",
     "suppl_hours",
-    "conge_hours",
     "vacances_hours",
+    "conge_hours",
     "conge_trav_hours",
     "maladie_hours",
 ]:
@@ -1473,12 +1451,12 @@ summary_view_cols = [
     "employee",
     "employee_class",
     "week_label",
-    "pay_date_vacance",
     "regular_hours",
     "overtime_hours",
     "suppl_hours",
-    "conge_hours",
     "vacances_hours",
+    "pay_date_vacance",
+    "conge_hours",
     "conge_trav_hours",
     "maladie_hours",
     "total_hours",
@@ -1486,8 +1464,8 @@ summary_view_cols = [
     "regular_pay",
     "overtime_pay",
     "suppl_pay",
-    "conge_pay",
     "vacances_pay",
+    "conge_pay",
     "conge_trav_pay",
     "maladie_pay",
     "total_pay",
@@ -1519,15 +1497,16 @@ weekly_regular_pay_summary = (
                 weekly_summary.loc[x.index, "employee_class"].apply(normalize_text) == "class b"
             ].sum()
         ),
-        pay_date_vacance=("pay_date_vacance", first_non_empty),
         regular_hours=("regular_hours", "sum"),
         suppl_hours=("suppl_hours", "sum"),
-        conge_hours=("conge_hours", "sum"),
         vacances_hours=("vacances_hours", "sum"),
+        pay_date_vacance=("pay_date_vacance", "first"),
+        conge_hours=("conge_hours", "sum"),
         conge_trav_hours=("conge_trav_hours", "sum"),
         maladie_hours=("maladie_hours", "sum"),
         total_hours=("total_hours", "sum"),
         regular_pay=("regular_pay", "sum"),
+        vacances_pay=("vacances_pay", "sum"),
         total_pay=("total_pay", "sum"),
         reer=("reer", "sum"),
         total_with_reer=("total_with_reer", "sum"),
@@ -1569,12 +1548,12 @@ preview_cols = [
     "input_h_hours",
     "input_sd_hours",
     "special_hours_total",
-    "pay_date_vacance",
     "hours",
     "regular_hours",
     "suppl_hours",
-    "conge_hours",
     "vacances_hours",
+    "pay_date_vacance",
+    "conge_hours",
     "conge_trav_hours",
     "maladie_hours",
     "hourly_rate",
@@ -1609,5 +1588,5 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Loader diagnostics:", st.session_state.get("regular_loader_diagnostics", []))
     st.write("Final source columns:", list(filtered_df.columns))
     st.write("Weekly summary columns:", list(weekly_summary.columns))
-    st.write("Special hours rule:", "DATA L:R reads worked hours by class. If DATA L:R has V/SD/H, IMPUT M(V)=Vacances, N(SD)=Maladie, O(H)=Congé Travaillé. If DATA L:R has V, Pay date vacance comes from DATA!C2. Match by Employee + Class + IMPUT L week range.")
+    st.write("Special hours rule:", "DATA L:R reads worked hours by class. If DATA L:R has V/SD/H, IMPUT M(V)=Vacances, N(SD)=Maladie, O(H)=Congé Travaillé. Match by Employee + Class + IMPUT L week range. If V is found, Pay date vacance comes from DATA!C2.")
     st.write("Suppl. rule:", "Over 40 regular worked hours per employee/week becomes Suppl.; Overtime is not used. Suppl. is assigned to Class A when available and paid at Class A rate x 1.5.")
