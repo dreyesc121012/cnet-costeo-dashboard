@@ -687,7 +687,14 @@ def load_selected_excel_files_regular(
                     week_values.append(cell_value)
 
                 week_letters = [clean_text(v).upper() for v in week_values]
-                visible_special_detected = any(letter in {"V", "SD", "H"} for letter in week_letters)
+
+                # Robust detection for special codes in DATA columns L:R.
+                # This catches cells like "V", "v", " V ", "V-", "V8", etc.
+                has_v = any("V" in clean_text(v).upper() for v in week_values)
+                has_sd = any("SD" in clean_text(v).upper() for v in week_values)
+                has_h = any("H" in clean_text(v).upper() for v in week_values)
+
+                visible_special_detected = has_v or has_sd or has_h
 
                 # Regular hours come ONLY from numeric values in DATA L:R.
                 # If a DATA cell is V, SD, or H, it is not counted as regular.
@@ -697,7 +704,7 @@ def load_selected_excel_files_regular(
                 for v in week_values:
                     txt = clean_text(v).upper()
 
-                    if txt in {"V", "SD", "H"}:
+                    if "V" in txt or "SD" in txt or "H" in txt:
                         continue
 
                     numeric_value = pd.to_numeric(v, errors="coerce")
@@ -741,14 +748,14 @@ def load_selected_excel_files_regular(
                 # DATA L:R contains V  -> take IMPUT M hours and put in vacances_hours
                 # DATA L:R contains SD -> take IMPUT N hours and put in maladie_hours
                 # DATA L:R contains H  -> take IMPUT O hours and put in conge_trav_hours
-                if "V" in week_letters:
+                if has_v:
                     vacances_hours += input_v_hours
                     pay_date_vacance = pay_date_vacance_from_data
 
-                if "SD" in week_letters:
+                if has_sd:
                     maladie_hours += input_sd_hours
 
-                if "H" in week_letters:
+                if has_h:
                     conge_trav_hours += input_h_hours
 
                 special_hours_total = vacances_hours + conge_hours + maladie_hours + conge_trav_hours + suppl_hours
@@ -1341,12 +1348,15 @@ for c in [
     "regular_hours",
     "suppl_hours",
     "vacances_hours",
-    "pay_date_vacance",
     "conge_hours",
     "conge_trav_hours",
     "maladie_hours",
 ]:
     df[c] = to_num_series(df[c])
+
+# IMPORTANT: pay_date_vacance is a date/text value from DATA!C2.
+# Do NOT convert it to numeric, otherwise it becomes 0.00 in the report.
+df["pay_date_vacance"] = safe_text_series(df["pay_date_vacance"])
 
 df = df.dropna(subset=["date"]).copy()
 
