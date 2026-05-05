@@ -57,6 +57,17 @@ REER_PER_HOUR = 0.45
 OVERTIME_WEEKLY_THRESHOLD = 40.0
 OVERTIME_MULTIPLIER = 1.5
 
+# Class C special hourly rates by employee.
+# These rates override the Excel rate only when the employee is Class C.
+CLASS_C_SPECIAL_RATES = {
+    "cristiano carreiro": 24.00,
+    "rejean marleau": 22.00,
+    "rodel mendoza": 22.00,
+    "victor duval": 24.00,
+    "daniel benitez": 23.50,
+    "Paula Medeiros": 24.00,
+}
+
 # DATA sheet layout
 COL_VENDOR_COMPANY = 0       # A
 COL_EMPLOYEE_NAME = 1        # B
@@ -160,6 +171,26 @@ def normalize_class(x) -> str:
     if txt == "" or normalize_text(txt) == "no class":
         return DEFAULT_CLASS_WHEN_NO_CLASS
     return txt
+
+
+def get_effective_hourly_rate(employee: str, employee_class: str, excel_rate: float) -> float:
+    """
+    Returns the hourly rate to use in the report.
+
+    Rule:
+    - If the employee is Class C and exists in CLASS_C_SPECIAL_RATES,
+      use the special rate.
+    - Otherwise, use the rate coming from the Excel file.
+    """
+    if normalize_text(employee_class) == "class c":
+        employee_key = normalize_text(employee)
+        if employee_key in CLASS_C_SPECIAL_RATES:
+            return float(CLASS_C_SPECIAL_RATES[employee_key])
+
+    try:
+        return float(excel_rate)
+    except Exception:
+        return 0.0
 
 
 def parse_week_range_cell(value, fallback_year=2026):
@@ -664,6 +695,7 @@ def load_selected_excel_files_regular(
 
                 rate = pd.to_numeric(r.iloc[COL_RATE], errors="coerce") if len(r) > COL_RATE else 0.0
                 rate = float(rate) if pd.notna(rate) else 0.0
+                rate = get_effective_hourly_rate(employee, employee_class, rate)
 
                 if not vendor and not employee:
                     continue
@@ -861,6 +893,16 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
         .sort_values(["vendor_company", "building_province", "building", "employee", "week_label", "employee_class"])
+    )
+
+    # Apply Class C special rates again after grouping as a safeguard.
+    grouped["hourly_rate"] = grouped.apply(
+        lambda row: get_effective_hourly_rate(
+            row.get("employee", ""),
+            row.get("employee_class", ""),
+            row.get("hourly_rate", 0.0),
+        ),
+        axis=1,
     )
 
     grouped["regular_hours_original"] = grouped["regular_hours"]
@@ -1509,6 +1551,12 @@ weekly_regular_pay_summary = (
             "regular_hours",
             lambda x: weekly_summary.loc[x.index, "regular_hours"][
                 weekly_summary.loc[x.index, "employee_class"].apply(normalize_text) == "class b"
+            ].sum()
+        ),
+        class_c_hours=(
+            "regular_hours",
+            lambda x: weekly_summary.loc[x.index, "regular_hours"][
+                weekly_summary.loc[x.index, "employee_class"].apply(normalize_text) == "class c"
             ].sum()
         ),
         regular_hours=("regular_hours", "sum"),
