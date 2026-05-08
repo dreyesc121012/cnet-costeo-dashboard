@@ -53,6 +53,25 @@ TYPE_OF_WORK_DEFAULT = "REGULAR"
 DEFAULT_CLASS_WHEN_NO_CLASS = "Class A"
 
 FIRST_COMMITTEE_WEEK_START_DEFAULT = pd.Timestamp("2026-01-04")
+
+# ============================================================
+# VENDOR-SPECIFIC COMMITTEE WEEK START DATES
+# ============================================================
+# Rule requested:
+# - Vendor Company 12433087 starts on 2026-01-04 and the first week ends on 2026-01-10.
+# - Vendor Company 13037622 starts on 2025-12-29 and the first week ends on 2026-01-04.
+# - Vendor Company 10696480 starts on 2026-01-05 and the first week ends on 2026-01-11.
+#
+# The code matches by company number, so it works even if the full vendor name
+# is written as "12433087 Canada Inc", "13037622 Canada Inc", etc.
+DEFAULT_COMMITTEE_WEEK_START = pd.Timestamp("2026-01-04")
+
+VENDOR_WEEK_START_DATES = {
+    "12433087": pd.Timestamp("2026-01-04"),
+    "13037622": pd.Timestamp("2025-12-29"),
+    "10696480": pd.Timestamp("2026-01-05"),
+}
+
 REER_PER_HOUR = 0.45
 OVERTIME_WEEKLY_THRESHOLD = 40.0
 OVERTIME_MULTIPLIER = 1.5
@@ -65,7 +84,7 @@ CLASS_C_SPECIAL_RATES = {
     "rodel mendoza": 22.00,
     "victor duval": 24.00,
     "daniel benitez": 23.50,
-    "Paula Medeiros": 24.00,
+    "paula medeiros": 24.00,
 }
 
 # DATA sheet layout
@@ -126,6 +145,27 @@ def clean_text(x) -> str:
     if pd.isna(x):
         return ""
     return " ".join(str(x).replace("\u00A0", " ").strip().split())
+
+
+def get_committee_week_start_for_vendor(vendor_company: str) -> pd.Timestamp:
+    """
+    Returns the first committee week start date according to Vendor Company.
+
+    Matching is based on the vendor company number, so it works with values like:
+    - 12433087
+    - 12433087 Canada Inc
+    - 13037622 Canada Inc
+    - 10696480 Canada Ltd
+
+    If no company number is found, the default start date is 2026-01-04.
+    """
+    vendor_norm = normalize_text(vendor_company)
+
+    for vendor_number, start_date_value in VENDOR_WEEK_START_DATES.items():
+        if vendor_number in vendor_norm:
+            return start_date_value
+
+    return DEFAULT_COMMITTEE_WEEK_START
 
 
 def safe_text_series(s: pd.Series) -> pd.Series:
@@ -1434,7 +1474,12 @@ selected_employees = st.sidebar.multiselect("Name Employee", all_employees, defa
 all_types = sorted([t for t in df["type_of_work"].dropna().unique().tolist() if t])
 selected_types = st.sidebar.multiselect("Type of work", all_types, default=all_types)
 
-start_date = st.sidebar.date_input("First committee week start date", value=FIRST_COMMITTEE_WEEK_START_DEFAULT.date())
+st.sidebar.info(
+    "Committee week start is automatic by Vendor Company:\n"
+    "- 12433087: starts 2026-01-04, first week ends 2026-01-10\n"
+    "- 13037622: starts 2025-12-29, first week ends 2026-01-04\n"
+    "- 10696480: starts 2026-01-05, first week ends 2026-01-11"
+)
 num_weeks = st.sidebar.number_input("Number of weeks", min_value=1, max_value=24, value=4)
 
 filtered_df = df.copy()
@@ -1454,10 +1499,15 @@ if selected_employees:
 if selected_types:
     filtered_df = filtered_df[filtered_df["type_of_work"].isin(selected_types)]
 
-start_date_dt = pd.to_datetime(start_date)
-
-filtered_df[["week_start", "week_end"]] = filtered_df["date"].apply(
-    lambda x: pd.Series(assign_committee_week(x, start_date_dt, num_weeks))
+filtered_df[["week_start", "week_end"]] = filtered_df.apply(
+    lambda row: pd.Series(
+        assign_committee_week(
+            row["date"],
+            get_committee_week_start_for_vendor(row["vendor_company"]),
+            num_weeks,
+        )
+    ),
+    axis=1,
 )
 
 filtered_df["week_start"] = pd.to_datetime(filtered_df["week_start"], errors="coerce")
@@ -1627,7 +1677,8 @@ dataframe_with_2_decimals(filtered_df[[c for c in preview_cols if c in filtered_
 # ============================================================
 # EXPORT
 # ============================================================
-report_file = export_regular_hours_report(weekly_summary, start_date)
+report_start_date = filtered_df["week_start"].min() if "week_start" in filtered_df.columns else DEFAULT_COMMITTEE_WEEK_START
+report_file = export_regular_hours_report(weekly_summary, report_start_date)
 
 st.download_button(
     label="Download Regular Hours Excel Report",
@@ -1650,4 +1701,6 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Final source columns:", list(filtered_df.columns))
     st.write("Weekly summary columns:", list(weekly_summary.columns))
     st.write("Special hours rule:", "DATA L:R reads worked hours by class. If DATA L:R has V, IMPUT M(V)=Vacances and Pay date vacance=DATA!C2. If DATA L:R has SD/H, IMPUT N(SD)=Maladie, O(H)=Congé Travaillé. Match by Employee + Class + IMPUT L week range.")
+    st.write("Vendor-specific committee week starts:", {k: str(v.date()) for k, v in VENDOR_WEEK_START_DATES.items()})
+    st.write("Default committee week start:", str(DEFAULT_COMMITTEE_WEEK_START.date()))
     st.write("Suppl. rule:", "Over 40 regular worked hours per employee/week becomes Suppl.; Overtime is not used. Suppl. is assigned to Class A when available and paid at Class A rate x 1.5.")
