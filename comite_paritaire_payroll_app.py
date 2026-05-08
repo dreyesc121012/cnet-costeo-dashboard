@@ -9,11 +9,10 @@ import requests
 import streamlit as st
 import msal
 
-
 # ============================================================
 # PAGE
 # ============================================================
-st.set_page_config(page_title="Comité Paritaire QC", layout="wide")
+st.set_page_config(page_title="CNET Regular Hours Report", layout="wide")
 
 LOGO_PATH = "cnet_logo.png"
 
@@ -22,17 +21,23 @@ with top_left:
     if os.path.exists(LOGO_PATH):
         st.image(LOGO_PATH, width=220)
 with top_right:
-    st.title("Comité Paritaire Québec - Weekly Report")
-
+    st.title("CNET Regular Hours Report")
 
 # ============================================================
-# CONFIG (SECRETS)
+# CONFIG - SECRETS
 # ============================================================
 CLIENT_ID = str(st.secrets["CLIENT_ID"]).strip()
 CLIENT_SECRET = str(st.secrets["CLIENT_SECRET"]).strip()
 TENANT_ID = str(st.secrets["TENANT_ID"]).strip()
 REDIRECT_URI = str(st.secrets["REDIRECT_URI"]).strip().rstrip("/")
-ONEDRIVE_FOLDER_URL = str(st.secrets["ONEDRIVE_FOLDER_URL"]).strip()
+
+ONEDRIVE_FOLDER_URL = str(
+    st.secrets.get(
+        "ONEDRIVE_FOLDER_URL",
+        "https://groupcastillo.sharepoint.com/:f:/s/GroupCastilloTeamSite/IgDJ46w1V3YWT7e0yB8CKkD9AenZh0xzbn8pNRRGuDcIpPw?e=s4L0Z9",
+    )
+).strip()
+
 ALLOWED_DOMAIN = str(st.secrets.get("ALLOWED_DOMAIN", "")).strip().lower()
 DOMAIN_HINT = str(st.secrets.get("DOMAIN_HINT", "")).strip()
 LOGIN_HINT = str(st.secrets.get("LOGIN_HINT", "")).strip()
@@ -40,51 +45,72 @@ LOGIN_HINT = str(st.secrets.get("LOGIN_HINT", "")).strip()
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 SCOPES = ["User.Read", "Files.Read.All", "Sites.Read.All"]
 
-
 # ============================================================
 # BUSINESS RULES
 # ============================================================
-CLASS_A_RATE_BEFORE_MAR_4_2026 = 21.57
-CLASS_A_RATE_FROM_MAR_4_2026 = 23.25
-RATE_CHANGE_DATE = pd.Timestamp("2026-03-04")
+SHEET_DATA = "DATA"
+TYPE_OF_WORK_DEFAULT = "REGULAR"
+DEFAULT_CLASS_WHEN_NO_CLASS = "Class A"
 
+FIRST_COMMITTEE_WEEK_START_DEFAULT = pd.Timestamp("2026-01-04")
 REER_PER_HOUR = 0.45
+OVERTIME_WEEKLY_THRESHOLD = 40.0
+OVERTIME_MULTIPLIER = 1.5
 
-MALADIE_ACCRUAL_FACTOR = 0.0244
-MALADIE_THRESHOLD_HOURS = 280.0
+# Class C special hourly rates by employee.
+# These rates override the Excel rate only when the employee is Class C.
+CLASS_C_SPECIAL_RATES = {
+    "cristiano carreiro": 24.00,
+    "rejean marleau": 22.00,
+    "rodel mendoza": 22.00,
+    "victor duval": 24.00,
+    "daniel benitez": 23.50,
+    "Paula Medeiros": 24.00,
+}
 
-VACATION_ACCRUAL_RATE = 0.06
-INITIAL_VACATION_CYCLE_START = pd.Timestamp("2026-01-04")
-INITIAL_VACATION_CYCLE_END = pd.Timestamp("2027-04-30")
-NEXT_VACATION_CYCLE_FIRST_START = pd.Timestamp("2027-05-01")
+# DATA sheet layout
+COL_VENDOR_COMPANY = 0       # A
+COL_EMPLOYEE_NAME = 1        # B
+COL_EMPLOYEE_CLASS = 8       # I
+COL_WEEK_RANGE = 10          # K, example: 03/01 - 09/01
+COL_RATE = 19                # T
+
+# DATA: L:R = SA, SU, MO, TUE, WE, TH, FRI
+DAY_COL_START = 11           # L
+DAY_COL_END_EXCLUSIVE = 18   # R included
+DAY_HEADER_ROW = 3           # Excel row 4
+DATA_START_ROW = 4           # Excel row 5
+
+# INPUT / IMPUT sheet layout
+INPUT_COL_EMPLOYEE_NAME = 1   # B
+INPUT_COL_EMPLOYEE_CLASS = 8  # I
+INPUT_COL_FECHA = 11          # L = FECHA / Week number range, example: 03/01 - 09/01
+INPUT_COL_V = 12              # M = V  -> Vacances
+INPUT_COL_SD = 13             # N = SD -> Maladie
+INPUT_COL_H = 14              # O = H  -> Congé Travaillé
 
 ROW_ORDER = [
     ("Régulier", "regular_hours"),
+    ("Overtime", "overtime_hours"),
     ("Suppl.", "suppl_hours"),
+    ("Vacances", "vacances_hours"),
     ("Congé", "conge_hours"),
     ("Congé Travaillé", "conge_trav_hours"),
     ("Maladie", "maladie_hours"),
-    ("Banque maladie accumulée", "maladie_accrued_hours"),
-    ("Banque vacances accumulée", "vacation_accrued_amount"),
 ]
 
-# ============================================================
-# VENDOR-SPECIFIC COMMITTEE WEEK START DATES
-# ============================================================
-# 12433087 Canada Inc: week starts 2026-01-04 and ends 2026-01-10
-# 10696480 Canada Ltd: week starts 2026-01-05 and ends 2026-01-11
-# 13037622 Canada Inc: week starts 2025-12-29 and ends 2026-01-04
-DEFAULT_COMMITTEE_WEEK_START = pd.Timestamp("2026-01-04")
-
-VENDOR_WEEK_START_DATES = {
-    "12433087 canada inc": pd.Timestamp("2026-01-04"),
-    "10696480 canada ltd": pd.Timestamp("2026-01-05"),
-    "13037622 canada inc": pd.Timestamp("2025-12-29"),
+DAY_MAP = {
+    "SA": "Saturday", "SAT": "Saturday", "SATURDAY": "Saturday", "SAM": "Saturday", "SAMEDI": "Saturday",
+    "SU": "Sunday", "SUN": "Sunday", "SUNDAY": "Sunday", "DIM": "Sunday", "DIMANCHE": "Sunday",
+    "MO": "Monday", "MON": "Monday", "MONDAY": "Monday", "LUN": "Monday", "LUNDI": "Monday",
+    "TU": "Tuesday", "TUE": "Tuesday", "TUESDAY": "Tuesday", "MAR": "Tuesday", "MARDI": "Tuesday",
+    "WE": "Wednesday", "WED": "Wednesday", "WEDNESDAY": "Wednesday", "MER": "Wednesday", "MERCREDI": "Wednesday",
+    "TH": "Thursday", "THU": "Thursday", "THURSDAY": "Thursday", "JEU": "Thursday", "JEUDI": "Thursday",
+    "FR": "Friday", "FRI": "Friday", "FRIDAY": "Friday", "VEN": "Friday", "VENDREDI": "Friday",
 }
 
-
 # ============================================================
-# GENERIC HELPERS
+# HELPERS
 # ============================================================
 def normalize_text(s: str) -> str:
     s = "" if s is None else str(s)
@@ -96,32 +122,32 @@ def normalize_text(s: str) -> str:
     return s
 
 
-def get_committee_week_start_for_vendor(vendor_company: str) -> pd.Timestamp:
-    """
-    Returns the first committee week start date based on Vendor Company.
-    If the vendor name does not match the predefined companies, the default is 2026-01-04.
-    """
-    vendor_norm = normalize_text(vendor_company)
-
-    for vendor_key, start_date_value in VENDOR_WEEK_START_DATES.items():
-        if vendor_key in vendor_norm:
-            return start_date_value
-
-    return DEFAULT_COMMITTEE_WEEK_START
+def clean_text(x) -> str:
+    if pd.isna(x):
+        return ""
+    return " ".join(str(x).replace("\u00A0", " ").strip().split())
 
 
 def safe_text_series(s: pd.Series) -> pd.Series:
     out = s.astype(str).str.replace("\u00A0", " ", regex=False).str.strip()
     return out.replace(
-        {
-            "nan": "",
-            "None": "",
-            "none": "",
-            "NULL": "",
-            "null": "",
-            "<NA>": "",
-        }
+        {"nan": "", "None": "", "none": "", "NULL": "", "null": "", "<NA>": ""}
     ).fillna("")
+
+
+def to_num_series(s: pd.Series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(s):
+        return pd.to_numeric(s, errors="coerce").fillna(0.0)
+
+    cleaned = (
+        s.astype(str)
+        .str.replace(",", "", regex=False)
+        .str.replace("$", "", regex=False)
+        .str.replace("(", "-", regex=False)
+        .str.replace(")", "", regex=False)
+        .str.strip()
+    )
+    return pd.to_numeric(cleaned, errors="coerce").fillna(0.0)
 
 
 def format_money(x) -> str:
@@ -140,67 +166,113 @@ def dataframe_with_2_decimals(df: pd.DataFrame):
     st.dataframe(df, use_container_width=True, column_config=column_config)
 
 
-def to_num_series(s: pd.Series) -> pd.Series:
-    if pd.api.types.is_numeric_dtype(s):
-        return pd.to_numeric(s, errors="coerce").fillna(0.0)
-
-    cleaned = (
-        s.astype(str)
-        .str.replace(",", "", regex=False)
-        .str.replace("$", "", regex=False)
-        .str.replace("(", "-", regex=False)
-        .str.replace(")", "", regex=False)
-        .str.strip()
-    )
-    return pd.to_numeric(cleaned, errors="coerce").fillna(0.0)
+def normalize_class(x) -> str:
+    txt = clean_text(x)
+    if txt == "" or normalize_text(txt) == "no class":
+        return DEFAULT_CLASS_WHEN_NO_CLASS
+    return txt
 
 
-def get_class_a_rate_for_date(date_value) -> float:
+def get_effective_hourly_rate(employee: str, employee_class: str, excel_rate: float) -> float:
+    """
+    Returns the hourly rate to use in the report.
+
+    Rule:
+    - If the employee is Class C and exists in CLASS_C_SPECIAL_RATES,
+      use the special rate.
+    - Otherwise, use the rate coming from the Excel file.
+    """
+    if normalize_text(employee_class) == "class c":
+        employee_key = normalize_text(employee)
+        if employee_key in CLASS_C_SPECIAL_RATES:
+            return float(CLASS_C_SPECIAL_RATES[employee_key])
+
     try:
-        d = pd.to_datetime(date_value)
+        return float(excel_rate)
     except Exception:
-        return CLASS_A_RATE_BEFORE_MAR_4_2026
+        return 0.0
+
+
+def parse_week_range_cell(value, fallback_year=2026):
+    txt = clean_text(value)
+    if not txt:
+        return pd.NaT, pd.NaT
+
+    txt = txt.replace("–", "-").replace("—", "-")
+    parts = [p.strip() for p in txt.split("-")]
+
+    if len(parts) < 2:
+        return pd.NaT, pd.NaT
+
+    def parse_part(p):
+        p = clean_text(p)
+        if not p:
+            return pd.NaT
+
+        dt = pd.to_datetime(f"{p}/{fallback_year}", format="%d/%m/%Y", errors="coerce")
+        if pd.notna(dt):
+            return pd.Timestamp(dt).normalize()
+
+        dt = pd.to_datetime(f"{p}-{fallback_year}", errors="coerce", dayfirst=True)
+        if pd.notna(dt):
+            return pd.Timestamp(dt).normalize()
+
+        dt = pd.to_datetime(p, errors="coerce", dayfirst=True)
+        if pd.notna(dt):
+            dt = pd.Timestamp(dt)
+            if dt.year < 2000:
+                dt = pd.Timestamp(year=fallback_year, month=dt.month, day=dt.day)
+            return dt.normalize()
+
+        return pd.NaT
+
+    return parse_part(parts[0]), parse_part(parts[1])
+
+
+def parse_input_date(value, fallback_year=2026):
+    if pd.isna(value):
+        return pd.NaT
+
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return pd.Timestamp(value).normalize()
+
+    txt = clean_text(value)
+    if not txt:
+        return pd.NaT
+
+    parsed = pd.to_datetime(txt, errors="coerce")
+
+    if pd.notna(parsed):
+        parsed = pd.Timestamp(parsed)
+        if parsed.year < 2000:
+            parsed = pd.Timestamp(year=fallback_year, month=parsed.month, day=parsed.day)
+        return parsed.normalize()
+
+    parsed = pd.to_datetime(f"{txt}-{fallback_year}", errors="coerce")
+    if pd.notna(parsed):
+        return pd.Timestamp(parsed).normalize()
+
+    parsed = pd.to_datetime(f"{txt}/{fallback_year}", dayfirst=True, errors="coerce")
+    if pd.notna(parsed):
+        return pd.Timestamp(parsed).normalize()
+
+    return pd.NaT
+
+
+def assign_committee_week(date_value: pd.Timestamp, start_date: pd.Timestamp, num_weeks: int = 24):
+    d = pd.to_datetime(date_value)
 
     if pd.isna(d):
-        return CLASS_A_RATE_BEFORE_MAR_4_2026
+        return None, None
 
-    return CLASS_A_RATE_FROM_MAR_4_2026 if d >= RATE_CHANGE_DATE else CLASS_A_RATE_BEFORE_MAR_4_2026
+    for i in range(num_weeks):
+        week_start = start_date + timedelta(days=i * 7)
+        week_end = week_start + timedelta(days=6)
 
+        if week_start <= d <= week_end:
+            return week_start, week_end
 
-def get_maladie_cycle_start(date_value):
-    d = pd.to_datetime(date_value)
-    if d.month >= 5:
-        return pd.Timestamp(year=d.year, month=5, day=1)
-    return pd.Timestamp(year=d.year - 1, month=5, day=1)
-
-
-def get_maladie_cycle_end(date_value):
-    start = get_maladie_cycle_start(date_value)
-    return pd.Timestamp(year=start.year + 1, month=4, day=30)
-
-
-def get_vacation_cycle_start(date_value):
-    d = pd.to_datetime(date_value)
-
-    if INITIAL_VACATION_CYCLE_START <= d <= INITIAL_VACATION_CYCLE_END:
-        return INITIAL_VACATION_CYCLE_START
-
-    if d >= NEXT_VACATION_CYCLE_FIRST_START:
-        if d.month >= 5:
-            return pd.Timestamp(year=d.year, month=5, day=1)
-        return pd.Timestamp(year=d.year - 1, month=5, day=1)
-
-    return INITIAL_VACATION_CYCLE_START
-
-
-def get_vacation_cycle_end(date_value):
-    d = pd.to_datetime(date_value)
-
-    if INITIAL_VACATION_CYCLE_START <= d <= INITIAL_VACATION_CYCLE_END:
-        return INITIAL_VACATION_CYCLE_END
-
-    start = get_vacation_cycle_start(d)
-    return pd.Timestamp(year=start.year + 1, month=4, day=30)
+    return None, None
 
 
 # ============================================================
@@ -210,23 +282,20 @@ def get_query_params_compat() -> dict:
     try:
         qp = st.query_params
         out = {}
+
         for k in qp.keys():
             v = qp.get(k)
-            if isinstance(v, list):
-                out[k] = v[0] if v else ""
-            else:
-                out[k] = str(v) if v is not None else ""
+            out[k] = v[0] if isinstance(v, list) and v else str(v) if v is not None else ""
+
         return out
+
     except Exception:
         try:
             qp = st.experimental_get_query_params()
-            out = {}
-            for k, v in qp.items():
-                if isinstance(v, list):
-                    out[k] = v[0] if v else ""
-                else:
-                    out[k] = str(v) if v is not None else ""
-            return out
+            return {
+                k: (v[0] if isinstance(v, list) and v else str(v))
+                for k, v in qp.items()
+            }
         except Exception:
             return {}
 
@@ -259,8 +328,10 @@ def get_me(access_token: str) -> dict:
         headers={"Authorization": f"Bearer {access_token}"},
         timeout=60,
     )
+
     if r.status_code != 200:
         raise RuntimeError(f"Graph /me error {r.status_code}\n{r.text}")
+
     return r.json()
 
 
@@ -269,14 +340,15 @@ def get_user_email(me: dict) -> str:
 
 
 def is_allowed_user(me: dict) -> bool:
-    email = get_user_email(me)
     if not ALLOWED_DOMAIN:
-        return False
+        return True
+
+    email = get_user_email(me)
     return email.endswith(f"@{ALLOWED_DOMAIN}")
 
 
 # ============================================================
-# GRAPH / ONEDRIVE HELPERS
+# GRAPH / SHAREPOINT HELPERS
 # ============================================================
 def graph_get(url: str, access_token: str) -> requests.Response:
     return requests.get(
@@ -288,8 +360,10 @@ def graph_get(url: str, access_token: str) -> requests.Response:
 
 def graph_get_json(url: str, access_token: str) -> dict:
     r = graph_get(url, access_token)
+
     if r.status_code != 200:
         raise RuntimeError(f"Graph error {r.status_code}\n{r.text}")
+
     return r.json()
 
 
@@ -303,35 +377,43 @@ def resolve_shared_link(access_token: str, shared_url: str) -> dict:
     share_id = make_share_id(shared_url)
     meta_url = f"https://graph.microsoft.com/v1.0/shares/{share_id}/driveItem"
     meta = graph_get(meta_url, access_token)
+
     if meta.status_code != 200:
         raise RuntimeError(
             f"Error resolving shared link: {meta.status_code}\n{meta.text}\n\n"
-            "TIP: Use SharePoint/OneDrive → Share → Copy link (within your organization)."
+            "TIP: Use SharePoint/OneDrive → Share → Copy link within your organization."
         )
+
     return meta.json()
 
 
 def download_item_bytes(access_token: str, drive_id: str, item_id: str) -> bytes:
     content_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
     r = graph_get(content_url, access_token)
+
     if r.status_code != 200:
         raise RuntimeError(f"Error downloading file: {r.status_code}\n{r.text}")
+
     return r.content
 
 
 def list_children_all(access_token: str, drive_id: str, folder_item_id: str):
     url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{folder_item_id}/children?$top=200"
     all_items = []
+
     while url:
         data = graph_get_json(url, access_token)
         all_items.extend(data.get("value", []))
         url = data.get("@odata.nextLink")
+
     return all_items
 
 
 def is_excel_name(name: str) -> bool:
     n = (name or "").lower()
-    return n.endswith(".xlsx") or n.endswith(".xlsm") or n.endswith(".xls")
+    return not n.startswith("~$") and (
+        n.endswith(".xlsx") or n.endswith(".xlsm") or n.endswith(".xls")
+    )
 
 
 def is_folder_item(item: dict) -> bool:
@@ -339,37 +421,217 @@ def is_folder_item(item: dict) -> bool:
 
 
 # ============================================================
-# DATA LOADING / MAPPING
+# SPECIAL HOURS INPUT / IMPUT
 # ============================================================
-def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
+def find_input_sheet_name(excel_file: pd.ExcelFile):
+    for sheet_name in excel_file.sheet_names:
+        if normalize_text(sheet_name) in {"input", "imput"}:
+            return sheet_name
+    return None
 
 
-def pick_column(df: pd.DataFrame, candidates: list[str], fallback_idx: int | None = None):
-    norm_cols = {normalize_text(c): c for c in df.columns}
+def normalize_week_range_text(value) -> str:
+    """
+    Normalizes week range values so DATA column K can match IMPUT column L.
 
-    for cand in candidates:
-        cand_norm = normalize_text(cand)
-        if cand_norm in norm_cols:
-            return norm_cols[cand_norm]
+    Examples:
+    03/01 - 09/01   -> 03/01-09/01
+    03/01-09/01     -> 03/01-09/01
+    03-Jan - 09-Jan -> 03/01-09/01
+    """
+    txt = clean_text(value)
+    if not txt:
+        return ""
 
-    for cand in candidates:
-        cand_norm = normalize_text(cand)
-        for col in df.columns:
-            if cand_norm in normalize_text(col):
-                return col
+    txt = txt.replace("–", "-").replace("—", "-").replace(" ", "")
 
-    if fallback_idx is not None and fallback_idx < len(df.columns):
-        return df.columns[fallback_idx]
+    if "-" not in txt:
+        return txt.upper()
+
+    parts = txt.split("-")
+    if len(parts) < 2:
+        return txt.upper()
+
+    def norm_part(p):
+        p = clean_text(p).replace(" ", "")
+        if not p:
+            return ""
+
+        dt = pd.to_datetime(p + "/2026", format="%d/%m/%Y", errors="coerce")
+        if pd.notna(dt):
+            return pd.Timestamp(dt).strftime("%d/%m")
+
+        dt = pd.to_datetime(p + "-2026", errors="coerce", dayfirst=True)
+        if pd.notna(dt):
+            return pd.Timestamp(dt).strftime("%d/%m")
+
+        dt = pd.to_datetime(p, errors="coerce", dayfirst=True)
+        if pd.notna(dt):
+            return pd.Timestamp(dt).strftime("%d/%m")
+
+        return p.upper()
+
+    return norm_part(parts[0]) + "-" + norm_part(parts[1])
+
+
+def build_special_hours_lookup(file_bytes: bytes, excel_file: pd.ExcelFile) -> dict:
+    """
+    Reads INPUT / IMPUT sheet.
+
+    IMPUT expected layout:
+    B = Employee
+    I = Class
+    L = FECHA / Week number range, example: 03/01 - 09/01
+    M = V  -> Vacances
+    N = SD -> Maladie
+    O = H  -> Congé Travaillé
+
+    IMPORTANT:
+    The hours from M/N/O are matched by:
+    Employee + Class + Week Range
+
+    Example:
+    DATA:
+      Employee = Antony De Jesus
+      Class = Class A
+      Week number K = 03/01 - 09/01
+      DATA L:R contains V
+
+    IMPUT:
+      Employee = Antony De Jesus
+      Class = Class A
+      FECHA L = 03/01 - 09/01
+      V column M = 8
+
+    Result:
+      vacances_hours = 8
+      regular_hours does NOT include that V day.
+    """
+
+    sheet_name = find_input_sheet_name(excel_file)
+
+    if sheet_name is None:
+        return {
+            "by_employee_week": {},
+            "sheet_found": None,
+            "rows_found": 0,
+        }
+
+    try:
+        input_raw = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, header=None)
+    except Exception:
+        return {
+            "by_employee_week": {},
+            "sheet_found": sheet_name,
+            "rows_found": 0,
+        }
+
+    by_employee_week = {}
+    rows_found = 0
+
+    # Usually row 0/1 can be headers. We scan every row and only keep valid rows.
+    for idx in range(0, input_raw.shape[0]):
+        row = input_raw.iloc[idx]
+
+        employee = clean_text(row.iloc[INPUT_COL_EMPLOYEE_NAME]) if len(row) > INPUT_COL_EMPLOYEE_NAME else ""
+        employee_class = normalize_class(row.iloc[INPUT_COL_EMPLOYEE_CLASS]) if len(row) > INPUT_COL_EMPLOYEE_CLASS else DEFAULT_CLASS_WHEN_NO_CLASS
+        week_range_key = normalize_week_range_text(row.iloc[INPUT_COL_FECHA] if len(row) > INPUT_COL_FECHA else "")
+
+        if not employee or not week_range_key:
+            continue
+
+        # Skip header rows
+        if normalize_text(employee) in {"name", "employee", "nombre"}:
+            continue
+        if normalize_text(week_range_key) in {"fecha", "date", "weeknumber", "week number"}:
+            continue
+
+        v_hours = pd.to_numeric(row.iloc[INPUT_COL_V], errors="coerce") if len(row) > INPUT_COL_V else 0.0
+        sd_hours = pd.to_numeric(row.iloc[INPUT_COL_SD], errors="coerce") if len(row) > INPUT_COL_SD else 0.0
+        h_hours = pd.to_numeric(row.iloc[INPUT_COL_H], errors="coerce") if len(row) > INPUT_COL_H else 0.0
+
+        v_hours = float(v_hours) if pd.notna(v_hours) else 0.0
+        sd_hours = float(sd_hours) if pd.notna(sd_hours) else 0.0
+        h_hours = float(h_hours) if pd.notna(h_hours) else 0.0
+
+        if v_hours == 0 and sd_hours == 0 and h_hours == 0:
+            continue
+
+        rows_found += 1
+
+        key = (
+            normalize_text(employee),
+            normalize_text(employee_class),
+            week_range_key,
+        )
+
+        if key not in by_employee_week:
+            by_employee_week[key] = {
+                "V": 0.0,
+                "SD": 0.0,
+                "H": 0.0,
+            }
+
+        by_employee_week[key]["V"] += v_hours
+        by_employee_week[key]["SD"] += sd_hours
+        by_employee_week[key]["H"] += h_hours
+
+    return {
+        "by_employee_week": by_employee_week,
+        "sheet_found": sheet_name,
+        "rows_found": rows_found,
+    }
+
+
+def get_special_hours(special_lookup: dict, employee: str, employee_class: str, week_range_text: str, code: str) -> float:
+    key = (
+        normalize_text(employee),
+        normalize_text(employee_class),
+        normalize_week_range_text(week_range_text),
+    )
+
+    by_employee_week = special_lookup.get("by_employee_week", {})
+
+    if key in by_employee_week:
+        return float(by_employee_week[key].get(code, 0.0))
+
+    return 0.0
+
+
+def find_column_index_by_header(raw: pd.DataFrame, candidates: list[str], search_rows: int = 10):
+    """
+    Finds a column index from the Excel sheet by scanning the first rows.
+    Used for real Excel columns such as Building Province and building.
+    """
+    candidate_norms = [normalize_text(c) for c in candidates]
+
+    max_rows = min(search_rows, raw.shape[0])
+    for row_idx in range(max_rows):
+        for col_idx in range(raw.shape[1]):
+            cell_norm = normalize_text(raw.iat[row_idx, col_idx])
+            if cell_norm in candidate_norms:
+                return col_idx
 
     return None
 
 
-def load_selected_excel_files(access_token: str, drive_id: str, selected_files: list[dict], month_name_map: dict) -> pd.DataFrame:
-    dfs = []
+# ============================================================
+# DATA LOADING
+# ============================================================
+def load_selected_excel_files_regular(
+    access_token: str,
+    drive_id: str,
+    selected_files: list[dict],
+    month_name_map: dict,
+) -> pd.DataFrame:
+
+    all_rows = []
+    diagnostics = []
 
     for file_info in selected_files:
+        file_name = file_info.get("name", "")
+        source_month = month_name_map.get(file_info["id"], "")
+
         try:
             file_bytes = download_item_bytes(access_token, drive_id, file_info["id"])
             excel_file = pd.ExcelFile(BytesIO(file_bytes))
@@ -382,365 +644,347 @@ def load_selected_excel_files(access_token: str, drive_id: str, selected_files: 
 
             if sheet_to_use is None:
                 st.warning(
-                    f"Could not read {file_info['name']}: sheet 'Data' not found. "
+                    f"Could not read {file_name}: sheet DATA not found. "
                     f"Available sheets: {excel_file.sheet_names}"
                 )
                 continue
 
-            df = excel_file.parse(sheet_to_use)
-            df = clean_columns(df)
-            df["source_file"] = file_info["name"]
-            df["source_month_folder"] = month_name_map.get(file_info["id"], "")
-            dfs.append(df)
+            special_hours_lookup = build_special_hours_lookup(file_bytes, excel_file)
+            raw = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_to_use, header=None)
+
+            # Pay date vacance comes from DATA!C2 when DATA L:R contains V.
+            pay_date_vacance_from_data = clean_text(raw.iat[1, 2]) if raw.shape[0] > 1 and raw.shape[1] > 2 else ""
+
+            # Real Excel columns used for filters.
+            # The code searches the DATA sheet headers instead of using manual fixed values.
+            building_province_col = find_column_index_by_header(
+                raw,
+                ["Building Province", "Province"],
+            )
+            building_col = find_column_index_by_header(
+                raw,
+                ["building", "Building", "Building Name"],
+            )
+
+            day_headers = raw.iloc[DAY_HEADER_ROW, DAY_COL_START:DAY_COL_END_EXCLUSIVE].tolist()
+            data = raw.iloc[DATA_START_ROW:].copy()
+
+            diagnostics.append({
+                "source_file": file_name,
+                "source_month_folder": source_month,
+                "sheet": sheet_to_use,
+                "day_headers_L_R": [clean_text(x) for x in day_headers],
+                "building_province_col_index": building_province_col,
+                "building_col_index": building_col,
+                "input_sheet_found": special_hours_lookup.get("sheet_found"),
+                "input_rows_found": special_hours_lookup.get("rows_found", 0),
+            })
+
+            for _, r in data.iterrows():
+                vendor = clean_text(r.iloc[COL_VENDOR_COMPANY]) if len(r) > COL_VENDOR_COMPANY else ""
+                building_province = clean_text(r.iloc[building_province_col]) if building_province_col is not None and len(r) > building_province_col else ""
+                building = clean_text(r.iloc[building_col]) if building_col is not None and len(r) > building_col else ""
+                employee = clean_text(r.iloc[COL_EMPLOYEE_NAME]) if len(r) > COL_EMPLOYEE_NAME else ""
+                employee_class = normalize_class(r.iloc[COL_EMPLOYEE_CLASS]) if len(r) > COL_EMPLOYEE_CLASS else DEFAULT_CLASS_WHEN_NO_CLASS
+                week_range_text = clean_text(r.iloc[COL_WEEK_RANGE]) if len(r) > COL_WEEK_RANGE else ""
+
+                week_start_from_excel, week_end_from_excel = parse_week_range_cell(
+                    week_range_text,
+                    fallback_year=2026,
+                )
+
+                rate = pd.to_numeric(r.iloc[COL_RATE], errors="coerce") if len(r) > COL_RATE else 0.0
+                rate = float(rate) if pd.notna(rate) else 0.0
+                rate = get_effective_hourly_rate(employee, employee_class, rate)
+
+                if not vendor and not employee:
+                    continue
+
+                if pd.isna(week_start_from_excel):
+                    continue
+
+                # DATA column K has the week range.
+                # Example: 03/01 - 09/01 means:
+                # L = Saturday 03-Jan, M = Sunday 04-Jan, ... R = Friday 09-Jan.
+                # DATA L:R are the daily cells where we read worked hours or codes V / SD / H.
+                week_lookup_key = week_range_text
+
+                # The committee report starts on Sunday, January 4.
+                # If DATA K starts with Saturday 03-Jan, use Sunday 04-Jan as the report date.
+                report_date = week_start_from_excel + pd.Timedelta(days=1)
+
+                week_values = []
+                for col_idx in range(DAY_COL_START, DAY_COL_END_EXCLUSIVE):
+                    cell_value = r.iloc[col_idx] if len(r) > col_idx else ""
+                    week_values.append(cell_value)
+
+                week_letters = [clean_text(v).upper() for v in week_values]
+
+                # Robust detection for special codes in DATA columns L:R.
+                # This catches cells like "V", "v", " V ", "V-", "V8", etc.
+                has_v = any("V" in clean_text(v).upper() for v in week_values)
+                has_sd = any("SD" in clean_text(v).upper() for v in week_values)
+                has_h = any("H" in clean_text(v).upper() for v in week_values)
+
+                visible_special_detected = has_v or has_sd or has_h
+
+                # Regular hours come ONLY from numeric values in DATA L:R.
+                # If a DATA cell is V, SD, or H, it is not counted as regular.
+                regular_hours = 0.0
+                regular_numeric_values = []
+
+                for v in week_values:
+                    txt = clean_text(v).upper()
+
+                    if "V" in txt or "SD" in txt or "H" in txt:
+                        continue
+
+                    numeric_value = pd.to_numeric(v, errors="coerce")
+                    if pd.notna(numeric_value):
+                        regular_numeric_values.append(float(numeric_value))
+                        regular_hours += float(numeric_value)
+
+                suppl_hours = 0.0
+                vacances_hours = 0.0
+                pay_date_vacance = ""
+                conge_hours = 0.0
+                conge_trav_hours = 0.0
+                maladie_hours = 0.0
+
+                # INPUT / IMPUT lookup:
+                # Match by Employee + Class + Week Range.
+                # IMPUT L = week range / FECHA.
+                input_v_hours = get_special_hours(
+                    special_hours_lookup,
+                    employee,
+                    employee_class,
+                    week_lookup_key,
+                    "V",
+                )
+                input_sd_hours = get_special_hours(
+                    special_hours_lookup,
+                    employee,
+                    employee_class,
+                    week_lookup_key,
+                    "SD",
+                )
+                input_h_hours = get_special_hours(
+                    special_hours_lookup,
+                    employee,
+                    employee_class,
+                    week_lookup_key,
+                    "H",
+                )
+
+                # FINAL RULES:
+                # DATA L:R contains V  -> take IMPUT M hours and put in vacances_hours
+                # DATA L:R contains SD -> take IMPUT N hours and put in maladie_hours
+                # DATA L:R contains H  -> take IMPUT O hours and put in conge_trav_hours
+                if has_v:
+                    vacances_hours += input_v_hours
+                    pay_date_vacance = pay_date_vacance_from_data
+
+                if has_sd:
+                    maladie_hours += input_sd_hours
+
+                if has_h:
+                    conge_trav_hours += input_h_hours
+
+                special_hours_total = vacances_hours + conge_hours + maladie_hours + conge_trav_hours + suppl_hours
+
+                total_hours_for_week = (
+                    regular_hours
+                    + suppl_hours
+                    + vacances_hours
+                    + conge_hours
+                    + conge_trav_hours
+                    + maladie_hours
+                )
+
+                if total_hours_for_week == 0:
+                    continue
+
+                all_rows.append({
+                    "source_month_folder": source_month,
+                    "source_file": file_name,
+                    "excel_week_range": week_range_text,
+                    "excel_week_start": week_start_from_excel,
+                    "excel_week_end": week_end_from_excel,
+                    "special_lookup_date": week_lookup_key,
+                    "date": report_date,
+                    "vendor_company": vendor,
+                    "building_province": building_province,
+                    "building": building,
+                    "employee": employee,
+                    "employee_class": employee_class,
+                    "type_of_work": TYPE_OF_WORK_DEFAULT,
+                    "day": "Week Total",
+                    "excel_cell_value": " | ".join([clean_text(v) for v in week_values if clean_text(v)]),
+                    "regular_numeric_values": " | ".join([str(x) for x in regular_numeric_values]),
+                    "visible_special_detected": visible_special_detected,
+                    "input_v_hours": input_v_hours,
+                    "input_h_hours": input_h_hours,
+                    "input_sd_hours": input_sd_hours,
+                    "special_hours_total": special_hours_total,
+                    "hours": total_hours_for_week,
+                    "hourly_rate": rate,
+                    "regular_hours": regular_hours,
+                    "suppl_hours": suppl_hours,
+                    "vacances_hours": vacances_hours,
+                    "pay_date_vacance": pay_date_vacance,
+                    "conge_hours": conge_hours,
+                    "conge_trav_hours": conge_trav_hours,
+                    "maladie_hours": maladie_hours,
+                })
 
         except Exception as e:
-            st.warning(f"Could not read {file_info['name']}: {e}")
+            st.warning(f"Could not read {file_name}: {e}")
 
-    if dfs:
-        return pd.concat(dfs, ignore_index=True)
-
-    return pd.DataFrame()
-
-
-def build_required_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """
-    Expected layout from your sheet:
-    H = total hours worked (number)
-    I = hourly rate
-    J = hours Suppl
-    K = hours Congé
-    L = hours Congé Travaillé
-    M = Hours Maladie
-    N = Total to pay
-    R = type of work
-    S = Vendor Company
-    T = Employee
-    """
-    out = pd.DataFrame()
-
-    date_col = pick_column(df, ["date"], fallback_idx=4)
-    province_col = pick_column(df, ["province"], fallback_idx=6)
-    hours_col = pick_column(df, ["total hours worked (number)", "total hours worked"], fallback_idx=7)
-    hourly_rate_col = pick_column(df, ["hourly rate", "hourly_rate"], fallback_idx=8)
-
-    suppl_col = pick_column(df, ["hours suppl"], fallback_idx=9)
-    conge_col = pick_column(df, ["hours congé", "hours conge"], fallback_idx=10)
-    conge_trav_col = pick_column(df, ["hours congé travaillé", "hours conge travaille"], fallback_idx=11)
-    maladie_col = pick_column(df, ["hours maladie", "maladie"], fallback_idx=12)
-
-    total_pay_col = pick_column(df, ["total to pay", "total_pay"], fallback_idx=13)
-    type_work_col = pick_column(df, ["type of work", "type_of_work"], fallback_idx=17)
-    vendor_col = pick_column(df, ["vendor company", "vendor_company"], fallback_idx=18)
-    employee_col = pick_column(df, ["employee"], fallback_idx=19)
-
-    col_debug = {
-        "date": date_col,
-        "province": province_col,
-        "hours": hours_col,
-        "hourly_rate": hourly_rate_col,
-        "hours_suppl": suppl_col,
-        "hours_conge": conge_col,
-        "hours_conge_travaille": conge_trav_col,
-        "hours_maladie": maladie_col,
-        "total_pay": total_pay_col,
-        "type_of_work": type_work_col,
-        "vendor_company": vendor_col,
-        "employee": employee_col,
-    }
-
-    def col_or_blank(col_name):
-        if col_name is None:
-            return pd.Series([""] * len(df))
-        data = df[col_name]
-        if isinstance(data, pd.DataFrame):
-            return data.bfill(axis=1).iloc[:, 0]
-        return data
-
-    out["date"] = col_or_blank(date_col)
-    out["province"] = col_or_blank(province_col)
-    out["hours"] = col_or_blank(hours_col)
-    out["hourly_rate"] = col_or_blank(hourly_rate_col)
-    out["suppl_raw"] = col_or_blank(suppl_col)
-    out["conge_raw"] = col_or_blank(conge_col)
-    out["conge_trav_raw"] = col_or_blank(conge_trav_col)
-    out["maladie_raw"] = col_or_blank(maladie_col)
-    out["total_pay"] = col_or_blank(total_pay_col)
-    out["type_of_work"] = col_or_blank(type_work_col)
-    out["vendor_company"] = col_or_blank(vendor_col)
-    out["employee"] = col_or_blank(employee_col)
-
-    out["source_file"] = df["source_file"] if "source_file" in df.columns else ""
-    out["source_month_folder"] = df["source_month_folder"] if "source_month_folder" in df.columns else ""
-
-    return out, col_debug
+    df = pd.DataFrame(all_rows)
+    st.session_state["regular_loader_diagnostics"] = diagnostics
+    return df
 
 
 # ============================================================
-# COMMITTEE LOGIC
+# WEEKLY SUMMARY
 # ============================================================
-def assign_committee_week(date_value: pd.Timestamp, start_date: pd.Timestamp, num_weeks: int = 6):
-    for i in range(num_weeks):
-        week_start = start_date + timedelta(days=i * 7)
-        week_end = week_start + timedelta(days=6)
-        if week_start <= date_value <= week_end:
-            return week_start, week_end
-    return None, None
-
-
-def calculate_committee_hours_row(
-    row_date,
-    hours_value: float,
-    hourly_rate_value: float,
-    total_pay_value: float
-) -> float:
-    applicable_rate = get_class_a_rate_for_date(row_date)
-
-    try:
-        hours_value = float(hours_value)
-    except Exception:
-        hours_value = 0.0
-
-    try:
-        hourly_rate_value = float(hourly_rate_value)
-    except Exception:
-        hourly_rate_value = 0.0
-
-    try:
-        total_pay_value = float(total_pay_value)
-    except Exception:
-        total_pay_value = 0.0
-
-    is_flat_case = (0.99 <= hours_value <= 1.01) and (hourly_rate_value > 100)
-
-    if is_flat_case:
-        return total_pay_value / applicable_rate
-
-    if hourly_rate_value > 0 and hourly_rate_value < applicable_rate:
-        return total_pay_value / applicable_rate
-
-    return hours_value
-
-
-def build_maladie_accrual(df: pd.DataFrame) -> pd.DataFrame:
-    work_df = df.copy()
-
-    work_df["hours_worked_for_accrual"] = (
-        to_num_series(work_df["committee_hours_row"])
-        - to_num_series(work_df["conge_raw"])
-        - to_num_series(work_df["maladie_raw"])
-    ).clip(lower=0)
-
-    work_df["cycle_start"] = work_df["date"].apply(get_maladie_cycle_start)
-    work_df["cycle_end"] = work_df["date"].apply(get_maladie_cycle_end)
-
-    jan4_2026 = pd.Timestamp("2026-01-04")
-    oct30_2026 = pd.Timestamp("2026-10-30")
-    nov1_2026 = pd.Timestamp("2026-11-01")
-
-    work_df.loc[
-        (work_df["date"] >= jan4_2026) & (work_df["date"] <= oct30_2026),
-        "cycle_start"
-    ] = jan4_2026
-
-    work_df.loc[
-        (work_df["date"] >= jan4_2026) & (work_df["date"] <= oct30_2026),
-        "cycle_end"
-    ] = oct30_2026
-
-    work_df.loc[
-        work_df["date"] >= nov1_2026,
-        "cycle_start"
-    ] = work_df.loc[work_df["date"] >= nov1_2026, "date"].apply(get_maladie_cycle_start)
-
-    work_df.loc[
-        work_df["date"] >= nov1_2026,
-        "cycle_end"
-    ] = work_df.loc[work_df["date"] >= nov1_2026, "date"].apply(get_maladie_cycle_end)
-
-    work_df = work_df.sort_values(
-        ["vendor_company", "employee", "date", "source_file"]
-    ).copy()
-
-    accrued_rows = []
-
-    group_cols = ["vendor_company", "employee", "cycle_start"]
-
-    for _, grp in work_df.groupby(group_cols, dropna=False):
-        grp = grp.copy().sort_values(["date", "source_file"])
-
-        cumulative_before = 0.0
-        accrued_list = []
-
-        for _, row in grp.iterrows():
-            current_hours = float(row["hours_worked_for_accrual"])
-
-            before = cumulative_before
-            after = before + current_hours
-
-            eligible_hours = max(0.0, after - MALADIE_THRESHOLD_HOURS) - max(0.0, before - MALADIE_THRESHOLD_HOURS)
-            eligible_hours = max(0.0, eligible_hours)
-
-            accrued_hours = round(eligible_hours * MALADIE_ACCRUAL_FACTOR, 4)
-            accrued_list.append(accrued_hours)
-
-            cumulative_before = after
-
-        grp["maladie_accrued_row"] = accrued_list
-        accrued_rows.append(grp)
-
-    if not accrued_rows:
-        return pd.DataFrame(columns=["vendor_company", "employee", "week_label", "maladie_accrued_hours"])
-
-    accrual_df = pd.concat(accrued_rows, ignore_index=True)
-
-    weekly_accrual = (
-        accrual_df.groupby(["vendor_company", "employee", "week_label"], dropna=False)
-        .agg(
-            maladie_accrued_hours=("maladie_accrued_row", "sum")
-        )
-        .reset_index()
-    )
-
-    weekly_accrual["maladie_accrued_hours"] = to_num_series(weekly_accrual["maladie_accrued_hours"]).round(2)
-
-    return weekly_accrual
-
-
-def build_vacation_accrual(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Vacation accrual rules:
-    - First special cycle: 2026-01-04 to 2027-04-30
-    - Then recurring cycles: May 1 to April 30
-    - Accrual starts immediately from the beginning of the cycle
-    - Accrual base = total_pay
-    - Rate = 6%
-    - Payment may happen later, but accumulation is immediate
-    """
-    work_df = df.copy()
-
-    work_df["vac_cycle_start"] = work_df["date"].apply(get_vacation_cycle_start)
-    work_df["vac_cycle_end"] = work_df["date"].apply(get_vacation_cycle_end)
-
-    work_df = work_df.sort_values(
-        ["vendor_company", "employee", "date", "source_file"]
-    ).copy()
-
-    # Accumulate immediately from cycle start
-    work_df["vacation_accrued_row"] = (
-        to_num_series(work_df["total_pay"]) * VACATION_ACCRUAL_RATE
-    ).round(2)
-
-    weekly_accrual = (
-        work_df.groupby(["vendor_company", "employee", "week_label"], dropna=False)
-        .agg(
-            vacation_accrued_amount=("vacation_accrued_row", "sum")
-        )
-        .reset_index()
-    )
-
-    weekly_accrual["vacation_accrued_amount"] = to_num_series(
-        weekly_accrual["vacation_accrued_amount"]
-    ).round(2)
-
-    return weekly_accrual
-
-
 def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
+    """
+    FINAL RULE FOR THIS REPORT:
 
-    df["applicable_class_a_rate"] = df["date"].apply(get_class_a_rate_for_date)
+    - Overtime is NOT used.
+    - If one employee has more than 40 regular worked hours in the same committee week,
+      the excess goes to Suppl. hours.
+    - The Suppl. excess is assigned to the Class A row when Class A exists.
+    - Suppl. is paid using the rate of the row where it is assigned multiplied by 1.5.
+      Therefore, when Class A exists, the Suppl. uses Class A rate x 1.5.
 
-    hours_num = to_num_series(df["hours"])
-    rate_num = to_num_series(df["hourly_rate"])
+    Example:
+        Sylvia Tremblay / week 2026-01-31
+        Class A = 10.00
+        Class B = 33.50
+        Total = 43.50
 
-    df["flat_case"] = (
-        (hours_num >= 0.99) &
-        (hours_num <= 1.01) &
-        (rate_num > 100)
+        Excess over 40 = 3.50
+
+        Final:
+        Class A:
+            regular_hours = 10.00
+            suppl_hours = 3.50
+        Class B:
+            regular_hours = 30.00
+            suppl_hours = 0.00
+        overtime_hours = 0.00
+    """
+
+    grouped = (
+        df.groupby(["vendor_company", "building_province", "building", "employee", "employee_class", "week_label"], dropna=False)
+        .agg(
+            regular_hours=("regular_hours", "sum"),
+            suppl_hours=("suppl_hours", "sum"),
+            vacances_hours=("vacances_hours", "sum"),
+            pay_date_vacance=("pay_date_vacance", "first"),
+            conge_hours=("conge_hours", "sum"),
+            conge_trav_hours=("conge_trav_hours", "sum"),
+            maladie_hours=("maladie_hours", "sum"),
+            hourly_rate=("hourly_rate", "mean"),
+            source_month_folder=("source_month_folder", "first"),
+            source_file=("source_file", "first"),
+        )
+        .reset_index()
+        .sort_values(["vendor_company", "building_province", "building", "employee", "week_label", "employee_class"])
     )
 
-    df["committee_hours_row"] = df.apply(
-        lambda r: calculate_committee_hours_row(
-            r["date"],
-            r["hours"],
-            r["hourly_rate"],
-            r["total_pay"],
+    # Apply Class C special rates again after grouping as a safeguard.
+    grouped["hourly_rate"] = grouped.apply(
+        lambda row: get_effective_hourly_rate(
+            row.get("employee", ""),
+            row.get("employee_class", ""),
+            row.get("hourly_rate", 0.0),
         ),
         axis=1,
     )
 
-    grouped = (
-        df.groupby(["vendor_company", "employee", "week_label"], dropna=False)
-        .agg(
-            raw_hours_sum=("hours", "sum"),
-            suppl_hours_raw=("suppl_raw", "sum"),
-            conge_hours_raw=("conge_raw", "sum"),
-            conge_trav_hours_raw=("conge_trav_raw", "sum"),
-            maladie_hours_raw=("maladie_raw", "sum"),
-            total_pay=("total_pay", "sum"),
-            hourly_rate_min=("hourly_rate", "min"),
-            has_flat_case=("flat_case", "any"),
-            committee_hours=("committee_hours_row", "sum"),
-            min_applicable_rate=("applicable_class_a_rate", "min"),
-            max_applicable_rate=("applicable_class_a_rate", "max"),
-            source_month_folder=("source_month_folder", "first"),
-            source_file=("source_file", "first"),
-            province=("province", "first"),
+    grouped["regular_hours_original"] = grouped["regular_hours"]
+
+    # Overtime is not used in this report.
+    grouped["overtime_hours"] = 0.0
+
+    # Convert hours above 40 per employee/week into Suppl.
+    employee_week_groups = grouped.groupby(
+        ["vendor_company", "employee", "week_label"],
+        dropna=False
+    ).groups
+
+    for (vendor, employee, week_label), idx_values in employee_week_groups.items():
+        idx_list = list(idx_values)
+
+        total_regular_worked = float(grouped.loc[idx_list, "regular_hours"].sum())
+
+        if total_regular_worked <= OVERTIME_WEEKLY_THRESHOLD:
+            continue
+
+        excess_hours = round(total_regular_worked - OVERTIME_WEEKLY_THRESHOLD, 2)
+
+        # Suppl. must use Class A rate when Class A exists.
+        class_a_indexes = [
+            i for i in idx_list
+            if normalize_text(grouped.at[i, "employee_class"]) == "class a"
+        ]
+
+        suppl_target_idx = class_a_indexes[0] if class_a_indexes else idx_list[0]
+
+        # Put excess in Suppl. on Class A row.
+        grouped.at[suppl_target_idx, "suppl_hours"] = (
+            float(grouped.at[suppl_target_idx, "suppl_hours"]) + excess_hours
         )
-        .reset_index()
-        .sort_values(["vendor_company", "employee", "week_label"])
+
+        # Reduce regular hours so total regular for the employee/week becomes 40.
+        # Reduce other classes first, preserving Class A regular hours as much as possible.
+        reduction_order = [i for i in idx_list if i != suppl_target_idx] + [suppl_target_idx]
+
+        remaining_to_reduce = excess_hours
+
+        for i in reduction_order:
+            if remaining_to_reduce <= 0:
+                break
+
+            current_regular = float(grouped.at[i, "regular_hours"])
+            reduction = min(current_regular, remaining_to_reduce)
+
+            grouped.at[i, "regular_hours"] = current_regular - reduction
+            remaining_to_reduce -= reduction
+
+    grouped["regular_pay"] = grouped["regular_hours"] * grouped["hourly_rate"]
+    grouped["overtime_pay"] = 0.0
+    grouped["suppl_pay"] = grouped["suppl_hours"] * grouped["hourly_rate"] * OVERTIME_MULTIPLIER
+    grouped["vacances_pay"] = grouped["vacances_hours"] * grouped["hourly_rate"]
+    grouped["conge_pay"] = grouped["conge_hours"] * grouped["hourly_rate"]
+    grouped["conge_trav_pay"] = grouped["conge_trav_hours"] * grouped["hourly_rate"]
+    grouped["maladie_pay"] = grouped["maladie_hours"] * grouped["hourly_rate"]
+
+    grouped["total_pay"] = (
+        grouped["regular_pay"]
+        + grouped["overtime_pay"]
+        + grouped["suppl_pay"]
+        + grouped["vacances_pay"]
+        + grouped["conge_pay"]
+        + grouped["conge_trav_pay"]
+        + grouped["maladie_pay"]
     )
 
-    grouped["raw_hours_sum"] = to_num_series(grouped["raw_hours_sum"])
-    grouped["suppl_hours_raw"] = to_num_series(grouped["suppl_hours_raw"])
-    grouped["conge_hours_raw"] = to_num_series(grouped["conge_hours_raw"])
-    grouped["conge_trav_hours_raw"] = to_num_series(grouped["conge_trav_hours_raw"])
-    grouped["maladie_hours_raw"] = to_num_series(grouped["maladie_hours_raw"])
-    grouped["total_pay"] = to_num_series(grouped["total_pay"])
-    grouped["hourly_rate_min"] = to_num_series(grouped["hourly_rate_min"])
-    grouped["committee_hours"] = to_num_series(grouped["committee_hours"])
-    grouped["min_applicable_rate"] = to_num_series(grouped["min_applicable_rate"])
-    grouped["max_applicable_rate"] = to_num_series(grouped["max_applicable_rate"])
-
-    grouped["suppl_hours"] = grouped["suppl_hours_raw"]
-    grouped["conge_hours"] = grouped["conge_hours_raw"]
-    grouped["conge_trav_hours"] = grouped["conge_trav_hours_raw"]
-    grouped["maladie_hours"] = grouped["maladie_hours_raw"]
-
-    special_total = (
-        grouped["suppl_hours"] +
-        grouped["conge_hours"] +
-        grouped["conge_trav_hours"] +
-        grouped["maladie_hours"]
+    grouped["total_hours"] = (
+        grouped["regular_hours"]
+        + grouped["overtime_hours"]
+        + grouped["suppl_hours"]
+        + grouped["vacances_hours"]
+        + grouped["conge_hours"]
+        + grouped["conge_trav_hours"]
+        + grouped["maladie_hours"]
     )
 
-    grouped["regular_hours"] = (grouped["committee_hours"] - special_total).clip(lower=0)
-    grouped["reer"] = (grouped["committee_hours"] * REER_PER_HOUR).round(2)
-
-    # NOTE:
-    # maladie_accrued_hours and vacation_accrued_amount are informational only.
-    # They do NOT increase total_pay or total_with_reer.
-    grouped["total_with_reer"] = (grouped["total_pay"] + grouped["reer"]).round(2)
-
-    weekly_maladie_accrual = build_maladie_accrual(df)
-
-    grouped = grouped.merge(
-        weekly_maladie_accrual,
-        on=["vendor_company", "employee", "week_label"],
-        how="left"
-    )
-
-    grouped["maladie_accrued_hours"] = to_num_series(grouped["maladie_accrued_hours"]).round(2)
-
-    vacation_weekly_accrual = build_vacation_accrual(df)
-
-    grouped = grouped.merge(
-        vacation_weekly_accrual,
-        on=["vendor_company", "employee", "week_label"],
-        how="left"
-    )
-
-    grouped["vacation_accrued_amount"] = to_num_series(grouped["vacation_accrued_amount"]).round(2)
+    grouped["reer"] = grouped["total_hours"] * REER_PER_HOUR
+    grouped["total_with_reer"] = grouped["total_pay"] + grouped["reer"]
 
     numeric_cols = grouped.select_dtypes(include=["number"]).columns
     grouped[numeric_cols] = grouped[numeric_cols].round(2)
@@ -760,9 +1004,11 @@ def create_employee_report_blocks(weekly_df: pd.DataFrame, vendor_company: str):
 
     for employee in employees:
         emp_df = vendor_df[vendor_df["employee"] == employee].copy()
+        emp_class = emp_df["employee_class"].dropna().astype(str).iloc[0] if not emp_df.empty else "Class A"
 
         block = {
             "employee": employee,
+            "employee_class": emp_class,
             "vendor_company": vendor_company,
             "weeks": week_labels,
             "rows": [],
@@ -781,7 +1027,7 @@ def create_employee_report_blocks(weekly_df: pd.DataFrame, vendor_company: str):
             row_total = 0.0
 
             for wk in week_labels:
-                val = emp_df.loc[emp_df["week_label"] == wk, col_name].sum()
+                val = emp_df.loc[emp_df["week_label"] == wk, col_name].sum() if col_name in emp_df.columns else 0.0
                 val = round(float(val), 2)
                 row_values.append(val)
                 row_total += val
@@ -810,59 +1056,32 @@ def create_employee_report_blocks(weekly_df: pd.DataFrame, vendor_company: str):
     return report_data
 
 
-def export_committee_report(weekly_df: pd.DataFrame, start_date_value) -> BytesIO:
+def export_regular_hours_report(weekly_df: pd.DataFrame, start_date_value) -> BytesIO:
     output = BytesIO()
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         workbook = writer.book
 
-        title_fmt = workbook.add_format({
-            "bold": True, "font_size": 16, "align": "center", "valign": "vcenter",
-            "border": 1, "bg_color": "#1F4E78", "font_color": "white"
-        })
-        subtitle_fmt = workbook.add_format({
-            "bold": True, "font_size": 11, "align": "center", "valign": "vcenter",
-            "border": 1, "bg_color": "#D9EAF7"
-        })
-        section_fmt = workbook.add_format({
-            "bold": True, "align": "center", "valign": "vcenter",
-            "border": 1, "bg_color": "#EDEDED"
-        })
-        header_fmt = workbook.add_format({
-            "bold": True, "align": "center", "valign": "vcenter",
-            "border": 1, "bg_color": "#DCE6F1"
-        })
-        row_label_fmt = workbook.add_format({
-            "border": 1, "align": "left", "valign": "vcenter"
-        })
-        num_fmt = workbook.add_format({
-            "border": 1, "align": "right", "valign": "vcenter", "num_format": "0.00"
-        })
-        money_fmt = workbook.add_format({
-            "border": 1, "align": "right", "valign": "vcenter", "num_format": "$#,##0.00"
-        })
-        total_fmt = workbook.add_format({
-            "bold": True, "border": 1, "align": "right", "valign": "vcenter",
-            "bg_color": "#FFF2CC", "num_format": "0.00"
-        })
-        total_money_fmt = workbook.add_format({
-            "bold": True, "border": 1, "align": "right", "valign": "vcenter",
-            "bg_color": "#FFF2CC", "num_format": "$#,##0.00"
-        })
-        emp_fmt = workbook.add_format({
-            "bold": True, "border": 1, "align": "left", "valign": "vcenter",
-            "bg_color": "#FCE4D6"
-        })
+        title_fmt = workbook.add_format({"bold": True, "font_size": 16, "align": "center", "valign": "vcenter", "border": 1, "bg_color": "#1F4E78", "font_color": "white"})
+        subtitle_fmt = workbook.add_format({"bold": True, "font_size": 11, "align": "center", "valign": "vcenter", "border": 1, "bg_color": "#D9EAF7"})
+        section_fmt = workbook.add_format({"bold": True, "align": "center", "valign": "vcenter", "border": 1, "bg_color": "#EDEDED"})
+        header_fmt = workbook.add_format({"bold": True, "align": "center", "valign": "vcenter", "border": 1, "bg_color": "#DCE6F1"})
+        row_label_fmt = workbook.add_format({"border": 1, "align": "left", "valign": "vcenter"})
+        num_fmt = workbook.add_format({"border": 1, "align": "right", "valign": "vcenter", "num_format": "0.00"})
+        money_fmt = workbook.add_format({"border": 1, "align": "right", "valign": "vcenter", "num_format": "$#,##0.00"})
+        total_fmt = workbook.add_format({"bold": True, "border": 1, "align": "right", "valign": "vcenter", "bg_color": "#FFF2CC", "num_format": "0.00"})
+        total_money_fmt = workbook.add_format({"bold": True, "border": 1, "align": "right", "valign": "vcenter", "bg_color": "#FFF2CC", "num_format": "$#,##0.00"})
+        emp_fmt = workbook.add_format({"bold": True, "border": 1, "align": "left", "valign": "vcenter", "bg_color": "#FCE4D6"})
 
         vendors = sorted(weekly_df["vendor_company"].dropna().unique().tolist())
         summary_rows = []
 
         for vendor in vendors:
-            sheet_name = vendor[:31] if vendor else "Committee Report"
+            sheet_name = str(vendor)[:31] if vendor else "Regular Report"
             ws = workbook.add_worksheet(sheet_name)
             writer.sheets[sheet_name] = ws
 
-            ws.set_column("A:A", 8)
+            ws.set_column("A:A", 16)
             ws.set_column("B:B", 35)
             ws.set_column("C:Z", 14)
             ws.set_column("AA:AC", 18)
@@ -871,9 +1090,9 @@ def export_committee_report(weekly_df: pd.DataFrame, start_date_value) -> BytesI
                 ws.insert_image(0, 0, LOGO_PATH, {"x_scale": 0.35, "y_scale": 0.35})
 
             row = 0
-            ws.merge_range(row, 2, row, 10, f"Versement de {pd.to_datetime(start_date_value).strftime('%b. %Y')}", title_fmt)
+            ws.merge_range(row, 2, row, 10, f"Regular Hours Report - {pd.to_datetime(start_date_value).strftime('%b. %Y')}", title_fmt)
             row += 1
-            ws.merge_range(row, 2, row, 10, vendor, subtitle_fmt)
+            ws.merge_range(row, 2, row, 10, str(vendor), subtitle_fmt)
             row += 2
 
             vendor_df = weekly_df[weekly_df["vendor_company"] == vendor].copy()
@@ -887,15 +1106,14 @@ def export_committee_report(weekly_df: pd.DataFrame, start_date_value) -> BytesI
             for idx, block in enumerate(report_blocks, start=1):
                 ws.write(row, 0, idx, section_fmt)
                 ws.write(row, 1, block["employee"], emp_fmt)
+                ws.write(row, 2, block["employee_class"], emp_fmt)
                 row += 1
 
                 ws.write(row, 0, "Classes", header_fmt)
-
                 col = 1
                 for wk in week_labels:
                     ws.merge_range(row, col, row, col + 1, wk, header_fmt)
                     col += 2
-
                 ws.write(row, col, "Cal. Heures", header_fmt)
                 row += 1
 
@@ -910,13 +1128,11 @@ def export_committee_report(weekly_df: pd.DataFrame, start_date_value) -> BytesI
 
                 for class_row in block["rows"]:
                     ws.write(row, 0, class_row["label"], row_label_fmt)
-
                     col = 1
                     for val in class_row["week_values"]:
                         ws.write_number(row, col, round(float(val), 2), num_fmt)
                         ws.write_number(row, col + 1, 0, num_fmt)
                         col += 2
-
                     ws.write_number(row, col, round(float(class_row["row_total"]), 2), num_fmt)
                     row += 1
 
@@ -949,28 +1165,24 @@ def export_committee_report(weekly_df: pd.DataFrame, start_date_value) -> BytesI
                 summary_rows.append({
                     "Vendor Company": vendor,
                     "Employee": block["employee"],
+                    "Employee Class": block["employee_class"],
                     "Total Hours": round(float(block["total_hours"]), 2),
                     "Total Pay": round(float(block["total_pay"]), 2),
                     "REER": round(float(block["reer_amount"]), 2),
                     "Total with REER": round(float(block["total_with_reer"]), 2),
                 })
 
-            levy = round(grand_total_with_reer * 0.01, 2)
-            prelevement_total_du_vendor = round(grand_total_with_reer + levy, 2)
-
+            levy = round(grand_total_reer * 0.01, 2)
+            prelevement_total_du_vendor = round(grand_total_reer + levy, 2)
             top_col = 13
             ws.write(0, top_col, "TOTAL DES GAINS", header_fmt)
             ws.write_number(0, top_col + 1, round(grand_total_pay, 2), total_money_fmt)
-
             ws.write(1, top_col, "TOTAL REER DE TOUS LES EMPLOYÉS", header_fmt)
             ws.write_number(1, top_col + 1, round(grand_total_reer, 2), total_money_fmt)
-
             ws.write(2, top_col, "TOTAL DES GAINS INCLUANT REER", header_fmt)
             ws.write_number(2, top_col + 1, round(grand_total_with_reer, 2), total_money_fmt)
-
-            ws.write(3, top_col, "X 1% (EMPLOYEUR ET EMPLOYÉS)", header_fmt)
+            ws.write(3, top_col, "X 1% REER", header_fmt)
             ws.write_number(3, top_col + 1, levy, total_money_fmt)
-
             ws.write(4, top_col, "PRÉLÈVEMENT TOTAL DÛ", header_fmt)
             ws.write_number(4, top_col + 1, prelevement_total_du_vendor, total_money_fmt)
 
@@ -987,10 +1199,6 @@ def export_committee_report(weekly_df: pd.DataFrame, start_date_value) -> BytesI
 # ============================================================
 # AUTH FLOW
 # ============================================================
-if not ALLOWED_DOMAIN:
-    st.error("Missing ALLOWED_DOMAIN in Streamlit secrets.")
-    st.stop()
-
 app = get_msal_app()
 params = get_query_params_compat()
 
@@ -998,20 +1206,16 @@ if "token_result" not in st.session_state:
     code = params.get("code")
 
     if code:
-        result = app.acquire_token_by_authorization_code(
-            code=code,
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI,
-        )
+        result = app.acquire_token_by_authorization_code(code=code, scopes=SCOPES, redirect_uri=REDIRECT_URI)
 
         if "access_token" in result:
             st.session_state.token_result = result
             clear_query_params_compat()
             st.rerun()
-        else:
-            st.error("Could not obtain access token.")
-            st.code(str(result))
-            st.stop()
+
+        st.error("Could not obtain access token.")
+        st.code(str(result))
+        st.stop()
 
     st.warning("You are not signed in to Microsoft 365 / SharePoint.")
 
@@ -1056,10 +1260,6 @@ if not is_allowed_user(me):
     st.session_state.pop("token_result", None)
     st.stop()
 
-
-# ============================================================
-# SIDEBAR
-# ============================================================
 st.sidebar.success(f"Logged in as {signed_in_email}")
 st.success(f"✅ Signed in as {signed_in_email}")
 
@@ -1068,13 +1268,13 @@ if st.button("🚪 Sign out"):
     clear_query_params_compat()
     st.rerun()
 
-st.sidebar.header("📁 SharePoint Source")
-st.sidebar.caption("Select month folder(s), then choose Excel files inside them.")
-
 
 # ============================================================
 # RESOLVE ROOT FOLDER
 # ============================================================
+st.sidebar.header("📁 SharePoint Source")
+st.sidebar.caption("Select folder(s), then choose Excel files inside them.")
+
 try:
     meta = resolve_shared_link(access_token, ONEDRIVE_FOLDER_URL)
 except Exception as e:
@@ -1089,10 +1289,6 @@ if "folder" not in meta:
     st.error("ONEDRIVE_FOLDER_URL must be a folder link.")
     st.stop()
 
-
-# ============================================================
-# LIST MONTH FOLDERS
-# ============================================================
 try:
     root_children = list_children_all(access_token, drive_id, root_item_id)
 except Exception as e:
@@ -1100,58 +1296,54 @@ except Exception as e:
     st.code(str(e))
     st.stop()
 
-month_folders = [x for x in root_children if is_folder_item(x)]
-month_folders.sort(key=lambda x: normalize_text(x.get("name", "")))
+folders = [x for x in root_children if is_folder_item(x)]
+folders.sort(key=lambda x: normalize_text(x.get("name", "")))
 
-if not month_folders:
-    st.warning("No month folders were found inside the selected root folder.")
-    st.stop()
+root_excel_files = [x for x in root_children if is_excel_name(x.get("name", ""))]
 
-month_folder_names = [f["name"] for f in month_folders]
-
-selected_month_names = st.sidebar.multiselect(
-    "Select month folder(s)",
-    month_folder_names,
-    default=month_folder_names[:1] if month_folder_names else [],
-)
-
-if not selected_month_names:
-    st.info("Please select at least one month folder.")
-    st.stop()
-
-selected_month_folders = [f for f in month_folders if f["name"] in selected_month_names]
-
-
-# ============================================================
-# LIST EXCEL FILES INSIDE SELECTED MONTH FOLDERS
-# ============================================================
 all_excel_files = []
-month_name_map = {}
+folder_name_map = {}
 
-for folder_info in selected_month_folders:
-    folder_id = folder_info["id"]
-    folder_name = folder_info["name"]
+if folders:
+    folder_names = [f["name"] for f in folders]
 
-    try:
-        children = list_children_all(access_token, drive_id, folder_id)
-    except Exception as e:
-        st.warning(f"Could not list files inside '{folder_name}': {e}")
-        continue
+    selected_folder_names = st.sidebar.multiselect(
+        "Select folder(s)",
+        folder_names,
+        default=folder_names[:1],
+    )
 
-    excels = [x for x in children if is_excel_name(x.get("name", ""))]
-    excels.sort(key=lambda x: normalize_text(x.get("name", "")))
+    selected_folders = [f for f in folders if f["name"] in selected_folder_names]
 
-    for item in excels:
-        item_copy = dict(item)
-        display_name = f"{folder_name} | {item_copy['name']}"
-        item_copy["display_name"] = display_name
-        all_excel_files.append(item_copy)
-        month_name_map[item_copy["id"]] = folder_name
+    for folder_info in selected_folders:
+        folder_id = folder_info["id"]
+        folder_name = folder_info["name"]
+
+        try:
+            children = list_children_all(access_token, drive_id, folder_id)
+        except Exception as e:
+            st.warning(f"Could not list files inside '{folder_name}': {e}")
+            continue
+
+        excels = [x for x in children if is_excel_name(x.get("name", ""))]
+        excels.sort(key=lambda x: normalize_text(x.get("name", "")))
+
+        for item in excels:
+            item_copy = dict(item)
+            item_copy["display_name"] = f"{folder_name} | {item_copy['name']}"
+            all_excel_files.append(item_copy)
+            folder_name_map[item_copy["id"]] = folder_name
+
+for item in root_excel_files:
+    item_copy = dict(item)
+    item_copy["display_name"] = f"Root | {item_copy['name']}"
+    all_excel_files.append(item_copy)
+    folder_name_map[item_copy["id"]] = "Root"
 
 all_excel_files.sort(key=lambda x: normalize_text(x["display_name"]))
 
 if not all_excel_files:
-    st.warning("No Excel files found inside the selected month folder(s).")
+    st.warning("No Excel files found inside the selected folder(s).")
     st.stop()
 
 excel_display_names = [f["display_name"] for f in all_excel_files]
@@ -1170,9 +1362,9 @@ selected_excel_files = [f for f in all_excel_files if f["display_name"] in selec
 
 
 # ============================================================
-# LOAD EXCEL DATA
+# LOAD DATA
 # ============================================================
-raw_df = load_selected_excel_files(access_token, drive_id, selected_excel_files, month_name_map)
+raw_df = load_selected_excel_files_regular(access_token, drive_id, selected_excel_files, folder_name_map)
 
 if raw_df.empty:
     st.error("No valid data could be loaded from the selected Excel files.")
@@ -1180,50 +1372,61 @@ if raw_df.empty:
 
 
 # ============================================================
-# BUILD FINAL DATAFRAME
+# CLEANING + FILTERS
 # ============================================================
-df, col_debug = build_required_dataframe(raw_df)
+df = raw_df.copy()
 
-required_cols = [
-    "date", "province", "employee", "hours",
-    "total_pay", "type_of_work", "vendor_company"
-]
-missing = [c for c in required_cols if c not in df.columns]
-
-if missing:
-    st.error(f"Missing required columns: {missing}")
-    st.write("Detected columns:", list(raw_df.columns))
-    st.stop()
-
-
-# ============================================================
-# DATA CLEANING
-# ============================================================
 df["date"] = pd.to_datetime(df["date"], errors="coerce")
-df["province"] = safe_text_series(df["province"]).str.upper()
-df["employee"] = safe_text_series(df["employee"])
 df["vendor_company"] = safe_text_series(df["vendor_company"])
-df["type_of_work"] = safe_text_series(df["type_of_work"])
+df["building_province"] = safe_text_series(df["building_province"]) if "building_province" in df.columns else ""
+df["building"] = safe_text_series(df["building"]) if "building" in df.columns else ""
+df["employee"] = safe_text_series(df["employee"])
+df["employee_class"] = safe_text_series(df["employee_class"]).replace({"": DEFAULT_CLASS_WHEN_NO_CLASS})
+df["type_of_work"] = TYPE_OF_WORK_DEFAULT
 
 for c in [
-    "hours", "hourly_rate", "suppl_raw", "conge_raw",
-    "conge_trav_raw", "maladie_raw", "total_pay"
+    "hours",
+    "hourly_rate",
+    "regular_hours",
+    "suppl_hours",
+    "vacances_hours",
+    "conge_hours",
+    "conge_trav_hours",
+    "maladie_hours",
 ]:
     df[c] = to_num_series(df[c])
 
+# IMPORTANT: pay_date_vacance is a date/text value from DATA!C2.
+# Do NOT convert it to numeric, otherwise it becomes 0.00 in the report.
+df["pay_date_vacance"] = safe_text_series(df["pay_date_vacance"])
+
 df = df.dropna(subset=["date"]).copy()
 
+if df.empty:
+    st.warning("No rows with valid dates were found. Check week number in column K.")
+    st.stop()
 
-# ============================================================
-# FILTERS
-# ============================================================
-st.sidebar.header("🧷 Committee Filters")
+st.sidebar.header("🧷 Report Filters")
 
-all_provinces = sorted([p for p in df["province"].dropna().unique().tolist() if p])
-selected_provinces = st.sidebar.multiselect("Province", all_provinces, default=all_provinces)
+all_building_provinces = sorted([p for p in df["building_province"].dropna().unique().tolist() if p])
+selected_building_provinces = st.sidebar.multiselect(
+    "Building Province",
+    all_building_provinces,
+    default=all_building_provinces,
+)
+
+all_buildings = sorted([b for b in df["building"].dropna().unique().tolist() if b])
+selected_buildings = st.sidebar.multiselect(
+    "Building",
+    all_buildings,
+    default=all_buildings,
+)
 
 all_vendors = sorted([v for v in df["vendor_company"].dropna().unique().tolist() if v])
 selected_vendors = st.sidebar.multiselect("Vendor Company", all_vendors, default=all_vendors)
+
+all_classes = sorted([v for v in df["employee_class"].dropna().unique().tolist() if v])
+selected_classes = st.sidebar.multiselect("Employee Class", all_classes, default=all_classes)
 
 all_employees = sorted([e for e in df["employee"].dropna().unique().tolist() if e])
 selected_employees = st.sidebar.multiselect("Name Employee", all_employees, default=all_employees)
@@ -1231,53 +1434,44 @@ selected_employees = st.sidebar.multiselect("Name Employee", all_employees, defa
 all_types = sorted([t for t in df["type_of_work"].dropna().unique().tolist() if t])
 selected_types = st.sidebar.multiselect("Type of work", all_types, default=all_types)
 
-st.sidebar.info(
-    "Week start is automatic by Vendor Company:\n"
-    "- 12433087 Canada Inc: starts 2026-01-04\n"
-    "- 10696480 Canada Ltd: starts 2026-01-05\n"
-    "- 13037622 Canada Inc: starts 2025-12-29"
-)
+start_date = st.sidebar.date_input("First committee week start date", value=FIRST_COMMITTEE_WEEK_START_DEFAULT.date())
 num_weeks = st.sidebar.number_input("Number of weeks", min_value=1, max_value=24, value=4)
 
-
-# ============================================================
-# APPLY FILTERS
-# ============================================================
 filtered_df = df.copy()
 
-if selected_provinces:
-    filtered_df = filtered_df[filtered_df["province"].isin(selected_provinces)]
+if selected_building_provinces:
+    filtered_df = filtered_df[filtered_df["building_province"].isin(selected_building_provinces)]
+
+if selected_buildings:
+    filtered_df = filtered_df[filtered_df["building"].isin(selected_buildings)]
+
 if selected_vendors:
     filtered_df = filtered_df[filtered_df["vendor_company"].isin(selected_vendors)]
+if selected_classes:
+    filtered_df = filtered_df[filtered_df["employee_class"].isin(selected_classes)]
 if selected_employees:
     filtered_df = filtered_df[filtered_df["employee"].isin(selected_employees)]
 if selected_types:
     filtered_df = filtered_df[filtered_df["type_of_work"].isin(selected_types)]
 
-filtered_df[["week_start", "week_end"]] = filtered_df.apply(
-    lambda r: pd.Series(
-        assign_committee_week(
-            r["date"],
-            get_committee_week_start_for_vendor(r["vendor_company"]),
-            num_weeks,
-        )
-    ),
-    axis=1,
+start_date_dt = pd.to_datetime(start_date)
+
+filtered_df[["week_start", "week_end"]] = filtered_df["date"].apply(
+    lambda x: pd.Series(assign_committee_week(x, start_date_dt, num_weeks))
 )
+
+filtered_df["week_start"] = pd.to_datetime(filtered_df["week_start"], errors="coerce")
+filtered_df["week_end"] = pd.to_datetime(filtered_df["week_end"], errors="coerce")
 
 filtered_df = filtered_df[filtered_df["week_start"].notna()].copy()
 filtered_df["week_label"] = filtered_df["week_end"].dt.strftime("%Y-%m-%d")
-filtered_df["applicable_class_a_rate"] = filtered_df["date"].apply(get_class_a_rate_for_date)
 
 if filtered_df.empty:
     st.warning("No data available for the selected filters.")
     st.stop()
 
-
-# ============================================================
-# BUILD WEEKLY SUMMARY
-# ============================================================
 weekly_summary = build_weekly_summary(filtered_df)
+
 
 # ============================================================
 # TOP SUMMARY
@@ -1285,89 +1479,160 @@ weekly_summary = build_weekly_summary(filtered_df)
 total_gains_all = round(float(weekly_summary["total_pay"].sum()), 2)
 total_reer_all = round(float(weekly_summary["reer"].sum()), 2)
 total_with_reer_all = round(float(weekly_summary["total_with_reer"].sum()), 2)
-levy_1pct = round(total_with_reer_all * 0.01, 2)
 
-# NUEVA LOGICA
+# 1% is calculated only on REER.
+levy_1pct = round(total_reer_all * 0.01, 2)
+
+# PRÉLÈVEMENT TOTAL DÛ = REER + 1% of REER.
 prelevement_total_du = round(total_reer_all + levy_1pct, 2)
 
-# ============================================================
-# METRICS
-# ============================================================
 col1, col2, col3, col4, col5 = st.columns(5)
+
 col1.metric("TOTAL DES GAINS", format_money(total_gains_all))
-col2.metric("TOTAL REER DE TOUS LES EMPLOYÉS", format_money(total_reer_all))
-col3.metric("TOTAL DES GAINS INCLUANT REER", format_money(total_with_reer_all))
-col4.metric("X 1% (EMPLOYEUR ET EMPLOYÉS)", format_money(levy_1pct))
-col5.metric("PRÉLÈVEMENT TOTAL DÛ", format_money(prelevement_total_du))
+col2.metric("TOTAL REER", format_money(total_reer_all))
+col3.metric("1% REER", format_money(levy_1pct))
+col4.metric("TOTAL GAINS + REER", format_money(total_with_reer_all))
+col5.metric("PRÉLÈVEMENT TOTAL DÛ (REER + 1% REER)", format_money(prelevement_total_du))
 
 
 # ============================================================
-# WEEKLY EMPLOYEE SUMMARY
+# EMPLOYEE SUMMARY
 # ============================================================
 st.subheader("Employee summary")
 
 summary_view_cols = [
     "vendor_company",
+    "building_province",
+    "building",
     "employee",
+    "employee_class",
     "week_label",
     "regular_hours",
+    "overtime_hours",
     "suppl_hours",
+    "vacances_hours",
+    "pay_date_vacance",
     "conge_hours",
     "conge_trav_hours",
     "maladie_hours",
-    "maladie_accrued_hours",
-    "vacation_accrued_amount",
+    "total_hours",
+    "hourly_rate",
+    "regular_pay",
+    "overtime_pay",
+    "suppl_pay",
+    "vacances_pay",
+    "conge_pay",
+    "conge_trav_pay",
+    "maladie_pay",
     "total_pay",
     "reer",
     "total_with_reer",
 ]
-summary_view_cols = [c for c in summary_view_cols if c in weekly_summary.columns]
 
-display_df = weekly_summary.copy()
-
-# Limitar horas regulares a 40 SOLO PARA MOSTRAR
-display_df["regular_hours"] = display_df["regular_hours"].clip(upper=40)
-
-dataframe_with_2_decimals(display_df[summary_view_cols])
+dataframe_with_2_decimals(weekly_summary[[c for c in summary_view_cols if c in weekly_summary.columns]])
 
 
 # ============================================================
-# PREVIEW SOURCE
+# WEEKLY REGULAR PAY SUMMARY
 # ============================================================
+st.subheader("Weekly Regular Pay Summary")
+
+weekly_regular_pay_summary = (
+    weekly_summary
+    .groupby(["employee", "week_label"], dropna=False)
+    .agg(
+        class_a_hours=(
+            "regular_hours",
+            lambda x: weekly_summary.loc[x.index, "regular_hours"][
+                weekly_summary.loc[x.index, "employee_class"].apply(normalize_text) == "class a"
+            ].sum()
+        ),
+        class_b_hours=(
+            "regular_hours",
+            lambda x: weekly_summary.loc[x.index, "regular_hours"][
+                weekly_summary.loc[x.index, "employee_class"].apply(normalize_text) == "class b"
+            ].sum()
+        ),
+        class_c_hours=(
+            "regular_hours",
+            lambda x: weekly_summary.loc[x.index, "regular_hours"][
+                weekly_summary.loc[x.index, "employee_class"].apply(normalize_text) == "class c"
+            ].sum()
+        ),
+        regular_hours=("regular_hours", "sum"),
+        suppl_hours=("suppl_hours", "sum"),
+        vacances_hours=("vacances_hours", "sum"),
+        pay_date_vacance=("pay_date_vacance", "first"),
+        conge_hours=("conge_hours", "sum"),
+        conge_trav_hours=("conge_trav_hours", "sum"),
+        maladie_hours=("maladie_hours", "sum"),
+        total_hours=("total_hours", "sum"),
+        regular_pay=("regular_pay", "sum"),
+        vacances_pay=("vacances_pay", "sum"),
+        total_pay=("total_pay", "sum"),
+        reer=("reer", "sum"),
+        total_with_reer=("total_with_reer", "sum"),
+    )
+    .reset_index()
+    .sort_values(["employee", "week_label"])
+)
+
+numeric_cols = weekly_regular_pay_summary.select_dtypes(include=["number"]).columns
+weekly_regular_pay_summary[numeric_cols] = weekly_regular_pay_summary[numeric_cols].round(2)
+
+dataframe_with_2_decimals(weekly_regular_pay_summary)
+
+
+# ============================================================
+# SOURCE PREVIEW
+# ============================================================
+st.subheader("Filtered source data")
+
 preview_cols = [
     "source_month_folder",
     "source_file",
+    "excel_week_range",
+    "excel_week_start",
+    "excel_week_end",
+    "special_lookup_date",
     "date",
-    "employee",
-    "province",
+    "day",
     "vendor_company",
+    "building_province",
+    "building",
+    "employee",
+    "employee_class",
     "type_of_work",
+    "excel_cell_value",
+    "regular_numeric_values",
+    "visible_special_detected",
+    "input_v_hours",
+    "input_h_hours",
+    "input_sd_hours",
+    "special_hours_total",
     "hours",
+    "regular_hours",
+    "suppl_hours",
+    "vacances_hours",
+    "conge_hours",
+    "conge_trav_hours",
+    "maladie_hours",
     "hourly_rate",
-    "applicable_class_a_rate",
-    "suppl_raw",
-    "conge_raw",
-    "conge_trav_raw",
-    "maladie_raw",
-    "total_pay",
     "week_label",
 ]
-preview_cols = [c for c in preview_cols if c in filtered_df.columns]
 
-st.subheader("Filtered source data")
-dataframe_with_2_decimals(filtered_df[preview_cols])
+dataframe_with_2_decimals(filtered_df[[c for c in preview_cols if c in filtered_df.columns]])
 
 
 # ============================================================
 # EXPORT
 # ============================================================
-report_start_date = filtered_df["week_start"].min() if "week_start" in filtered_df.columns else DEFAULT_COMMITTEE_WEEK_START
-report_file = export_committee_report(weekly_summary, report_start_date)
+report_file = export_regular_hours_report(weekly_summary, start_date)
 
 st.download_button(
-    label="Download Comité Excel Report",
+    label="Download Regular Hours Excel Report",
     data=report_file,
-    file_name="comite_paritaire_report.xlsx",
+    file_name="regular_hours_report.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
@@ -1380,21 +1645,9 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Allowed domain:", ALLOWED_DOMAIN)
     st.write("Signed in as:", signed_in_email)
     st.write("Root folder resolved name:", meta.get("name"))
-    st.write("Selected month folders:", selected_month_names)
     st.write("Selected excel display names:", selected_excel_display_names)
-    st.write("Column mapping used:", col_debug)
-    st.write("Rate change date:", str(RATE_CHANGE_DATE.date()))
-    st.write("Class A before rate change:", CLASS_A_RATE_BEFORE_MAR_4_2026)
-    st.write("Class A from rate change date:", CLASS_A_RATE_FROM_MAR_4_2026)
-    st.write("Maladie factor:", MALADIE_ACCRUAL_FACTOR)
-    st.write("Maladie threshold hours:", MALADIE_THRESHOLD_HOURS)
-    st.write("Vacation accrual rate:", VACATION_ACCRUAL_RATE)
-    st.write("Initial vacation cycle start:", str(INITIAL_VACATION_CYCLE_START.date()))
-    st.write("Initial vacation cycle end:", str(INITIAL_VACATION_CYCLE_END.date()))
-    st.write(
-        "Vendor-specific committee week starts:",
-        {k: str(v.date()) for k, v in VENDOR_WEEK_START_DATES.items()}
-    )
-    st.write("Default committee week start:", str(DEFAULT_COMMITTEE_WEEK_START.date()))
+    st.write("Loader diagnostics:", st.session_state.get("regular_loader_diagnostics", []))
     st.write("Final source columns:", list(filtered_df.columns))
     st.write("Weekly summary columns:", list(weekly_summary.columns))
+    st.write("Special hours rule:", "DATA L:R reads worked hours by class. If DATA L:R has V, IMPUT M(V)=Vacances and Pay date vacance=DATA!C2. If DATA L:R has SD/H, IMPUT N(SD)=Maladie, O(H)=Congé Travaillé. Match by Employee + Class + IMPUT L week range.")
+    st.write("Suppl. rule:", "Over 40 regular worked hours per employee/week becomes Suppl.; Overtime is not used. Suppl. is assigned to Class A when available and paid at Class A rate x 1.5.")
