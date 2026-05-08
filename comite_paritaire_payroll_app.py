@@ -76,18 +76,10 @@ ROW_ORDER = [
 # 13037622 Canada Inc: week starts 2025-12-29 and ends 2026-01-04
 DEFAULT_COMMITTEE_WEEK_START = pd.Timestamp("2026-01-04")
 
-# IMPORTANT:
-# We match by company number first because the Vendor Company field may appear as:
-# "12433087", "12433087 Canada Inc", "12433087 CANADA INC-MASTER", etc.
-#
-# Rules requested:
-# - Vendor Company 12433087 starts the committee week on 2026-01-04
-# - Vendor Company 13037622 starts the committee week on 2025-12-29 and that first week ends on 2026-01-04
-# - Vendor Company 10696480 starts the committee week on 2026-01-05
 VENDOR_WEEK_START_DATES = {
-    "12433087": pd.Timestamp("2026-01-04"),
-    "13037622": pd.Timestamp("2025-12-29"),
-    "10696480": pd.Timestamp("2026-01-05"),
+    "12433087 canada inc": pd.Timestamp("2026-01-04"),
+    "10696480 canada ltd": pd.Timestamp("2026-01-05"),
+    "13037622 canada inc": pd.Timestamp("2025-12-29"),
 }
 
 
@@ -107,14 +99,7 @@ def normalize_text(s: str) -> str:
 def get_committee_week_start_for_vendor(vendor_company: str) -> pd.Timestamp:
     """
     Returns the first committee week start date based on Vendor Company.
-
-    Vendor rules:
-    - 12433087 => first week starts 2026-01-04
-    - 13037622 => first week starts 2025-12-29 and ends 2026-01-04
-    - 10696480 => first week starts 2026-01-05
-
-    If the vendor name does not match one of the company numbers,
-    the default is 2026-01-04.
+    If the vendor name does not match the predefined companies, the default is 2026-01-04.
     """
     vendor_norm = normalize_text(vendor_company)
 
@@ -971,9 +956,7 @@ def export_committee_report(weekly_df: pd.DataFrame, start_date_value) -> BytesI
                 })
 
             levy = round(grand_total_with_reer * 0.01, 2)
-            # Same logic as the dashboard metric:
-            # PRÉLÈVEMENT TOTAL DÛ = REER + 1% of total gains including REER
-            prelevement_total_du_vendor = round(grand_total_reer + levy, 2)
+            prelevement_total_du_vendor = round(grand_total_with_reer + levy, 2)
 
             top_col = 13
             ws.write(0, top_col, "TOTAL DES GAINS", header_fmt)
@@ -1250,9 +1233,9 @@ selected_types = st.sidebar.multiselect("Type of work", all_types, default=all_t
 
 st.sidebar.info(
     "Week start is automatic by Vendor Company:\n"
-    "- 12433087: starts 2026-01-04\n"
-    "- 13037622: starts 2025-12-29 and first week ends 2026-01-04\n"
-    "- 10696480: starts 2026-01-05"
+    "- 12433087 Canada Inc: starts 2026-01-04\n"
+    "- 10696480 Canada Ltd: starts 2026-01-05\n"
+    "- 13037622 Canada Inc: starts 2025-12-29"
 )
 num_weeks = st.sidebar.number_input("Number of weeks", min_value=1, max_value=24, value=4)
 
