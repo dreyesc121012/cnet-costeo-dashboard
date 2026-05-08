@@ -68,6 +68,20 @@ ROW_ORDER = [
     ("Banque vacances accumulée", "vacation_accrued_amount"),
 ]
 
+# ============================================================
+# VENDOR-SPECIFIC COMMITTEE WEEK START DATES
+# ============================================================
+# 12433087 Canada Inc: week starts 2026-01-04 and ends 2026-01-10
+# 10696480 Canada Ltd: week starts 2026-01-05 and ends 2026-01-11
+# 13037622 Canada Inc: week starts 2025-12-29 and ends 2026-01-04
+DEFAULT_COMMITTEE_WEEK_START = pd.Timestamp("2026-01-04")
+
+VENDOR_WEEK_START_DATES = {
+    "12433087 canada inc": pd.Timestamp("2026-01-04"),
+    "10696480 canada ltd": pd.Timestamp("2026-01-05"),
+    "13037622 canada inc": pd.Timestamp("2025-12-29"),
+}
+
 
 # ============================================================
 # GENERIC HELPERS
@@ -80,6 +94,20 @@ def normalize_text(s: str) -> str:
     s = s.replace("\u00A0", " ")
     s = " ".join(s.split())
     return s
+
+
+def get_committee_week_start_for_vendor(vendor_company: str) -> pd.Timestamp:
+    """
+    Returns the first committee week start date based on Vendor Company.
+    If the vendor name does not match the predefined companies, the default is 2026-01-04.
+    """
+    vendor_norm = normalize_text(vendor_company)
+
+    for vendor_key, start_date_value in VENDOR_WEEK_START_DATES.items():
+        if vendor_key in vendor_norm:
+            return start_date_value
+
+    return DEFAULT_COMMITTEE_WEEK_START
 
 
 def safe_text_series(s: pd.Series) -> pd.Series:
@@ -1203,8 +1231,12 @@ selected_employees = st.sidebar.multiselect("Name Employee", all_employees, defa
 all_types = sorted([t for t in df["type_of_work"].dropna().unique().tolist() if t])
 selected_types = st.sidebar.multiselect("Type of work", all_types, default=all_types)
 
-default_start = datetime(2026, 1, 4).date()
-start_date = st.sidebar.date_input("First committee week start date", value=default_start)
+st.sidebar.info(
+    "Week start is automatic by Vendor Company:\n"
+    "- 12433087 Canada Inc: starts 2026-01-04\n"
+    "- 10696480 Canada Ltd: starts 2026-01-05\n"
+    "- 13037622 Canada Inc: starts 2025-12-29"
+)
 num_weeks = st.sidebar.number_input("Number of weeks", min_value=1, max_value=24, value=4)
 
 
@@ -1222,10 +1254,15 @@ if selected_employees:
 if selected_types:
     filtered_df = filtered_df[filtered_df["type_of_work"].isin(selected_types)]
 
-start_date_dt = pd.to_datetime(start_date)
-
-filtered_df[["week_start", "week_end"]] = filtered_df["date"].apply(
-    lambda x: pd.Series(assign_committee_week(x, start_date_dt, num_weeks))
+filtered_df[["week_start", "week_end"]] = filtered_df.apply(
+    lambda r: pd.Series(
+        assign_committee_week(
+            r["date"],
+            get_committee_week_start_for_vendor(r["vendor_company"]),
+            num_weeks,
+        )
+    ),
+    axis=1,
 )
 
 filtered_df = filtered_df[filtered_df["week_start"].notna()].copy()
@@ -1324,7 +1361,8 @@ dataframe_with_2_decimals(filtered_df[preview_cols])
 # ============================================================
 # EXPORT
 # ============================================================
-report_file = export_committee_report(weekly_summary, start_date)
+report_start_date = filtered_df["week_start"].min() if "week_start" in filtered_df.columns else DEFAULT_COMMITTEE_WEEK_START
+report_file = export_committee_report(weekly_summary, report_start_date)
 
 st.download_button(
     label="Download Comité Excel Report",
@@ -1353,5 +1391,10 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Vacation accrual rate:", VACATION_ACCRUAL_RATE)
     st.write("Initial vacation cycle start:", str(INITIAL_VACATION_CYCLE_START.date()))
     st.write("Initial vacation cycle end:", str(INITIAL_VACATION_CYCLE_END.date()))
+    st.write(
+        "Vendor-specific committee week starts:",
+        {k: str(v.date()) for k, v in VENDOR_WEEK_START_DATES.items()}
+    )
+    st.write("Default committee week start:", str(DEFAULT_COMMITTEE_WEEK_START.date()))
     st.write("Final source columns:", list(filtered_df.columns))
     st.write("Weekly summary columns:", list(weekly_summary.columns))
