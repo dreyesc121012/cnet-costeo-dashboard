@@ -1482,6 +1482,17 @@ st.sidebar.info(
 )
 num_weeks = st.sidebar.number_input("Number of weeks", min_value=1, max_value=24, value=4)
 
+# ============================================================
+# SELECT SPECIFIC WEEKS
+# ============================================================
+available_week_numbers = list(range(1, int(num_weeks) + 1))
+
+selected_week_numbers = st.sidebar.multiselect(
+    "Select Weeks",
+    available_week_numbers,
+    default=available_week_numbers
+)
+
 filtered_df = df.copy()
 
 if selected_building_provinces:
@@ -1515,6 +1526,14 @@ filtered_df["week_end"] = pd.to_datetime(filtered_df["week_end"], errors="coerce
 
 filtered_df = filtered_df[filtered_df["week_start"].notna()].copy()
 filtered_df["week_label"] = filtered_df["week_end"].dt.strftime("%Y-%m-%d")
+
+filtered_df["committee_week_number"] = (
+    ((filtered_df["week_start"] - filtered_df["week_start"].min()).dt.days // 7) + 1
+)
+if selected_week_numbers:
+    filtered_df = filtered_df[
+        filtered_df["committee_week_number"].isin(selected_week_numbers)
+    ]
 
 if filtered_df.empty:
     st.warning("No data available for the selected filters.")
