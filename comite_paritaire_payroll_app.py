@@ -743,139 +743,121 @@ def load_selected_excel_files_regular(
                 if pd.isna(week_start_from_excel):
                     continue
 
-                # DATA column K has the week range.
-                # Example: 03/01 - 09/01 means:
-                # L = Saturday 03-Jan, M = Sunday 04-Jan, ... R = Friday 09-Jan.
-                # DATA L:R are the daily cells where we read worked hours or codes V / SD / H.
+                                # DATA column K has the week range.
+                # Example: 24/01 - 30/01 means:
+                # L = Saturday 24-Jan
+                # M = Sunday 25-Jan
+                # N = Monday 26-Jan
+                # O = Tuesday 27-Jan
+                # P = Wednesday 28-Jan
+                # Q = Thursday 29-Jan
+                # R = Friday 30-Jan
                 week_lookup_key = week_range_text
-
-                # The committee report starts on Sunday, January 4.
-                # If DATA K starts with Saturday 03-Jan, use Sunday 04-Jan as the report date.
-                report_date = week_start_from_excel + pd.Timedelta(days=1)
 
                 week_values = []
                 for col_idx in range(DAY_COL_START, DAY_COL_END_EXCLUSIVE):
                     cell_value = r.iloc[col_idx] if len(r) > col_idx else ""
                     week_values.append(cell_value)
 
-                week_letters = [clean_text(v).upper() for v in week_values]
+                for offset, cell_value in enumerate(week_values):
+                    day_date = week_start_from_excel + pd.Timedelta(days=offset)
+                    txt = clean_text(cell_value).upper()
 
-                # Robust detection for special codes in DATA columns L:R.
-                # This catches cells like "V", "v", " V ", "V-", "V8", etc.
-                has_v = any("V" in clean_text(v).upper() for v in week_values)
-                has_sd = any("SD" in clean_text(v).upper() for v in week_values)
-                has_h = any("H" in clean_text(v).upper() for v in week_values)
-
-                visible_special_detected = has_v or has_sd or has_h
-
-                # Regular hours come ONLY from numeric values in DATA L:R.
-                # If a DATA cell is V, SD, or H, it is not counted as regular.
-                regular_hours = 0.0
-                regular_numeric_values = []
-
-                for v in week_values:
-                    txt = clean_text(v).upper()
-
-                    if "V" in txt or "SD" in txt or "H" in txt:
+                    if not txt:
                         continue
 
-                    numeric_value = pd.to_numeric(v, errors="coerce")
-                    if pd.notna(numeric_value):
-                        regular_numeric_values.append(float(numeric_value))
-                        regular_hours += float(numeric_value)
+                    regular_hours = 0.0
+                    vacances_hours = 0.0
+                    pay_date_vacance = ""
+                    conge_hours = 0.0
+                    conge_trav_hours = 0.0
+                    maladie_hours = 0.0
+                    suppl_hours = 0.0
 
-                suppl_hours = 0.0
-                vacances_hours = 0.0
-                pay_date_vacance = ""
-                conge_hours = 0.0
-                conge_trav_hours = 0.0
-                maladie_hours = 0.0
+                    input_v_hours = 0.0
+                    input_sd_hours = 0.0
+                    input_h_hours = 0.0
 
-                # INPUT / IMPUT lookup:
-                # Match by Employee + Class + Week Range.
-                # IMPUT L = week range / FECHA.
-                input_v_hours = get_special_hours(
-                    special_hours_lookup,
-                    employee,
-                    employee_class,
-                    week_lookup_key,
-                    "V",
-                )
-                input_sd_hours = get_special_hours(
-                    special_hours_lookup,
-                    employee,
-                    employee_class,
-                    week_lookup_key,
-                    "SD",
-                )
-                input_h_hours = get_special_hours(
-                    special_hours_lookup,
-                    employee,
-                    employee_class,
-                    week_lookup_key,
-                    "H",
-                )
+                    if "V" in txt:
+                        input_v_hours = get_special_hours(
+                            special_hours_lookup,
+                            employee,
+                            employee_class,
+                            week_lookup_key,
+                            "V",
+                        )
+                        vacances_hours = input_v_hours
+                        pay_date_vacance = pay_date_vacance_from_data
 
-                # FINAL RULES:
-                # DATA L:R contains V  -> take IMPUT M hours and put in vacances_hours
-                # DATA L:R contains SD -> take IMPUT N hours and put in maladie_hours
-                # DATA L:R contains H  -> take IMPUT O hours and put in conge_trav_hours
-                if has_v:
-                    vacances_hours += input_v_hours
-                    pay_date_vacance = pay_date_vacance_from_data
+                    elif "SD" in txt:
+                        input_sd_hours = get_special_hours(
+                            special_hours_lookup,
+                            employee,
+                            employee_class,
+                            week_lookup_key,
+                            "SD",
+                        )
+                        maladie_hours = input_sd_hours
 
-                if has_sd:
-                    maladie_hours += input_sd_hours
+                    elif "H" in txt:
+                        input_h_hours = get_special_hours(
+                            special_hours_lookup,
+                            employee,
+                            employee_class,
+                            week_lookup_key,
+                            "H",
+                        )
+                        conge_trav_hours = input_h_hours
 
-                if has_h:
-                    conge_trav_hours += input_h_hours
+                    else:
+                        numeric_value = pd.to_numeric(cell_value, errors="coerce")
+                        if pd.notna(numeric_value):
+                            regular_hours = float(numeric_value)
 
-                special_hours_total = vacances_hours + conge_hours + maladie_hours + conge_trav_hours + suppl_hours
+                    total_hours_for_day = (
+                        regular_hours
+                        + suppl_hours
+                        + vacances_hours
+                        + conge_hours
+                        + conge_trav_hours
+                        + maladie_hours
+                    )
 
-                total_hours_for_week = (
-                    regular_hours
-                    + suppl_hours
-                    + vacances_hours
-                    + conge_hours
-                    + conge_trav_hours
-                    + maladie_hours
-                )
+                    if total_hours_for_day == 0:
+                        continue
 
-                if total_hours_for_week == 0:
-                    continue
-
-                all_rows.append({
-                    "source_month_folder": source_month,
-                    "source_file": file_name,
-                    "excel_week_range": week_range_text,
-                    "excel_week_start": week_start_from_excel,
-                    "excel_week_end": week_end_from_excel,
-                    "special_lookup_date": week_lookup_key,
-                    "date": report_date,
-                    "vendor_company": vendor,
-                    "building_province": building_province,
-                    "building": building,
-                    "employee": employee,
-                    "employee_class": employee_class,
-                    "type_of_work": TYPE_OF_WORK_DEFAULT,
-                    "day": "Week Total",
-                    "excel_cell_value": " | ".join([clean_text(v) for v in week_values if clean_text(v)]),
-                    "regular_numeric_values": " | ".join([str(x) for x in regular_numeric_values]),
-                    "visible_special_detected": visible_special_detected,
-                    "input_v_hours": input_v_hours,
-                    "input_h_hours": input_h_hours,
-                    "input_sd_hours": input_sd_hours,
-                    "special_hours_total": special_hours_total,
-                    "hours": total_hours_for_week,
-                    "hourly_rate": rate,
-                    "regular_hours": regular_hours,
-                    "suppl_hours": suppl_hours,
-                    "vacances_hours": vacances_hours,
-                    "pay_date_vacance": pay_date_vacance,
-                    "conge_hours": conge_hours,
-                    "conge_trav_hours": conge_trav_hours,
-                    "maladie_hours": maladie_hours,
-                })
+                    all_rows.append({
+                        "source_month_folder": source_month,
+                        "source_file": file_name,
+                        "excel_week_range": week_range_text,
+                        "excel_week_start": week_start_from_excel,
+                        "excel_week_end": week_end_from_excel,
+                        "special_lookup_date": week_lookup_key,
+                        "date": day_date,
+                        "vendor_company": vendor,
+                        "building_province": building_province,
+                        "building": building,
+                        "employee": employee,
+                        "employee_class": employee_class,
+                        "type_of_work": TYPE_OF_WORK_DEFAULT,
+                        "day": day_date.strftime("%A"),
+                        "excel_cell_value": txt,
+                        "regular_numeric_values": str(regular_hours) if regular_hours else "",
+                        "visible_special_detected": any(code in txt for code in ["V", "SD", "H"]),
+                        "input_v_hours": input_v_hours,
+                        "input_h_hours": input_h_hours,
+                        "input_sd_hours": input_sd_hours,
+                        "special_hours_total": vacances_hours + conge_hours + maladie_hours + conge_trav_hours + suppl_hours,
+                        "hours": total_hours_for_day,
+                        "hourly_rate": rate,
+                        "regular_hours": regular_hours,
+                        "suppl_hours": suppl_hours,
+                        "vacances_hours": vacances_hours,
+                        "pay_date_vacance": pay_date_vacance,
+                        "conge_hours": conge_hours,
+                        "conge_trav_hours": conge_trav_hours,
+                        "maladie_hours": maladie_hours,
+                    })
 
         except Exception as e:
             st.warning(f"Could not read {file_name}: {e}")
