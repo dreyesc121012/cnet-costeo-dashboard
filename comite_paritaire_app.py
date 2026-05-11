@@ -487,6 +487,20 @@ def assign_committee_week(date_value: pd.Timestamp, start_date: pd.Timestamp, nu
     return None, None
 
 
+def get_committee_week_number(week_start_value, vendor_company: str):
+    """
+    Returns the committee week number for the row/vendor.
+    Example: first committee week = 1, second committee week = 2, etc.
+    """
+    if pd.isna(week_start_value):
+        return None
+
+    vendor_start = get_committee_week_start_for_vendor(vendor_company)
+    week_start_value = pd.to_datetime(week_start_value)
+
+    return int(((week_start_value - vendor_start).days // 7) + 1)
+
+
 def calculate_committee_hours_row(
     row_date,
     hours_value: float,
@@ -672,6 +686,7 @@ def build_weekly_summary(df: pd.DataFrame) -> pd.DataFrame:
     grouped = (
         df.groupby(["vendor_company", "employee", "week_label"], dropna=False)
         .agg(
+            committee_week_number=("committee_week_number", "first"),
             raw_hours_sum=("hours", "sum"),
             suppl_hours_raw=("suppl_raw", "sum"),
             conge_hours_raw=("conge_raw", "sum"),
@@ -1237,7 +1252,13 @@ st.sidebar.info(
     "- 10696480 Canada Ltd: starts 2026-01-05\n"
     "- 13037622 Canada Inc: starts 2025-12-29"
 )
-num_weeks = st.sidebar.number_input("Number of weeks", min_value=1, max_value=24, value=4)
+num_weeks = st.sidebar.number_input(
+    "Number of weeks",
+    min_value=1,
+    max_value=24,
+    value=4,
+    help="This creates the maximum range of committee weeks available for the report. After this, you can select only the specific weeks you want to see."
+)
 
 
 # ============================================================
@@ -1266,11 +1287,46 @@ filtered_df[["week_start", "week_end"]] = filtered_df.apply(
 )
 
 filtered_df = filtered_df[filtered_df["week_start"].notna()].copy()
+
+if filtered_df.empty:
+    st.warning("No data available for the selected filters before week selection.")
+    st.stop()
+
+filtered_df["committee_week_number"] = filtered_df.apply(
+    lambda r: get_committee_week_number(r["week_start"], r["vendor_company"]),
+    axis=1,
+)
+
 filtered_df["week_label"] = filtered_df["week_end"].dt.strftime("%Y-%m-%d")
+filtered_df["week_filter_label"] = filtered_df.apply(
+    lambda r: f"Week {int(r['committee_week_number'])} | {r['week_start'].strftime('%Y-%m-%d')} to {r['week_end'].strftime('%Y-%m-%d')}",
+    axis=1,
+)
+
+# New week selector:
+# - Number of weeks still controls how many committee weeks are generated.
+# - This multiselect lets you show/export only specific weeks, for example Week 5 and Week 6.
+available_week_filter_labels = sorted(
+    filtered_df["week_filter_label"].dropna().unique().tolist(),
+    key=lambda x: int(x.split("|")[0].replace("Week", "").strip())
+)
+
+selected_week_filter_labels = st.sidebar.multiselect(
+    "Select specific week(s)",
+    available_week_filter_labels,
+    default=available_week_filter_labels,
+    help="Leave all selected to show every generated week, or select only specific weeks such as Week 5 and Week 6."
+)
+
+if not selected_week_filter_labels:
+    st.info("Please select at least one week.")
+    st.stop()
+
+filtered_df = filtered_df[filtered_df["week_filter_label"].isin(selected_week_filter_labels)].copy()
 filtered_df["applicable_class_a_rate"] = filtered_df["date"].apply(get_class_a_rate_for_date)
 
 if filtered_df.empty:
-    st.warning("No data available for the selected filters.")
+    st.warning("No data available for the selected weeks.")
     st.stop()
 
 
@@ -1309,6 +1365,7 @@ st.subheader("Employee summary")
 summary_view_cols = [
     "vendor_company",
     "employee",
+    "committee_week_number",
     "week_label",
     "regular_hours",
     "suppl_hours",
@@ -1350,7 +1407,9 @@ preview_cols = [
     "conge_trav_raw",
     "maladie_raw",
     "total_pay",
+    "committee_week_number",
     "week_label",
+    "week_filter_label",
 ]
 preview_cols = [c for c in preview_cols if c in filtered_df.columns]
 
