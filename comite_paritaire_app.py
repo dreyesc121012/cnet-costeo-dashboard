@@ -1365,7 +1365,6 @@ st.subheader("Employee summary")
 summary_view_cols = [
     "vendor_company",
     "employee",
-    "committee_week_number",
     "week_label",
     "regular_hours",
     "suppl_hours",
