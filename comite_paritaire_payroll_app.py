@@ -128,6 +128,22 @@ DAY_MAP = {
     "FR": "Friday", "FRI": "Friday", "FRIDAY": "Friday", "VEN": "Friday", "VENDREDI": "Friday",
 }
 
+# DATA L:R day order used by the payroll Excel template.
+# IMPORTANT: Column K is the source of truth for the week range.
+# Example K = 25/04 - 01/05 means:
+# L = Saturday 25/04, M = Sunday 26/04, N = Monday 27/04,
+# O = Tuesday 28/04, P = Wednesday 29/04, Q = Thursday 30/04, R = Friday 01/05.
+DAY_NAME_TO_OFFSET_FROM_SATURDAY = {
+    "Saturday": 0,
+    "Sunday": 1,
+    "Monday": 2,
+    "Tuesday": 3,
+    "Wednesday": 4,
+    "Thursday": 5,
+    "Friday": 6,
+}
+
+
 # ============================================================
 # HELPERS
 # ============================================================
@@ -145,6 +161,41 @@ def clean_text(x) -> str:
     if pd.isna(x):
         return ""
     return " ".join(str(x).replace("\u00A0", " ").strip().split())
+
+
+def get_day_name_from_excel_header(header_value, fallback_offset: int) -> str:
+    """
+    Returns the day name for a DATA L:R column using the real Excel header in row 4.
+
+    This prevents the report from assuming Monday-first weeks. The template is
+    Saturday-first: L=SAT, M=SUN, N=MON, O=TUE, P=WED, Q=THU, R=FRI.
+    If the header cannot be read, the fallback also follows Saturday-first order.
+    """
+    header_norm = clean_text(header_value).upper().replace(".", "")
+    day_name = DAY_MAP.get(header_norm)
+
+    if day_name:
+        return day_name
+
+    fallback_order = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+    if 0 <= fallback_offset < len(fallback_order):
+        return fallback_order[fallback_offset]
+
+    return ""
+
+
+def get_date_from_week_start_and_day_header(week_start: pd.Timestamp, day_name: str, fallback_offset: int) -> pd.Timestamp:
+    """
+    Calculates the date for each DATA L:R cell.
+
+    The first date in column K is always the Saturday of the Excel week range.
+    Therefore, the day offset must be Saturday=0 ... Friday=6, not Monday=0.
+    """
+    if pd.isna(week_start):
+        return pd.NaT
+
+    offset = DAY_NAME_TO_OFFSET_FROM_SATURDAY.get(day_name, fallback_offset)
+    return pd.Timestamp(week_start).normalize() + pd.Timedelta(days=int(offset))
 
 
 def get_committee_week_start_for_vendor(vendor_company: str) -> pd.Timestamp:
@@ -760,7 +811,16 @@ def load_selected_excel_files_regular(
                     week_values.append(cell_value)
 
                 for offset, cell_value in enumerate(week_values):
-                    day_date = week_start_from_excel + pd.Timedelta(days=offset)
+                    # Use Excel row 4 headers L:R to keep the correct Saturday-first order.
+                    # This fixes cases where the preview/report looked like it was starting on Monday.
+                    # K = 25/04 - 01/05 -> L SAT 25/04, M SUN 26/04, N MON 27/04 ... R FRI 01/05.
+                    excel_day_header = day_headers[offset] if offset < len(day_headers) else ""
+                    excel_day_name = get_day_name_from_excel_header(excel_day_header, offset)
+                    day_date = get_date_from_week_start_and_day_header(
+                        week_start_from_excel,
+                        excel_day_name,
+                        offset,
+                    )
                     txt = clean_text(cell_value).upper()
 
                     if not txt:
@@ -834,13 +894,14 @@ def load_selected_excel_files_regular(
                         "excel_week_end": week_end_from_excel,
                         "special_lookup_date": week_lookup_key,
                         "date": day_date,
+                        "day": excel_day_name if excel_day_name else day_date.strftime("%A"),
+                        "excel_day_header": clean_text(excel_day_header),
                         "vendor_company": vendor,
                         "building_province": building_province,
                         "building": building,
                         "employee": employee,
                         "employee_class": employee_class,
                         "type_of_work": TYPE_OF_WORK_DEFAULT,
-                        "day": day_date.strftime("%A"),
                         "excel_cell_value": txt,
                         "regular_numeric_values": str(regular_hours) if regular_hours else "",
                         "visible_special_detected": any(code in txt for code in ["V", "SD", "H"]),
@@ -1457,6 +1518,8 @@ all_types = sorted([t for t in df["type_of_work"].dropna().unique().tolist() if 
 selected_types = st.sidebar.multiselect("Type of work", all_types, default=all_types)
 
 st.sidebar.info(
+    "The date of each DATA L:R cell is calculated from DATA column K and the real day headers in row 4.\n"
+    "The Excel template is Saturday-first: L=SAT, M=SUN, N=MON, O=TUE, P=WED, Q=THU, R=FRI.\n\n"
     "Committee week start is automatic by Vendor Company:\n"
     "- 12433087: starts 2026-01-04, first week ends 2026-01-10\n"
     "- 13037622: starts 2025-12-29, first week ends 2026-01-04\n"
@@ -1648,6 +1711,7 @@ preview_cols = [
     "special_lookup_date",
     "date",
     "day",
+    "excel_day_header",
     "vendor_company",
     "building_province",
     "building",
