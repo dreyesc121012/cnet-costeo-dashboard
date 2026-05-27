@@ -1118,8 +1118,8 @@ else:
 
     styled_cat = (
         df_cat_show.style
-        .applymap(highlight_variation, subset=["Variation (Budget - Real)"])
-        .applymap(highlight_status, subset=["Status"])
+        .map(highlight_variation, subset=["Variation (Budget - Real)"])
+        .map(highlight_status, subset=["Status"])
     )
 
     st.dataframe(styled_cat, use_container_width=True)
