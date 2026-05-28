@@ -1235,8 +1235,8 @@ else:
     sty = (
         p_show.style
         .format({"Profit/Loss": "${:,.2f}", "Margin %": "{:.1%}"})
-        .applymap(_color_pl, subset=["Profit/Loss"])
-        .applymap(
+        .map(_color_pl, subset=["Profit/Loss"])
+        .map(
             lambda v: "color: red; font-weight: 700;" if float(v) < 0 else "color: green; font-weight: 700;",
             subset=["Margin %"]
         )
