@@ -1525,7 +1525,13 @@ st.sidebar.info(
     "- 13037622: starts 2025-12-29, first week ends 2026-01-04\n"
     "- 10696480: starts 2026-01-05, first week ends 2026-01-11"
 )
-num_weeks = st.sidebar.number_input("Number of weeks", min_value=1, max_value=24, value=4)
+num_weeks = st.sidebar.number_input(
+    "Number of weeks",
+    min_value=1,
+    max_value=104,
+    value=24,
+    step=1,
+)
 
 # ============================================================
 # SELECT SPECIFIC WEEKS
