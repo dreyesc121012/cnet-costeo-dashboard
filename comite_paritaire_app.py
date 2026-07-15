@@ -1255,7 +1255,7 @@ st.sidebar.info(
 num_weeks = st.sidebar.number_input(
     "Number of weeks",
     min_value=1,
-    max_value=24,
+    max_value=100,
     value=4,
     help="This creates the maximum range of committee weeks available for the report. After this, you can select only the specific weeks you want to see."
 )
